@@ -1,3 +1,4 @@
+<<<<<<< Updated upstream
 <!--
 SPDX-FileCopyrightText: 2024 LiveKit, Inc.
 
@@ -359,24 +360,83 @@ To connect and talk to your agent:
 2. Launch a sandbox app called "Web Voice Agent"
 3. Run your agent and make sure all LiveKit API keys are configured correctly
 4. Click the "START CALL" blue button on the sandbox UI to test the connection and talk to your agent
+=======
+# LingLang: Memory-Augmented Conversational Language Tutor
+
+**LingLang** is an open-source conversational AI system designed to help users learn languages (currently Russian and Dutch) through natural, real-time voice interaction. 
+
+It is a modern migration of the research project *"Architecture and Testing of Memory-Augmented Conversational Instructional Agents for Language Learning"* (Will Hermann Thesis), moving from a complex Python/Neo4j architecture to a streamlined **Node.js/TypeScript** stack using **LiveKit Agents** and **SQLite**.
+
+## Core Architecture
+
+The system employs a cost-effective multi-agent architecture:
+
+1.  **Real-Time Conversation Agent (The Tutor):**
+    *   **Stack:** `gpt-4o-realtime-preview` (via LiveKit).
+    *   **Role:** Handles low-latency voice interaction, conversation flow, and immediate corrections.
+    *   **Context:** Dynamically primed with the user's current curriculum and "due for review" words.
+
+2.  **Asynchronous Supervisor (The Analyst):**
+    *   **Stack:** `gpt-4o-mini` (Standard Chat Completion API).
+    *   **Role:** Runs as a background *Tool* triggered by the Tutor. It performs deep morphological analysis of user utterances, identifies grammar errors, and updates the user's learning progress.
+    *   **Benefit:** drastically reduces costs compared to running a second real-time agent while maintaining deep pedagogical intelligence.
+
+3.  **Memory System (SQLite):**
+    *   **Stack:** `better-sqlite3` + `drizzle-orm`.
+    *   **Role:** Replaces Neo4j. Stores:
+        *   **Curriculum:** Units, Lexemes, Grammar Rules.
+        *   **User Progress:** Spaced Repetition System (SRS) status (Leitner system) for every word.
+        *   **Vector Embeddings:** (Planned) For semantic grammar rule matching.
+
+## Getting Started
+
+The core agent logic resides in the `agents` directory.
+
+### Prerequisites
+*   Node.js (v20+)
+*   pnpm
+*   OpenAI API Key
+*   LiveKit Cloud Project (URL, API Key, Secret)
+
+### Installation
+
+1.  Navigate to the agents package:
+    ```bash
+    cd agents
+    pnpm install
+    ```
+
+2.  Set up environment variables:
+    Create a `.env.local` file in `agents/`:
+    ```env
+    LIVEKIT_URL=wss://your-project.livekit.cloud
+    LIVEKIT_API_KEY=your_api_key
+    LIVEKIT_API_SECRET=your_api_secret
+    OPENAI_API_KEY=your_openai_key
+    ```
+
+3.  Initialize the Database:
+    ```bash
+    # Push the schema to the local SQLite file (tutor.db)
+    pnpm drizzle-kit push
+    
+    # Seed the database with Dutch/Russian vocabulary
+    pnpm dlx tsx src/db/seed.ts
+    ```
+
+4.  Run the Agent:
+    ```bash
+    # Start the development worker
+    node --loader ts-node/esm src/tutor.ts dev
+    ```
+
+## Project Structure
+
+*   `agents/src/tutor.ts`: The main entry point for the Real-time Tutor Agent.
+*   `agents/src/tools/supervisor.ts`: The "Supervisor" tool for grammar analysis.
+*   `agents/src/db/`: Database schema, connection logic, and seed scripts.
+*   `agents/src/lib/context.ts`: Helper to fetch dynamic context for the Tutor.
+>>>>>>> Stashed changes
 
 ## License
-
-This project is licensed under `Apache-2.0`, and is [REUSE-3.2](https://reuse.software) compliant.
-Refer to [the license](LICENSES/Apache-2.0.txt) for details.
-
-<!--BEGIN_REPO_NAV-->
-
-<br/><table>
-
-<thead><tr><th colspan="2">LiveKit Ecosystem</th></tr></thead>
-<tbody>
-<tr><td>LiveKit SDKs</td><td><a href="https://github.com/livekit/client-sdk-js">Browser</a> · <a href="https://github.com/livekit/client-sdk-swift">iOS/macOS/visionOS</a> · <a href="https://github.com/livekit/client-sdk-android">Android</a> · <a href="https://github.com/livekit/client-sdk-flutter">Flutter</a> · <a href="https://github.com/livekit/client-sdk-react-native">React Native</a> · <a href="https://github.com/livekit/rust-sdks">Rust</a> · <a href="https://github.com/livekit/node-sdks">Node.js</a> · <a href="https://github.com/livekit/python-sdks">Python</a> · <a href="https://github.com/livekit/client-sdk-unity">Unity</a> · <a href="https://github.com/livekit/client-sdk-unity-web">Unity (WebGL)</a></td></tr><tr></tr>
-<tr><td>Server APIs</td><td><a href="https://github.com/livekit/node-sdks">Node.js</a> · <a href="https://github.com/livekit/server-sdk-go">Golang</a> · <a href="https://github.com/livekit/server-sdk-ruby">Ruby</a> · <a href="https://github.com/livekit/server-sdk-kotlin">Java/Kotlin</a> · <a href="https://github.com/livekit/python-sdks">Python</a> · <a href="https://github.com/livekit/rust-sdks">Rust</a> · <a href="https://github.com/agence104/livekit-server-sdk-php">PHP (community)</a> · <a href="https://github.com/pabloFuente/livekit-server-sdk-dotnet">.NET (community)</a></td></tr><tr></tr>
-<tr><td>UI Components</td><td><a href="https://github.com/livekit/components-js">React</a> · <a href="https://github.com/livekit/components-android">Android Compose</a> · <a href="https://github.com/livekit/components-swift">SwiftUI</a></td></tr><tr></tr>
-<tr><td>Agents Frameworks</td><td><a href="https://github.com/livekit/agents">Python</a> · <b>Node.js</b> · <a href="https://github.com/livekit/agent-playground">Playground</a></td></tr><tr></tr>
-<tr><td>Services</td><td><a href="https://github.com/livekit/livekit">LiveKit server</a> · <a href="https://github.com/livekit/egress">Egress</a> · <a href="https://github.com/livekit/ingress">Ingress</a> · <a href="https://github.com/livekit/sip">SIP</a></td></tr><tr></tr>
-<tr><td>Resources</td><td><a href="https://docs.livekit.io">Docs</a> · <a href="https://github.com/livekit-examples">Example apps</a> · <a href="https://livekit.io/cloud">Cloud</a> · <a href="https://docs.livekit.io/home/self-hosting/deployment">Self-hosting</a> · <a href="https://github.com/livekit/livekit-cli">CLI</a></td></tr>
-</tbody>
-</table>
-<!--END_REPO_NAV-->
+Apache-2.0

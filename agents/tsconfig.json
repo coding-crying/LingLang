@@ -1,16 +1,15 @@
 {
   "extends": "../tsconfig.json",
-
   "compilerOptions": {
     "rootDir": "./src",
     "declarationDir": "dist",
-    "outDir": "dist"
+    "outDir": "dist",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "esModuleInterop": true
   },
-  "typedocOptions": {
-    "name": "agents",
-    "entryPointStrategy": "resolve",
-    "readme": "none",
-    "entryPoints": ["src/index.ts"]
+  "ts-node": {
+    "esm": true
   },
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts"]

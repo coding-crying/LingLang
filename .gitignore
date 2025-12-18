@@ -202,3 +202,10 @@ examples/src/test_*.ts
 # OpenTelemetry trace test output
 .traces/
 *.traces.json
+
+# Local DB
+*.db
+*.sqlite
+
+# Compiled test scripts
+test_*.js
