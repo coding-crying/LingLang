@@ -5,13 +5,16 @@ import { eq, and, asc, desc } from 'drizzle-orm';
 export class ContextManager {
   
   static async getInitialContext(userId: string): Promise<string> {
+    console.log(`[Context] Fetching context for ${userId}...`);
     const currentUnit = await db.query.units.findFirst({
       orderBy: [asc(units.order)],
     });
+    console.log(`[Context] Current unit: ${currentUnit?.title}`);
 
     if (!currentUnit) return "No curriculum found.";
 
     const now = Date.now();
+    console.log(`[Context] Querying reviews...`);
     const dueReviews = await db.query.learningProgress.findMany({
         where: and(
             eq(learningProgress.userId, userId)
@@ -19,17 +22,16 @@ export class ContextManager {
         with: { lexeme: true },
         limit: 5,
     });
+    console.log(`[Context] Found ${dueReviews.length} reviews`);
 
-    const reviewList = dueReviews.map((p: typeof learningProgress.$inferSelect & { lexeme: typeof lexemes.$inferSelect }) => `${p.lexeme.lemma} (${p.lexeme.translation})`).join(', ');
+    const reviewList = dueReviews.map((p: any) => `${p.lexeme.lemma} (${p.lexeme.translation})`).join(', ');
 
-    // 4. Get New Words to Introduce (from current Unit)
-    // Logic: Lexemes in current unit that have NO progress record
-    // This is a bit complex to query efficiently in one go with Drizzle's query builder, 
-    // so we might fetch unit lexemes and filter.
+    console.log(`[Context] Querying new words...`);
     const unitLexemes = await db.query.lexemes.findMany({
         where: eq(lexemes.unitId, currentUnit.id),
         limit: 5,
     });
+    console.log(`[Context] Found ${unitLexemes.length} unit lexemes`);
     
     // Simple filter: words not in dueReviews (rough approximation)
     const newWords = unitLexemes

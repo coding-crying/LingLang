@@ -6,110 +6,96 @@ import * as silero from '@livekit/agents-plugin-silero';
 import { fileURLToPath } from 'node:url';
 import { analyzeConversationTurn } from './tools/supervisor.js';
 import { ContextManager } from './lib/context.js';
-import { db } from './db/index.js';
-import { users } from './db/schema.js';
-import { eq } from 'drizzle-orm';
-
-// --- Custom Tutor Agent ---
-class TutorAgent extends voice.Agent {
-  private userId: string;
-
-  constructor(options: voice.AgentOptions<any> & { userId: string }) {
-    super(options);
-    this.userId = options.userId;
-  }
-}
 
 export default defineAgent({
   prewarm: async (proc: JobProcess) => {
+    console.log('[Tutor] Prewarming VAD...');
     proc.userData.vad = await silero.VAD.load();
+    console.log('[Tutor] VAD prewarmed');
   },
   entry: async (ctx: JobContext) => {
-    // Explicitly connect to the room first
     console.log('[Tutor] Connecting to room...');
     await ctx.connect();
     console.log('[Tutor] Connected to room');
 
-    console.log('[Tutor] Waiting up to 30s for a participant to join...');
+    const participant = await ctx.waitForParticipant();
+    const userId = participant.identity || 'test-user';
+    console.log(`[Tutor] Starting session for user: ${userId}`);
     
-    // Check if a participant is already there
-    let participant: any = Array.from(ctx.room.remoteParticipants.values())[0] || ctx.room.localParticipant;
-
-    if (Array.from(ctx.room.remoteParticipants.values()).length > 0) {
-        console.log(`[Tutor] Found existing participant: ${participant.identity}`);
-    } else {
-        try {
-            const p = await Promise.race([
-                ctx.waitForParticipant(),
-                new Promise<null>((resolve) => setTimeout(() => resolve(null), 30000))
-            ]);
-            if (p) participant = p;
-        } catch (e) {
-            console.warn('[Tutor] Failed to wait for participant:', e);
-        }
+    let initialContext = '';
+    try {
+        initialContext = await ContextManager.getInitialContext(userId);
+    } catch (error) {
+        console.error('[Tutor] Failed to load context from DB:', error);
+        initialContext = "Beginner level.";
     }
-
-    const userId = participant?.identity || 'test-user';
-    console.log(`[Tutor] Participant resolved: ${userId}`);
     
-    console.log(`[Tutor] Initializing for user: ${userId}`);
-    
-    const existingUser = await db.query.users.findFirst({
-      where: eq(users.id, userId)
-    });
-    
-    const initialContext = await ContextManager.getInitialContext(userId);
-    
-    const chatCtx = new llm.ChatContext();
-    chatCtx.addMessage({
-      role: 'system',
-      content: `You are a friendly and encouraging Russian language tutor.
+    const agent = new voice.Agent({
+      instructions: `You are a friendly and encouraging Russian language tutor.
+      
+      # Personality & Style
+      - Speak in a mix of Russian and English. 
+      - Use English for complex explanations, feedback, and translations.
+      - Use Russian for greetings, examples, and practice.
       
       # Learner Context
       ${initialContext}
       
-      # Strategy
-      1. Start the conversation immediately by greeting the user.
-      2. Keep it conversational.
-      3. The system may inject "IMMEDIATE GOALS" occasionally. Follow them subtly.
-      `
-    });
-
-    const vad = ctx.proc.userData.vad! as any;
-
-    const agent = new TutorAgent({
-      userId,
-      chatCtx,
-      vad,
-      // 1. STT: Local Whisper (OpenAI-compatible)
-      stt: new openai.STT({
-        baseUrl: process.env.LOCAL_STT_URL || 'http://localhost:8000/v1',
-        apiKey: 'dummy',
-      }) as any,
-      // 2. LLM: Local Ollama (OpenAI-compatible)
-      llm: new openai.LLM({
-        baseUrl: process.env.LOCAL_LLM_URL || 'http://localhost:11434/v1',
-        model: process.env.LOCAL_LLM_MODEL || 'llama3',
-        apiKey: 'ollama',
-      }) as any,
-      // 3. TTS: Local TTS (OpenAI-compatible)
-      tts: new openai.TTS({
-        baseUrl: process.env.LOCAL_TTS_URL || 'http://localhost:5000/v1',
-        apiKey: 'dummy',
-      }) as any,
+      # Response Style (CRITICAL for low latency)
+      - Speak in VERY SHORT bursts (5-10 words maximum)
+      - One simple thought per response
+      - Natural back-and-forth like texting
+      - Wait for user's reply before continuing
+      `,
       tools: {
         analyzeConversationTurn
       }
     });
 
-    await agent.start(ctx.room);
+    const session = new voice.AgentSession({
+      agent,
+      vad: ctx.proc.userData.vad! as silero.VAD,
+      stt: new openai.STT({
+        baseURL: process.env.LOCAL_STT_URL || 'http://localhost:8000/v1',
+        apiKey: 'dummy',
+        language: '', // Enable auto-detection
+      }),
+      // 2. LLM: Local Ollama
+      llm: new openai.LLM({
+        baseURL: process.env.LOCAL_LLM_URL || 'http://localhost:11434/v1',
+        model: process.env.LOCAL_LLM_MODEL || 'ministral-3:14b',
+        apiKey: 'ollama',
+      }),
+      tts: new openai.TTS({
+        baseURL: process.env.LOCAL_TTS_URL || 'http://localhost:5000/v1',
+        apiKey: 'dummy',
+      }),
+    });
+
+    // --- Exhaustive Logging ---
+    session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev) => console.log(`[Session] AgentState: ${ev.oldState} -> ${ev.state}`));
+    session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => console.log(`[Session] UserState: ${ev.oldState} -> ${ev.state}`));
+    session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (ev) => {
+        if (ev.isFinal) console.log(`[User] Transcription: "${ev.text}"`);
+    });
+    session.on(voice.AgentSessionEventTypes.AgentStartedSpeaking, () => console.log('🔊 Agent speaking started'));
+    session.on(voice.AgentSessionEventTypes.AgentStoppedSpeaking, () => console.log('🔈 Agent speaking stopped'));
+    session.on(voice.AgentSessionEventTypes.SpeechCreated, (ev) => console.log(`[Session] Speech Created: "${ev.text}"`));
+    session.on(voice.AgentSessionEventTypes.Error, (ev) => console.error('[Session] Error:', ev.error));
+    session.on(voice.AgentSessionEventTypes.Close, (ev) => console.log(`[Session] Closed: ${ev.reason}`));
+
+    // Correct way to link participant in 1.0
+    await session.start({
+        room: ctx.room,
+        agent,
+        inputOptions: {
+            participantIdentity: participant.identity
+        }
+    });
     
-    // Standard TTS greeting
-    if (existingUser) {
-      await agent.say(`Welcome back! I'm ready to continue our Russian lessons.`);
-    } else {
-      await agent.say('Привет! (Hello!) I am your Russian tutor. Is this your first time learning Russian?');
-    }
+    console.log('[Tutor] Sending initial greeting...');
+    // Short greeting for fast TTS (1.5s vs 3s)
+    session.say('Привет! Ready to learn?');
   },
 });
 
