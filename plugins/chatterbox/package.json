@@ -1,0 +1,27 @@
+{
+  "name": "@livekit/agents-plugin-chatterbox",
+  "version": "0.1.0",
+  "description": "Chatterbox TTS plugin for LiveKit Agents",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@livekit/agents": "workspace:*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "@types/ws": "^8.5.10"
+  }
+}

@@ -190,6 +190,8 @@ docs
 agents-js.code-workspace
 
 examples/src/test_*.ts
+agents/src/test_*.ts
+agents/src/verification/test_*.ts
 
 # Ignore all markdown files except root README
 *.md
@@ -209,3 +211,26 @@ examples/src/test_*.ts
 
 # Compiled test scripts
 test_*.js
+
+# Local service logs and temp files
+*_service.log
+agent_session.log
+services.log
+
+# Test audio files
+test_*.mp3
+test_*.wav
+check.wav
+
+# External tool patches
+patch_*.py
+
+# OpenAPI schema
+openapi_schema.json
+
+# Local services experimental folder
+local_services/
+
+# package-lock.json (using pnpm)
+package-lock.json
+agents/package-lock.json

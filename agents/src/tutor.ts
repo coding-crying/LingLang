@@ -4,8 +4,8 @@ import { type JobContext, type JobProcess, WorkerOptions, cli, defineAgent, llm,
 import * as openai from '@livekit/agents-plugin-openai';
 import * as silero from '@livekit/agents-plugin-silero';
 import { fileURLToPath } from 'node:url';
-import { analyzeConversationTurn } from './tools/supervisor.js';
-import { ContextManager } from './lib/context.js';
+import { analyzeConversationTurn } from './src/tools/supervisor.js';
+import { ContextManager } from './src/lib/context.js';
 
 export default defineAgent({
   prewarm: async (proc: JobProcess) => {
@@ -32,24 +32,25 @@ export default defineAgent({
     
     const agent = new voice.Agent({
       instructions: `You are a friendly and encouraging Russian language tutor.
-      
+
       # Personality & Style
-      - Speak in a mix of Russian and English. 
+      - Speak in a mix of Russian and English.
       - Use English for complex explanations, feedback, and translations.
       - Use Russian for greetings, examples, and practice.
-      
+      - NEVER use emojis in your responses
+
       # Learner Context
       ${initialContext}
-      
+
       # Response Style (CRITICAL for low latency)
       - Speak in VERY SHORT bursts (5-10 words maximum)
       - One simple thought per response
       - Natural back-and-forth like texting
       - Wait for user's reply before continuing
       `,
-      tools: {
-        analyzeConversationTurn
-      }
+      // tools: {
+      //   analyzeConversationTurn
+      // }
     });
 
     const session = new voice.AgentSession({
@@ -58,7 +59,7 @@ export default defineAgent({
       stt: new openai.STT({
         baseURL: process.env.LOCAL_STT_URL || 'http://localhost:8000/v1',
         apiKey: 'dummy',
-        language: '', // Enable auto-detection
+        language: 'ru', // Force Russian language detection
       }),
       // 2. LLM: Local Ollama
       llm: new openai.LLM({
@@ -67,8 +68,9 @@ export default defineAgent({
         apiKey: 'ollama',
       }),
       tts: new openai.TTS({
-        baseURL: process.env.LOCAL_TTS_URL || 'http://localhost:5000/v1',
+        baseURL: 'http://localhost:8004/v1',
         apiKey: 'dummy',
+        voice: 'Russian.wav',
       }),
     });
 
@@ -76,11 +78,11 @@ export default defineAgent({
     session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev) => console.log(`[Session] AgentState: ${ev.oldState} -> ${ev.state}`));
     session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev) => console.log(`[Session] UserState: ${ev.oldState} -> ${ev.state}`));
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (ev) => {
-        if (ev.isFinal) console.log(`[User] Transcription: "${ev.text}"`);
+        if (ev.isFinal) console.log(`[User] Transcription Event:`, JSON.stringify(ev));
     });
     session.on(voice.AgentSessionEventTypes.AgentStartedSpeaking, () => console.log('🔊 Agent speaking started'));
     session.on(voice.AgentSessionEventTypes.AgentStoppedSpeaking, () => console.log('🔈 Agent speaking stopped'));
-    session.on(voice.AgentSessionEventTypes.SpeechCreated, (ev) => console.log(`[Session] Speech Created: "${ev.text}"`));
+    session.on(voice.AgentSessionEventTypes.SpeechCreated, (ev) => console.log(`[Session] Speech Created Event:`, JSON.stringify(ev)));
     session.on(voice.AgentSessionEventTypes.Error, (ev) => console.error('[Session] Error:', ev.error));
     session.on(voice.AgentSessionEventTypes.Close, (ev) => console.log(`[Session] Closed: ${ev.reason}`));
 
