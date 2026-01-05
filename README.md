@@ -2,6 +2,8 @@
 
 LingLang is a high-performance, memory-augmented conversational AI tutor designed for language learning. It uses a fully local AI stack integrated with **LiveKit Agents** to provide low-latency, natural voice interactions in multiple languages (currently optimized for Russian and English).
 
+**For detailed architecture documentation, agent design, and development roadmap, see [ARCHITECTURE.md](./ARCHITECTURE.md).**
+
 ## 🚀 System Architecture
 
 The project is split into two main parts: the **Local AI Stack** (backend models) and the **LiveKit Agent Worker** (the brain).
@@ -102,6 +104,9 @@ tail -f /home/will/Desktop/LingLang/agents/agent_live.log
 *   **STT Auto-Detection:** The system automatically detects the language you are speaking (Russian or English) without manual switching.
 *   **Low Latency:** Uses PCM streaming and a custom proxy to minimize the "time-to-first-word" for the agent.
 *   **Memory-Augmented:** Uses a local SQLite database (`tutor.db`) via Drizzle ORM to track your progress and manage curriculum goals.
+*   **Spaced Repetition System (SRS):** Tracks vocabulary learning with Leitner-style levels (0-5).
+*   **Goal-Seeking Architecture:** Agent can dynamically adjust learning objectives based on user progress (currently disabled, see ARCHITECTURE.md for roadmap).
+*   **Background Conversation Analysis:** Grammatical analysis tool available but disabled for local testing (see ARCHITECTURE.md for details).
 
 ## 📊 VRAM Management (RTX 3090)
 *   **Ministral 3 14B:** ~10.4 GB
@@ -122,3 +127,33 @@ This usually means the agent worker process died before the WebRTC connection wa
 
 ### LLM Tool Error
 If using a smaller model (like Gemma 3 4B), ensure it supports function calling. If it doesn't, the agent will crash when trying to use the `analyzeConversationTurn` tool. `Ministral 3 14B` is the recommended model for full tool support.
+
+---
+
+## 📚 Development & Architecture
+
+- **[ARCHITECTURE.md](./ARCHITECTURE.md)** - Complete system architecture, agent design, database schema, and development roadmap
+- **[CONTRIBUTING.md](./CONTRIBUTING.md)** - Contribution guidelines
+- **Database Schema:** See `agents/src/db/schema.ts` for the full schema
+- **Agent Hooks:** See `agents/src/voice/agent.ts` for extensibility points (`onEnter`, `onExit`, `onUserTurnCompleted`)
+- **Tool System:** See `agents/src/llm/tool_context.ts` for tool definitions and handoff mechanisms
+
+---
+
+## 🚧 Known Issues & Roadmap
+
+**Current Limitations:**
+1. **Language Configuration:** Russian is hardcoded in multiple places (STT, TTS, instructions). Generalization in progress.
+2. **Disabled Features:**
+   - Background conversation analysis (tool exists but commented out)
+   - Goal-seeking agent (logic exists but not integrated)
+3. **Conversation Flow:** Prompt engineering needs improvement for better pedagogical effectiveness.
+
+**Roadmap:**
+- Phase 1: Multi-language support with dynamic configuration
+- Phase 2: Enable background agents (analysis + goal-seeking)
+- Phase 3: Conversation flow redesign with better pedagogy
+- Phase 4: LangSmith integration for debugging and analytics
+- Phase 5: Multi-agent coordination (analysis agent, goal agent, remediation agent)
+
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed action plan.

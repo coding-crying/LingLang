@@ -17,15 +17,16 @@ STT_DIR = HOME / "Desktop/faster-whisper-stt"
 TTS_DIR = HOME / "Desktop/Lingo/Chatterbox-TTS-Server"
 
 STT_LAUNCH = STT_DIR / "launch_stt.sh"
-TTS_LAUNCH = TTS_DIR / "launch_tts.sh"
 
 STT_PORT = 8000
-TTS_PORT = 8004
+TTS_PORT = 8005
 LLM_PORT = 11434
 
 STT_HEALTH = f"http://localhost:{STT_PORT}/docs"
 TTS_HEALTH = f"http://localhost:{TTS_PORT}/docs"
 LLM_HEALTH = f"http://localhost:{LLM_PORT}"
+
+FATTERBOX_CONTAINER = "fatterbox-tts"
 
 # --- Process Management ---
 processes = []
@@ -33,6 +34,11 @@ processes = []
 def cleanup(signum=None, frame=None):
     """Clean shutdown of all services"""
     print("\n🛑 Stopping services...")
+    
+    # Stop Docker container
+    print(f"   Stopping {FATTERBOX_CONTAINER}...")
+    subprocess.run(["docker", "stop", FATTERBOX_CONTAINER], stderr=subprocess.DEVNULL)
+
     for name, proc in processes:
         if proc.poll() is None:
             print(f"   Terminating {name}...")
@@ -90,7 +96,38 @@ def start_service(name, launch_script, log_file):
             preexec_fn=os.setsid  # New process group for clean shutdown
         )
 
+    # Wait a bit to see if it immediately fails
+    time.sleep(2)
+    # Note: We don't check poll() here because some scripts (like STT) might spawn and exit.
+    # The health check later will confirm if it worked.
+
     print(f"   Started {name} (PID: {proc.pid})")
+    print(f"   Logs: {log_file}")
+    return proc
+
+def start_fatterbox(log_file):
+    """Start Fatterbox Docker container and stream logs"""
+    print(f"\n🚀 Starting Fatterbox (Docker: {FATTERBOX_CONTAINER})...")
+
+    # Ensure container is started
+    try:
+        subprocess.run(["docker", "start", FATTERBOX_CONTAINER], check=True, stdout=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        print(f"   ❌ Failed to start docker container: {FATTERBOX_CONTAINER}")
+        return None
+
+    # Follow logs
+    log_path = Path(log_file)
+    with open(log_path, 'w') as log:
+        # We start 'docker logs -f' as the background process to track
+        proc = subprocess.Popen(
+            ["docker", "logs", "-f", FATTERBOX_CONTAINER],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            preexec_fn=os.setsid
+        )
+    
+    print(f"   Started Fatterbox (Container Running)")
     print(f"   Logs: {log_file}")
     return proc
 
@@ -117,14 +154,10 @@ def main():
     if stt_proc:
         processes.append(("STT", stt_proc))
 
-    # Start TTS
-    tts_proc = start_service(
-        "TTS (Chatterbox)",
-        TTS_LAUNCH,
-        "tts_service.log"
-    )
+    # Start TTS (Fatterbox)
+    tts_proc = start_fatterbox("tts_service.log")
     if tts_proc:
-        processes.append(("TTS", tts_proc))
+        processes.append(("TTS (Log Stream)", tts_proc))
 
     # Wait for health checks
     print("\n🏥 Running health checks...")
@@ -152,8 +185,12 @@ def main():
                 # Check if processes died
                 for name, proc in processes:
                     if proc.poll() is not None:
-                        print(f"\n⚠️  {name} exited unexpectedly!")
-                        cleanup()
+                        # Process exited. Check if service is still running (daemonized?)
+                        url = STT_HEALTH if "STT" in name else TTS_HEALTH
+                        if not check_service(url):
+                            print(f"\n⚠️  {name} exited unexpectedly and service is down!")
+                            cleanup()
+                        # If service is still up, just ignore the process exit (it likely forked)
         except KeyboardInterrupt:
             cleanup()
     else:
