@@ -43,57 +43,12 @@ import { runSupervisor } from './tools/supervisor-functions.js';
 import { ContextManager, PlaceholderGoals } from './lib/context.js';
 import { getLanguageConfig } from './config/languages.js';
 import { buildInstructions } from './config/prompts/base.js';
+import { LingLangMemory } from './lib/langchain-memory.js';
 // import { CosyVoiceTTS } from './tts/cosyvoice.js';  // Switched to Chatterbox
 import { ChatterboxTTS } from './tts/chatterbox.js';
 import { db } from './db/index.js';
 import { users } from './db/schema.js';
 import { eq } from 'drizzle-orm';
-
-// ============================================================================
-// CONVERSATION HISTORY (for context)
-// ============================================================================
-
-interface ConversationTurn {
-  role: 'user' | 'assistant';
-  content: string;
-  timestamp: number;
-}
-
-class ConversationHistory {
-  private turns: ConversationTurn[] = [];
-  private maxTurns = 10;
-
-  addUserTurn(content: string) {
-    this.turns.push({ role: 'user', content, timestamp: Date.now() });
-    this.trim();
-  }
-
-  addAssistantTurn(content: string) {
-    this.turns.push({ role: 'assistant', content, timestamp: Date.now() });
-    this.trim();
-  }
-
-  private trim() {
-    if (this.turns.length > this.maxTurns) {
-      this.turns = this.turns.slice(-this.maxTurns);
-    }
-  }
-
-  getContext(): string {
-    return this.turns
-      .map(t => `${t.role === 'user' ? 'User' : 'Tutor'}: ${t.content}`)
-      .join('\n');
-  }
-
-  getLastUserTurn(): string | null {
-    for (let i = this.turns.length - 1; i >= 0; i--) {
-      if (this.turns[i].role === 'user') {
-        return this.turns[i].content;
-      }
-    }
-    return null;
-  }
-}
 
 // ============================================================================
 // AGENT DEFINITION
@@ -198,7 +153,7 @@ export default defineAgent({
     });
 
     // === CONVERSATION TRACKING ===
-    const history = new ConversationHistory();
+    const memory = new LingLangMemory();
     let pendingGoalNote: string | null = null;
 
     // === EVENT HANDLERS ===
@@ -218,7 +173,7 @@ export default defineAgent({
 
       const transcription = ev.transcript || ev.text || '';
       console.log(`[User] ${transcription}`);
-      history.addUserTurn(transcription);
+      await memory.addUserTurn(transcription);
 
       turnCounter++;
 
@@ -228,15 +183,26 @@ export default defineAgent({
       if (shouldRunProcessor || goalNeedsCheck) {
         // Queue the analysis - we'll run it after agent stops speaking
         // This avoids GPU competition between conversation LLM and supervisor LLM
+        // Get context asynchronously
+        const context = await memory.getContext();
         pendingAnalysis = {
           transcription,
-          context: history.getContext(),
+          context,
         };
         console.log(`[Supervisor] Analysis queued (turn ${turnCounter}, processor: ${shouldRunProcessor}, goal: ${goalNeedsCheck})`);
       } else {
         console.log(`[Supervisor] Skipping analysis (turn ${turnCounter}/${PROCESSOR_INTERVAL})`);
       }
     });
+
+    // TODO: Track agent responses to complete conversation turns
+    // For now, memory only tracks user turns (same as original ConversationHistory)
+    // Future: Hook into ConversationItemAdded event to capture assistant responses
+    // session.on(voice.AgentSessionEventTypes.ConversationItemAdded, async (ev: any) => {
+    //   if (ev.item.role === 'assistant' && ev.item.content) {
+    //     await memory.addAssistantTurn(ev.item.content);
+    //   }
+    // });
 
     // Watch agent state changes - run supervisor when agent finishes speaking
     session.on(voice.AgentSessionEventTypes.AgentStateChanged, async (ev: any) => {
