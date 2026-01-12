@@ -283,12 +283,13 @@ export default defineAgent({
                   const match = goalUpdate.match(/successfully used "([^"]+)"/);
                   const word = match ? match[1] : '';
 
-                  // Inject praise into conversation
-                  setTimeout(() => {
-                    if (word) {
-                      session.say(`Отлично! Great job using "${word}"!`);
-                    }
-                  }, 500); // Small delay to feel natural
+                  // Don't inject extra responses - let the LLM handle praise naturally
+                  // Injecting here causes multiple responses per turn
+                  // setTimeout(() => {
+                  //   if (word) {
+                  //     session.say(`Отлично! Great job using "${word}"!`);
+                  //   }
+                  // }, 500);
 
                   // Goal completed - need to check for new goal
                   goalNeedsCheck = true;
