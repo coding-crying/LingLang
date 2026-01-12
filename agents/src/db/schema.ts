@@ -59,6 +59,11 @@ export const grammarRulesRelations = relations(grammarRules, ({ one }) => ({
 export const users = sqliteTable('users', {
   id: text('id').primaryKey(),
   createdAt: integer('created_at').notNull(),
+
+  // Language preferences
+  targetLanguage: text('target_language').notNull().default('ru'),
+  nativeLanguage: text('native_language').notNull().default('en'),
+  proficiencyLevel: text('proficiency_level').default('beginner'),
 });
 
 export const usersRelations = relations(users, ({ many }) => ({
@@ -110,6 +115,36 @@ export const activeGoals = sqliteTable('active_goals', {
 export const activeGoalsRelations = relations(activeGoals, ({ one }) => ({
   user: one(users, {
     fields: [activeGoals.userId],
+    references: [users.id],
+  }),
+}));
+
+// --- Duolingo Metadata (For Duolingo Integration) ---
+export const duolingoMetadata = sqliteTable('duolingo_metadata', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  userId: text('user_id').notNull().unique().references(() => users.id),
+
+  // Duolingo credentials
+  duolingoUsername: text('duolingo_username').notNull(),
+  duolingoPassword: text('duolingo_password'),
+  duolingoJWT: text('duolingo_jwt'),
+
+  // Sync tracking
+  lastSyncTimestamp: integer('last_sync_timestamp'),
+  syncStatus: text('sync_status').default('pending'), // 'pending', 'success', 'failed'
+  syncError: text('sync_error'),
+
+  // Duolingo-specific IDs
+  duolingoUserId: text('duolingo_user_id'),
+  learningLanguage: text('learning_language').notNull(), // 'ru', 'es', etc.
+
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+});
+
+export const duolingoMetadataRelations = relations(duolingoMetadata, ({ one }) => ({
+  user: one(users, {
+    fields: [duolingoMetadata.userId],
     references: [users.id],
   }),
 }));

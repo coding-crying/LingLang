@@ -13,7 +13,7 @@ Your role is to extract detailed grammatical information for building an intelli
 # Output Format
 Return ONLY a JSON object with this structure:
 {
-  "language": "ru",
+  "language": "auto-detected ISO code (ru, es, fr, etc.)",
   "lexemes": [
     {
       "lemma": "string (root form)",
@@ -55,16 +55,42 @@ export const analyzeConversationTurn = llm.tool({
     const analysis = JSON.parse(cleanedText || "{}");
     console.log("[Supervisor] Analysis result:", JSON.stringify(analysis, null, 2));
 
+    // Validate detected language matches user's target language
+    const user = await db.query.users.findFirst({
+      where: eq(users.id, userId)
+    });
+
+    if (user && analysis.language && analysis.language !== user.targetLanguage) {
+      console.warn(
+        `[Supervisor] Language mismatch! User learning ${user.targetLanguage}, ` +
+        `but spoke ${analysis.language}`
+      );
+    }
+
     // 2. Update SQLite DB
     await db.insert(users).values({ id: userId, createdAt: Date.now() }).onConflictDoNothing();
 
     if (analysis.lexemes) {
         for (const item of analysis.lexemes) {
-            // Try to match with existing vocabulary
-            // In a real app, we'd have a smarter lookup or vector search here
-            const existingLexeme = await db.query.lexemes.findFirst({
-                where: and(eq(lexemes.lemma, item.lemma), eq(lexemes.pos, item.pos))
+            // Match lexeme with correct language filter - try exact POS first
+            let existingLexeme = await db.query.lexemes.findFirst({
+                where: and(
+                    eq(lexemes.lemma, item.lemma),
+                    eq(lexemes.pos, item.pos),
+                    eq(lexemes.language, analysis.language || user?.targetLanguage || 'ru')
+                )
             });
+
+            // Fallback: try GENERAL pos for Duolingo words
+            if (!existingLexeme) {
+                existingLexeme = await db.query.lexemes.findFirst({
+                    where: and(
+                        eq(lexemes.lemma, item.lemma),
+                        eq(lexemes.pos, 'GENERAL'),
+                        eq(lexemes.language, analysis.language || user?.targetLanguage || 'ru')
+                    )
+                });
+            }
 
             if (existingLexeme) {
                 // Update Progress

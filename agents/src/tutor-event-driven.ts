@@ -40,7 +40,7 @@ import * as silero from '@livekit/agents-plugin-silero';
 import { fileURLToPath } from 'node:url';
 
 import { runSupervisor } from './tools/supervisor-functions.js';
-import { ContextManager } from './lib/context.js';
+import { ContextManager, PlaceholderGoals } from './lib/context.js';
 import { getLanguageConfig } from './config/languages.js';
 import { buildInstructions } from './config/prompts/base.js';
 // import { CosyVoiceTTS } from './tts/cosyvoice.js';  // Switched to Chatterbox
@@ -190,8 +190,8 @@ export default defineAgent({
       // Chatterbox with HTTP streaming - generates sentence-by-sentence
       tts: new ChatterboxTTS({
         baseURL: process.env.LOCAL_TTS_URL || 'http://localhost:8004',
-        voice: 'Russian',
-        speed: 1.0,
+        voice: langConfig.tts.voice,
+        speed: langConfig.tts.speed || 1.0,
         chunkSize: 80,  // Smaller chunks for faster first audio
         language_id: langConfig.code,
       }),
@@ -240,7 +240,7 @@ export default defineAgent({
 
     // Watch agent state changes - run supervisor when agent finishes speaking
     session.on(voice.AgentSessionEventTypes.AgentStateChanged, async (ev: any) => {
-      const newState = ev.state;
+      const newState = ev.newState;
       console.log(`[Agent] State: ${lastAgentState} → ${newState}`);
 
       // When agent transitions FROM speaking to idle/listening, GPU is free
@@ -287,7 +287,22 @@ export default defineAgent({
             if (goalNeedsCheck) {
               console.log('[Supervisor] Checking goal status...');
 
-              const goalUpdate = await ContextManager.getDynamicGoal(userId);
+              // TESTING: Use placeholder goals instead of database
+              const USE_PLACEHOLDER_GOALS = process.env.USE_PLACEHOLDER_GOALS === 'true';
+
+              let goalUpdate: string | null = null;
+
+              if (USE_PLACEHOLDER_GOALS) {
+                // Simple rotation every 5 turns
+                if (turnCounter % 5 === 0) {
+                  goalUpdate = PlaceholderGoals.getNextGoal();
+                  console.log('[Supervisor] (PLACEHOLDER) New goal:', goalUpdate);
+                }
+              } else {
+                // Use real database-backed goals
+                goalUpdate = await ContextManager.getDynamicGoal(userId);
+              }
+
               goalNeedsCheck = false; // Reset flag
 
               if (goalUpdate) {

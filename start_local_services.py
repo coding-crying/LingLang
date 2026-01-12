@@ -11,6 +11,16 @@ import sys
 import signal
 from pathlib import Path
 
+# Load environment from .env.local if it exists
+ENV_FILE = Path(__file__).parent / "agents" / ".env.local"
+if ENV_FILE.exists():
+    with open(ENV_FILE) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                os.environ.setdefault(key.strip(), value.strip())
+
 # --- Configuration ---
 HOME = Path.home()
 STT_DIR = HOME / "Desktop/faster-whisper-stt"
@@ -27,6 +37,7 @@ TTS_HEALTH = f"http://localhost:{TTS_PORT}/docs"
 LLM_HEALTH = f"http://localhost:{LLM_PORT}"
 
 FATTERBOX_CONTAINER = "fatterbox-tts"
+FATTERBOX_IMAGE = "whywillwizardry/fatterbox-multilingual:v1.0"
 
 # --- Process Management ---
 processes = []
@@ -107,10 +118,18 @@ def start_service(name, launch_script, log_file):
 
 def start_fatterbox(log_file):
     """Start Fatterbox Docker container and stream logs"""
-    print(f"\n🚀 Starting Fatterbox (Docker: {FATTERBOX_CONTAINER})...")
+    print(f"\n🚀 Starting Fatterbox (Image: {FATTERBOX_IMAGE})...")
 
-    # Ensure container is started
+    # Check if container exists, if not, we would need a 'docker run' command.
+    # For now, we assume the container exists but use the image name in logs for clarity.
     try:
+        # Check if container exists
+        result = subprocess.run(["docker", "ps", "-a", "--filter", f"name={FATTERBOX_CONTAINER}", "--format", "{{.Names}}"], capture_output=True, text=True)
+        
+        if FATTERBOX_CONTAINER not in result.stdout:
+            print(f"   ⚠️  Container {FATTERBOX_CONTAINER} not found. You may need to run it first with your specific mounts.")
+            return None
+
         subprocess.run(["docker", "start", FATTERBOX_CONTAINER], check=True, stdout=subprocess.DEVNULL)
     except subprocess.CalledProcessError:
         print(f"   ❌ Failed to start docker container: {FATTERBOX_CONTAINER}")
@@ -119,7 +138,6 @@ def start_fatterbox(log_file):
     # Follow logs
     log_path = Path(log_file)
     with open(log_path, 'w') as log:
-        # We start 'docker logs -f' as the background process to track
         proc = subprocess.Popen(
             ["docker", "logs", "-f", FATTERBOX_CONTAINER],
             stdout=log,
@@ -164,6 +182,34 @@ def main():
     stt_ok = wait_for_service("STT", STT_HEALTH, max_wait=30)
     tts_ok = wait_for_service("TTS", TTS_HEALTH, max_wait=30)
 
+    # Pre-warm LLM model
+    llm_ok = True
+    if check_service(LLM_HEALTH):
+        llm_model = os.getenv("LOCAL_LLM_MODEL", "ministral-3:14b")
+        print(f"\n🔥 Pre-warming LLM model: {llm_model}...")
+        try:
+            response = requests.post(
+                f"http://localhost:{LLM_PORT}/api/generate",
+                json={
+                    "model": llm_model,
+                    "prompt": "Ready",
+                    "stream": False,
+                    "keep_alive": "60m"  # Keep model loaded for 60 minutes
+                },
+                timeout=60
+            )
+            if response.status_code == 200:
+                print(f"   ✅ {llm_model} loaded and warmed!")
+            else:
+                print(f"   ⚠️  LLM pre-warm returned status {response.status_code}")
+                llm_ok = False
+        except requests.exceptions.Timeout:
+            print(f"   ⚠️  LLM pre-warm timed out (model may be large)")
+            llm_ok = False
+        except Exception as e:
+            print(f"   ⚠️  LLM pre-warm failed: {e}")
+            llm_ok = False
+
     # Summary
     print("\n" + "=" * 60)
     if stt_ok and tts_ok:
@@ -172,6 +218,8 @@ def main():
         print(f"   STT:  http://localhost:{STT_PORT}")
         print(f"   TTS:  http://localhost:{TTS_PORT}")
         print(f"   LLM:  http://localhost:{LLM_PORT}")
+        if llm_ok:
+            print(f"        Model: {os.getenv('LOCAL_LLM_MODEL', 'ministral-3:14b')} (preloaded)")
         print("\nLogs:")
         print(f"   STT: {Path('stt_service.log').absolute()}")
         print(f"   TTS: {Path('tts_service.log').absolute()}")

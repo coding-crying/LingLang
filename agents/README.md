@@ -8,19 +8,19 @@ This implementation uses the **LiveKit Agents Framework** to orchestrate a voice
 
 ### Key Components
 
-*   **`tutor.ts`**: The main agent definition.
-    *   It initializes the `VoicePipelineAgent` using `gpt-4o-realtime-preview`.
-    *   It loads a `ContextManager` to inject user-specific goals (e.g., "Review these 3 words") into the system prompt.
-    *   It defines the `analyzeConversationTurn` tool.
+*   **`tutor-event-driven.ts`**: The main agent definition (Optimized).
+    *   It initializes the `VoicePipelineAgent` using a local LLM (Ollama).
+    *   It uses an **Event-Driven Architecture**:
+        *   **Processor**: Runs every 5 turns to analyze grammar and update SRS (without blocking conversation).
+        *   **Supervisor**: Checks for goal completion and injects new topics dynamically.
 
-*   **`tools/supervisor.ts`**: The pedagogical intelligence.
-    *   Defined as a standard function-calling tool.
-    *   When the Tutor invokes this tool (e.g., after a user sentence), it makes a *separate, cheap* call to `gpt-4o-mini`.
-    *   This "Supervisor" LLM analyzes the grammar and returns structured feedback (JSON).
-    *   The tool then updates the **SQLite** database with the user's performance (SRS updates).
+*   **`tools/supervisor-functions.ts`**: The pedagogical intelligence.
+    *   Directly called by the Processor loop.
+    *   Analyzes transcripts using a small, fast local LLM (Phi/Gemma).
+    *   Updates the **SQLite** database (`tutor.db`) with SRS progress.
 
 *   **`db/`**: The Persistence Layer.
-    *   **Schema**: `users`, `units`, `lexemes`, `learning_progress`, `grammar_rules`.
+    *   **Schema**: `users`, `units`, `lexemes`, `learning_progress`, `grammar_rules`, `duolingo_metadata`.
     *   **ORM**: Drizzle ORM over `better-sqlite3`.
     *   **File**: `tutor.db` (created in the root of this package).
 
@@ -31,31 +31,39 @@ This implementation uses the **LiveKit Agents Framework** to orchestrate a voice
 pnpm install
 ```
 
-### 2. Database Migration
-The SQLite database is local. You must initialize it before running the agent.
+### 2. Database Initialization (Duolingo Sync)
+The SQLite database is local. Instead of generic seeding, we sync your actual Duolingo progress.
 
 ```bash
-# Apply Schema
-pnpm drizzle-kit push
-
-# Seed Data (Curriculum)
-pnpm dlx tsx src/db/seed.ts
+# Sync Vocabulary & Skills (requires JWT)
+npx tsx src/scripts/sync-duolingo.ts <your_user_id> --jwt <token> --username <duo_username> --lang ru
 ```
 
-### 3. Development
-Start the agent in development mode. It will connect to your LiveKit project and wait for a user to join a room.
+### 3. Configuration
+Copy `.env.example` to `.env.local` and configure your ports:
+```env
+LOCAL_STT_URL=http://localhost:8000/v1
+LOCAL_TTS_URL=http://localhost:8005
+DEFAULT_TARGET_LANGUAGE=ru
+```
+
+### 4. Running the Agent
+Start the event-driven tutor agent. It will connect to your LiveKit project.
 
 ```bash
-# Ensure you have your .env variables set!
-node --loader ts-node/esm src/tutor.ts dev
+# Using the helper script (Recommended)
+../start_agent.sh
+
+# Manual launch
+pnpm dev:tutor-ed
 ```
 
-### 4. Testing
+### 5. Testing
 You can use the [LiveKit Agents Playground](https://agents-playground.livekit.io/) to test your agent.
-1.  Start the agent locally (`... src/tutor.ts dev`).
+1.  Start the agent locally.
 2.  Go to the Playground.
 3.  Connect to your LiveKit room.
-4.  The agent should join and greet you based on the `seed.ts` data ("Basics & Greetings").
+4.  The agent should greet you in Russian (or your target language).
 
 ## Customizing Content
-To add more languages or units, edit `src/db/seed.ts` and re-run the seed command (it uses `ON CONFLICT DO NOTHING` so it's safe to run multiple times).
+The curriculum is driven by the database. To add custom words or grammar rules, you can manually insert them into the `lexemes` and `grammar_rules` tables in `tutor.db`, or use the Duolingo sync tool to keep it up to date.

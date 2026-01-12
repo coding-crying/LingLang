@@ -3,6 +3,8 @@ import { RUSSIAN_INSTRUCTIONS } from './prompts/russian.js'
 import { SPANISH_INSTRUCTIONS } from './prompts/spanish.js'
 import { FRENCH_INSTRUCTIONS } from './prompts/french.js'
 import { PORTUGUESE_INSTRUCTIONS } from './prompts/portuguese.js'
+import { ARABIC_INSTRUCTIONS } from './prompts/arabic.js'
+import type { PromptVariant } from './prompts/common.js'
 
 export interface LanguageConfig {
   // Metadata
@@ -29,6 +31,7 @@ export interface LanguageConfig {
   prompts: {
     greeting: string
     instructionsTemplate: string
+    variant?: PromptVariant    // Optional: 'immersive' | 'mixed' | 'assisted'
   }
 }
 
@@ -48,12 +51,13 @@ export const LANGUAGES: Record<string, LanguageConfig> = {
     },
 
     pedagogy: {
-      targetLanguageRatio: 1.0,
+      targetLanguageRatio: 0.8,  // 80% Russian, 20% English for explanations
     },
 
     prompts: {
-      greeting: 'Привет! Готов учиться?',
+      greeting: 'Привет! Ready to learn?',
       instructionsTemplate: RUSSIAN_INSTRUCTIONS,
+      variant: 'mixed',
     },
   },
 
@@ -78,6 +82,7 @@ export const LANGUAGES: Record<string, LanguageConfig> = {
     prompts: {
       greeting: '¡Hola! Ready to learn?',
       instructionsTemplate: SPANISH_INSTRUCTIONS,
+      variant: 'mixed',
     },
   },
 
@@ -102,20 +107,21 @@ export const LANGUAGES: Record<string, LanguageConfig> = {
     prompts: {
       greeting: 'Bonjour! Ready to learn?',
       instructionsTemplate: FRENCH_INSTRUCTIONS,
+      variant: 'mixed',
     },
   },
 
   pt: {
     code: 'pt',
-    name: 'Portuguese',
-    nativeName: 'Português',
+    name: 'European Portuguese',
+    nativeName: 'Português Europeu',
 
     stt: {
       language: 'pt',
     },
 
     tts: {
-      voice: 'Portuguese.wav',
+      voice: 'Portuguese',
       speed: 1.0,
     },
 
@@ -126,6 +132,32 @@ export const LANGUAGES: Record<string, LanguageConfig> = {
     prompts: {
       greeting: 'Olá! Ready to learn?',
       instructionsTemplate: PORTUGUESE_INSTRUCTIONS,
+      variant: 'mixed',
+    },
+  },
+
+  ar: {
+    code: 'ar',
+    name: 'Arabic',
+    nativeName: 'العربية',
+
+    stt: {
+      language: 'ar',
+    },
+
+    tts: {
+      voice: 'Alexander',
+      speed: 1.0,
+    },
+
+    pedagogy: {
+      targetLanguageRatio: 0.7,
+    },
+
+    prompts: {
+      greeting: 'أهلاً! Ready to learn?',
+      instructionsTemplate: ARABIC_INSTRUCTIONS,
+      variant: 'assisted',
     },
   },
 }
