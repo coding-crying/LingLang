@@ -153,6 +153,12 @@ export default defineAgent({
         chunkSize: 80,  // Smaller chunks for faster first audio
         language_id: langConfig.code,
       }),
+
+      // Voice options: reduce sensitivity to prevent double-generation on pauses
+      voiceOptions: {
+        minEndpointingDelay: 1.0,  // Wait 1 second of silence before ending turn (default: 0.5)
+        // This prevents VAD from triggering too early when user pauses mid-sentence
+      },
     });
 
     // === CONVERSATION TRACKING ===
