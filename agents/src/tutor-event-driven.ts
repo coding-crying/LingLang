@@ -133,7 +133,9 @@ export default defineAgent({
       stt: new openai.STT({
         baseURL: process.env.LOCAL_STT_URL || 'http://localhost:8000/v1',
         apiKey: 'dummy',
-        language: langConfig.stt.language,
+        // Auto-detect language instead of hardcoding to target language
+        // This allows the user to speak English when needed
+        // language: langConfig.stt.language,
       }),
 
       llm: new openai.LLM({

@@ -152,13 +152,30 @@ export async function analyzeUtteranceWithLocalLLM(
 
     // Clean up common JSON formatting issues from LLMs
     let cleanJson = jsonMatch[0]
-      .replace(/,(\s*[}\]])/g, '$1')  // Remove trailing commas
-      .replace(/([{,]\s*)(\w+):/g, '$1"$2":')  // Quote unquoted keys
-      .replace(/:\s*'([^']*)'/g, ': "$1"');  // Replace single quotes with double
+      // Remove comments
+      .replace(/\/\/.*$/gm, '')                    // Remove // comments
+      .replace(/\/\*[\s\S]*?\*\//g, '')           // Remove /* */ comments
+      // Fix trailing commas
+      .replace(/,(\s*[}\]])/g, '$1')              // Remove trailing commas
+      // Quote unquoted keys (but not inside strings)
+      .replace(/([{,]\s*)(\w+)(\s*):/g, '$1"$2"$3:')  // Quote keys
+      // Fix quotes
+      .replace(/:\s*'([^']*)'/g, ': "$1"')        // Replace single quotes with double
+      // Remove extra whitespace
+      .replace(/\s+/g, ' ')                       // Normalize whitespace
+      .trim();
 
-    const analysis = JSON.parse(cleanJson) as UtteranceAnalysis;
+    let analysis: UtteranceAnalysis;
+    try {
+      analysis = JSON.parse(cleanJson) as UtteranceAnalysis;
+    } catch (parseErr) {
+      // Log the actual malformed JSON for debugging
+      console.error('[Supervisor] Malformed JSON:', cleanJson.substring(0, 500));
+      console.error('[Supervisor] Parse error:', parseErr);
+      return null;
+    }
+
     console.log(`[Supervisor] Extracted ${analysis.lexemes?.length || 0} lexemes`);
-
     return analysis;
 
   } catch (err) {
