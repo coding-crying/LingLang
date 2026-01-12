@@ -119,9 +119,9 @@ class ChatterboxChunkedStream extends tts.ChunkedStream {
 
           // Apply peak limiting to prevent audio clipping
           // This keeps CUDA graphs for speed while preventing pops/peaks
-          buffer = this.limitAudioPeaks(buffer);
+          buffer = this.limitAudioPeaks(buffer) as any;
 
-          for (const frame of bstream.write(buffer)) {
+          for (const frame of bstream.write(buffer as any)) {
             this.queue.put({
               requestId,
               frame,
@@ -168,7 +168,7 @@ class ChatterboxChunkedStream extends tts.ChunkedStream {
   private limitAudioPeaks(buffer: Buffer): Buffer {
     // PCM is 16-bit signed integers (2 bytes per sample)
     const samples = new Int16Array(
-      buffer.buffer,
+      buffer.buffer as ArrayBuffer,
       buffer.byteOffset,
       buffer.length / 2
     );
@@ -289,9 +289,9 @@ class ChatterboxSynthesizeStream extends tts.SynthesizeStream {
         let buffer = Buffer.from(value);
 
         // Apply peak limiting to prevent audio clipping
-        buffer = this.limitAudioPeaks(buffer);
+        buffer = this.limitAudioPeaks(buffer) as any;
 
-        for (const frame of bstream.write(buffer)) {
+        for (const frame of bstream.write(buffer as any)) {
           this.queue.put({
             requestId: shortuuid(),
             frame,
@@ -319,7 +319,7 @@ class ChatterboxSynthesizeStream extends tts.SynthesizeStream {
    */
   private limitAudioPeaks(buffer: Buffer): Buffer {
     const samples = new Int16Array(
-      buffer.buffer,
+      buffer.buffer as ArrayBuffer,
       buffer.byteOffset,
       buffer.length / 2
     );

@@ -128,21 +128,22 @@ export default defineAgent({
     // === CREATE SESSION ===
     const session = new voice.AgentSession({
       agent,
-      vad: ctx.proc.userData.vad! as silero.VAD,
+      vad: ctx.proc.userData.vad! as any,
 
       stt: new openai.STT({
         baseURL: process.env.LOCAL_STT_URL || 'http://localhost:8000/v1',
         apiKey: 'dummy',
-        // Auto-detect language instead of hardcoding to target language
-        // This allows the user to speak English when needed
-        // language: langConfig.stt.language,
-      }),
+        // Use target language as hint (Russian for Russian learners)
+        // Note: This means English input may be transcribed as Russian-sounding words
+        // The LLM is instructed to handle mixed language and can usually understand
+        language: langConfig.stt.language,
+      }) as any,
 
       llm: new openai.LLM({
         baseURL: process.env.LOCAL_LLM_URL || 'http://localhost:11434/v1',
         model: process.env.LOCAL_LLM_MODEL || 'gemma3:4b',
         apiKey: 'ollama',
-      }),
+      }) as any,
 
       // Chatterbox with HTTP streaming - generates sentence-by-sentence
       tts: new ChatterboxTTS({

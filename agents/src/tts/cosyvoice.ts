@@ -114,7 +114,7 @@ class CosyVoiceChunkedStream extends tts.ChunkedStream {
             bufferedBytes += data.length;
           }
 
-          for (const frame of bstream.write(data)) {
+          for (const frame of bstream.write(data as any)) {
             if (buffering) {
               // Accumulate in buffer
               pendingFrames.push({
@@ -239,7 +239,7 @@ class CosyVoiceSynthesizeStream extends tts.SynthesizeStream {
             bufferedBytes += data.length;
           }
 
-          for (const frame of bstream.write(data)) {
+          for (const frame of bstream.write(data as any)) {
             if (buffering) {
               pendingFrames.push({
                 requestId: shortuuid(),

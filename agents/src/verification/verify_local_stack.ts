@@ -45,7 +45,7 @@ async function verifyLLM() {
     const duration = Date.now() - start;
     
     console.log(`✅ Success (${duration}ms)`);
-    console.log(`Response: "${completion.choices[0].message.content}"`);
+    console.log(`Response: "${completion.choices[0]?.message.content || 'No response'}"`);
     return true;
   } catch (error: any) {
     console.error('❌ Failed');
