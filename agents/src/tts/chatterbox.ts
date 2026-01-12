@@ -115,11 +115,7 @@ class ChatterboxChunkedStream extends tts.ChunkedStream {
           this.#logger.debug(`[Chatterbox] Received chunk: ${value.length} bytes`);
 
           // Convert Uint8Array to Buffer for AudioByteStream
-          let buffer = Buffer.from(value);
-
-          // Apply peak limiting to prevent audio clipping
-          // This keeps CUDA graphs for speed while preventing pops/peaks
-          buffer = this.limitAudioPeaks(buffer) as any;
+          const buffer = Buffer.from(value);
 
           for (const frame of bstream.write(buffer as any)) {
             this.queue.put({
@@ -152,54 +148,6 @@ class ChatterboxChunkedStream extends tts.ChunkedStream {
     } finally {
       this.queue.close();
     }
-  }
-
-  /**
-   * Apply soft peak limiting to prevent audio clipping
-   *
-   * This processes 16-bit PCM audio to prevent peaks that cause
-   * popping/distortion, especially with CUDA graphs optimization.
-   *
-   * Strategy: Scale down samples above threshold (80% of max)
-   * - Keeps CUDA graphs for performance
-   * - Adds <1ms latency (negligible)
-   * - No quality loss for normal speech
-   */
-  private limitAudioPeaks(buffer: Buffer): Buffer {
-    // PCM is 16-bit signed integers (2 bytes per sample)
-    const samples = new Int16Array(
-      buffer.buffer as ArrayBuffer,
-      buffer.byteOffset,
-      buffer.length / 2
-    );
-
-    // Find peak level in this chunk
-    let peak = 0;
-    for (let i = 0; i < samples.length; i++) {
-      const sample = samples[i];
-      if (sample !== undefined) {
-        peak = Math.max(peak, Math.abs(sample));
-      }
-    }
-
-    // Threshold: 80% of maximum (32767 * 0.8 = 26214)
-    // Fatterbox was hitting -0.1 dB (basically 100%), so we need headroom
-    const threshold = 26214;
-
-    // If peak exceeds threshold, scale everything down proportionally
-    if (peak > threshold) {
-      const scale = threshold / peak;
-      // this.#logger.debug(`[Chatterbox] Limiting peaks: ${peak} -> ${threshold} (scale: ${scale.toFixed(3)})`);
-
-      for (let i = 0; i < samples.length; i++) {
-        const sample = samples[i];
-        if (sample !== undefined) {
-          samples[i] = Math.round(sample * scale);
-        }
-      }
-    }
-
-    return buffer;
   }
 }
 
@@ -286,10 +234,7 @@ class ChatterboxSynthesizeStream extends tts.SynthesizeStream {
       if (done) break;
 
       if (value) {
-        let buffer = Buffer.from(value);
-
-        // Apply peak limiting to prevent audio clipping
-        buffer = this.limitAudioPeaks(buffer) as any;
+        const buffer = Buffer.from(value);
 
         for (const frame of bstream.write(buffer as any)) {
           this.queue.put({
@@ -311,39 +256,5 @@ class ChatterboxSynthesizeStream extends tts.SynthesizeStream {
         segmentId,
       });
     }
-  }
-
-  /**
-   * Apply soft peak limiting to prevent audio clipping
-   * Same implementation as ChatterboxChunkedStream
-   */
-  private limitAudioPeaks(buffer: Buffer): Buffer {
-    const samples = new Int16Array(
-      buffer.buffer as ArrayBuffer,
-      buffer.byteOffset,
-      buffer.length / 2
-    );
-
-    let peak = 0;
-    for (let i = 0; i < samples.length; i++) {
-      const sample = samples[i];
-      if (sample !== undefined) {
-        peak = Math.max(peak, Math.abs(sample));
-      }
-    }
-
-    const threshold = 26214; // 80% of max
-
-    if (peak > threshold) {
-      const scale = threshold / peak;
-      for (let i = 0; i < samples.length; i++) {
-        const sample = samples[i];
-        if (sample !== undefined) {
-          samples[i] = Math.round(sample * scale);
-        }
-      }
-    }
-
-    return buffer;
   }
 }
