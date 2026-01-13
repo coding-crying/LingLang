@@ -59,11 +59,15 @@ export const grammarRulesRelations = relations(grammarRules, ({ one }) => ({
 export const users = sqliteTable('users', {
   id: text('id').primaryKey(),
   createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at'),
 
   // Language preferences
   targetLanguage: text('target_language').notNull().default('ru'),
   nativeLanguage: text('native_language').notNull().default('en'),
   proficiencyLevel: text('proficiency_level').default('beginner'),
+
+  // Flexible metadata for curriculum progress, preferences, etc.
+  metadata: text('metadata'),  // JSON string
 });
 
 export const usersRelations = relations(users, ({ many }) => ({

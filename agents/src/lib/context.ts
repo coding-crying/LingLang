@@ -7,6 +7,15 @@ export class ContextManager {
   static async getInitialContext(userId: string): Promise<string> {
     console.log(`[Context] Fetching context for ${userId}...`);
 
+    // Check if curriculum mode is enabled
+    const useCurriculum = process.env.USE_CURRICULUM === 'true';
+
+    if (useCurriculum) {
+      console.log(`[Context] Using curriculum-based learning.`);
+      const { CurriculumProgress } = await import('./curriculum-progress.js');
+      return CurriculumProgress.getGoalContext(userId);
+    }
+
     // Check if user has Duolingo data linked
     const metadata = await db.query.duolingoMetadata.findFirst({
       where: eq(duolingoMetadata.userId, userId)
@@ -85,8 +94,9 @@ export class ContextManager {
   /**
    * "Goal Seeking Cycle" (Thesis Implementation)
    * Uses State Machine to avoid constant interference.
+   * This is the SRS-based goal system.
    */
-  static async getDynamicGoal(userId: string): Promise<string | null> {
+  static async getOrCreateGoal(userId: string): Promise<string | null> {
     const now = Date.now();
     console.log(`[GoalSeek] Searching for next goal for user ${userId}...`);
 
@@ -183,6 +193,36 @@ export class ContextManager {
     
     console.log(`[GoalSeek] No candidates for new goals found.`);
     return null; 
+  }
+
+  /**
+   * Get dynamic goal - uses curriculum if enabled, otherwise SRS
+   */
+  static async getDynamicGoal(userId: string): Promise<string | null> {
+    // Check if curriculum mode is enabled
+    const useCurriculum = process.env.USE_CURRICULUM === 'true';
+
+    if (useCurriculum) {
+      // Use curriculum-based goals
+      const { CurriculumProgress } = await import('./curriculum-progress.js');
+      const currentGoal = await CurriculumProgress.getCurrentGoal(userId);
+
+      if (currentGoal) {
+        const user = await db.query.users.findFirst({
+          where: eq(users.id, userId)
+        });
+        const completedCount = user?.metadata
+          ? (JSON.parse(user.metadata).completedGoals || []).length
+          : 0;
+
+        return `NEW GOAL: ${currentGoal.topic} (Goal ${completedCount + 1})\nObjective: ${currentGoal.objective}\nTarget words: ${currentGoal.targetVocab.slice(0, 5).join(', ')}${currentGoal.targetVocab.length > 5 ? '...' : ''}`;
+      }
+
+      return null;  // All curriculum goals completed
+    }
+
+    // Use SRS-based goals (existing logic)
+    return this.getOrCreateGoal(userId);
   }
 
   /**

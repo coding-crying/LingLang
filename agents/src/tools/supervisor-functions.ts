@@ -387,23 +387,47 @@ export async function runSupervisor(
     );
   }
 
+  // Check if using curriculum mode (needed in multiple places)
+  const useCurriculum = process.env.USE_CURRICULUM === 'true';
+
   if (!result.analysis) {
     result.errors.push('Failed to analyze utterance');
     console.warn('[Supervisor] Analysis failed, skipping SRS update');
   } else {
-    // 2. Update SRS levels
+    // 2. Update SRS levels (skip if using curriculum mode)
+    if (!useCurriculum) {
+      try {
+        result.srsUpdates = await updateSRSFromAnalysis(userId, result.analysis);
+      } catch (err) {
+        result.errors.push(`SRS update failed: ${err}`);
+      }
+    } else {
+      console.log('[Supervisor] Curriculum mode - skipping SRS updates');
+    }
+  }
+
+  // 2.5. Check curriculum progress (if using curriculum mode)
+  if (useCurriculum) {
     try {
-      result.srsUpdates = await updateSRSFromAnalysis(userId, result.analysis);
+      const { CurriculumProgress } = await import('../lib/curriculum-progress.js');
+      const progress = await CurriculumProgress.checkGoalProgress(userId, utterance, context);
+
+      if (progress.completed) {
+        console.log(`[Supervisor] Goal completed: ${progress.goalTopic}`);
+        result.goalUpdate = `COMPLETED: Great job! You completed "${progress.goalTopic}"`;
+      }
     } catch (err) {
-      result.errors.push(`SRS update failed: ${err}`);
+      result.errors.push(`Curriculum progress check failed: ${err}`);
     }
   }
 
   // 3. Check goals (always runs, even if analysis failed)
-  try {
-    result.goalUpdate = await ContextManager.getDynamicGoal(userId);
-  } catch (err) {
-    result.errors.push(`Goal check failed: ${err}`);
+  if (!result.goalUpdate) {  // Only check if not already set by curriculum
+    try {
+      result.goalUpdate = await ContextManager.getDynamicGoal(userId);
+    } catch (err) {
+      result.errors.push(`Goal check failed: ${err}`);
+    }
   }
 
   console.log(`[Supervisor] Complete: ${result.srsUpdates.length} SRS updates, ` +
