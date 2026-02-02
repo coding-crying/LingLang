@@ -25,11 +25,15 @@ if ENV_FILE.exists():
 HOME = Path.home()
 STT_DIR = HOME / "Desktop/faster-whisper-stt"
 TTS_DIR = HOME / "Desktop/Lingo/Chatterbox-TTS-Server"
+COSYVOICE_DIR = HOME / "Desktop/cosyvoice-tts"
+
+# Toggle between TTS implementations
+USE_COSYVOICE = True  # Set to False to use Fatterbox instead
 
 STT_LAUNCH = STT_DIR / "launch_stt.sh"
 
 STT_PORT = 8000
-TTS_PORT = 8005
+TTS_PORT = 50000 if USE_COSYVOICE else 8005
 LLM_PORT = 11434
 
 STT_HEALTH = f"http://localhost:{STT_PORT}/docs"
@@ -45,10 +49,11 @@ processes = []
 def cleanup(signum=None, frame=None):
     """Clean shutdown of all services"""
     print("\n🛑 Stopping services...")
-    
-    # Stop Docker container
-    print(f"   Stopping {FATTERBOX_CONTAINER}...")
-    subprocess.run(["docker", "stop", FATTERBOX_CONTAINER], stderr=subprocess.DEVNULL)
+
+    # Stop Docker container if using Fatterbox
+    if not USE_COSYVOICE:
+        print(f"   Stopping {FATTERBOX_CONTAINER}...")
+        subprocess.run(["docker", "stop", FATTERBOX_CONTAINER], stderr=subprocess.DEVNULL)
 
     for name, proc in processes:
         if proc.poll() is None:
@@ -125,7 +130,7 @@ def start_fatterbox(log_file):
     try:
         # Check if container exists
         result = subprocess.run(["docker", "ps", "-a", "--filter", f"name={FATTERBOX_CONTAINER}", "--format", "{{.Names}}"], capture_output=True, text=True)
-        
+
         if FATTERBOX_CONTAINER not in result.stdout:
             print(f"   ⚠️  Container {FATTERBOX_CONTAINER} not found. You may need to run it first with your specific mounts.")
             return None
@@ -144,8 +149,50 @@ def start_fatterbox(log_file):
             stderr=subprocess.STDOUT,
             preexec_fn=os.setsid
         )
-    
+
     print(f"   Started Fatterbox (Container Running)")
+    print(f"   Logs: {log_file}")
+    return proc
+
+def start_cosyvoice(log_file):
+    """Start CosyVoice v3 TTS server with bidirectional streaming"""
+    print(f"\n🚀 Starting CosyVoice v3 (Port: {TTS_PORT})...")
+
+    venv_python = COSYVOICE_DIR / "venv" / "bin" / "python"
+    server_script = COSYVOICE_DIR / "openai_server_bistream.py"
+    model_dir = COSYVOICE_DIR / "pretrained_models" / "Fun-CosyVoice3-0.5B"
+
+    if not venv_python.exists():
+        print(f"   ❌ CosyVoice venv not found: {venv_python}")
+        return None
+
+    if not server_script.exists():
+        print(f"   ❌ CosyVoice server script not found: {server_script}")
+        return None
+
+    if not model_dir.exists():
+        print(f"   ❌ CosyVoice model not found: {model_dir}")
+        return None
+
+    log_path = Path(log_file)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(log_path, 'w') as log:
+        proc = subprocess.Popen(
+            [
+                str(venv_python),
+                str(server_script),
+                "--port", str(TTS_PORT),
+                "--model_dir", str(model_dir)
+            ],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            cwd=str(COSYVOICE_DIR),
+            preexec_fn=os.setsid
+        )
+
+    time.sleep(2)
+    print(f"   Started CosyVoice v3 (PID: {proc.pid})")
     print(f"   Logs: {log_file}")
     return proc
 
@@ -154,6 +201,14 @@ def main():
     print("=" * 60)
     print("🎯 Local AI Services - Startup")
     print("=" * 60)
+
+    # Ensure only the selected TTS is running
+    if USE_COSYVOICE:
+        print("\n🔄 Using CosyVoice v3 - stopping Fatterbox if running...")
+        subprocess.run(["docker", "stop", FATTERBOX_CONTAINER], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    else:
+        print("\n🔄 Using Fatterbox - ensuring CosyVoice is stopped...")
+        subprocess.run(["pkill", "-f", "openai_server_bistream.py"], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
 
     # Check Ollama
     print("\n🔍 Checking Ollama...")
@@ -172,15 +227,23 @@ def main():
     if stt_proc:
         processes.append(("STT", stt_proc))
 
-    # Start TTS (Fatterbox)
-    tts_proc = start_fatterbox("tts_service.log")
+    # Start TTS (CosyVoice or Fatterbox)
+    if USE_COSYVOICE:
+        tts_proc = start_cosyvoice("tts_service.log")
+        tts_name = "TTS (CosyVoice v3)"
+    else:
+        tts_proc = start_fatterbox("tts_service.log")
+        tts_name = "TTS (Fatterbox)"
+
     if tts_proc:
-        processes.append(("TTS (Log Stream)", tts_proc))
+        processes.append((tts_name, tts_proc))
 
     # Wait for health checks
     print("\n🏥 Running health checks...")
     stt_ok = wait_for_service("STT", STT_HEALTH, max_wait=30)
-    tts_ok = wait_for_service("TTS", TTS_HEALTH, max_wait=30)
+    # CosyVoice needs more time for initial warmup (~26s)
+    tts_wait_time = 90 if USE_COSYVOICE else 30
+    tts_ok = wait_for_service("TTS", TTS_HEALTH, max_wait=tts_wait_time)
 
     # Pre-warm LLM model
     llm_ok = True

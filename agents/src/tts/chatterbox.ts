@@ -11,6 +11,13 @@ import type { AudioFrame } from '@livekit/rtc-node';
 const NUM_CHANNELS = 1;
 const SAMPLE_RATE = 24000;
 
+function applyLanguageTag(text: string, languageId?: string): string {
+  if (!languageId) return text;
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith('<|')) return text;
+  return `<|${languageId}|>${text}`;
+}
+
 export interface ChatterboxTTSOptions {
   baseURL?: string;
   voice?: string;
@@ -74,11 +81,12 @@ class ChatterboxChunkedStream extends tts.ChunkedStream {
     try {
       this.#logger.info(`[Chatterbox] Streaming TTS for: "${this.#text.substring(0, 50)}..."`);
 
+      const inputText = applyLanguageTag(this.#text, this.#opts.language_id);
       const response = await fetch(`${this.#opts.baseURL}/v1/audio/speech`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          input: this.#text,
+          input: inputText,
           voice: this.#opts.voice,
           model: 'tts-1',
           response_format: 'pcm',
@@ -199,13 +207,14 @@ class ChatterboxSynthesizeStream extends tts.SynthesizeStream {
     bstream: AudioByteStream,
     segmentId: string,
   ): Promise<void> {
-    this.#logger.info(`[Chatterbox] Generating: "${text.substring(0, 50)}..."`);
+    const inputText = applyLanguageTag(text, this.#opts.language_id);
+    this.#logger.info(`[Chatterbox] Generating: "${inputText.substring(0, 50)}..."`);
 
     const response = await fetch(`${this.#opts.baseURL}/v1/audio/speech`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        input: text,
+        input: inputText,
         voice: this.#opts.voice,
         model: 'tts-1',
         response_format: 'pcm',

@@ -43,8 +43,6 @@ import { runSupervisor } from './tools/supervisor-functions.js';
 import { ContextManager, PlaceholderGoals } from './lib/context.js';
 import { getLanguageConfig } from './config/languages.js';
 import { buildInstructions } from './config/prompts/base.js';
-// import { CosyVoiceTTS } from './tts/cosyvoice.js';  // Switched to Chatterbox
-import { ChatterboxTTS } from './tts/chatterbox.js';
 import { db } from './db/index.js';
 import { users } from './db/schema.js';
 import { eq } from 'drizzle-orm';
@@ -170,31 +168,27 @@ export default defineAgent({
       // No tools needed - supervisor runs on events
     });
 
+    // === CREATE SERVICES (LOCAL OR CLOUD) ===
+    const { ServiceFactory } = await import('./services/factory.js');
+    const serviceFactory = new ServiceFactory({
+      mode: (process.env.SERVICE_MODE as 'local' | 'cloud') || 'local',
+      targetLanguage: targetLang,
+      userId,
+    });
+
+    const sttService = serviceFactory.createSTT();
+    const llmService = serviceFactory.createLLM();
+    const ttsService = serviceFactory.createTTS();
+
+    console.log(`[Tutor-ED] Service mode: ${serviceFactory.getMode()}`);
+
     // === CREATE SESSION ===
     const session = new voice.AgentSession({
       agent,
       vad: ctx.proc.userData.vad! as silero.VAD,
-
-      stt: new openai.STT({
-        baseURL: process.env.LOCAL_STT_URL || 'http://localhost:8000/v1',
-        apiKey: 'dummy',
-        language: langConfig.stt.language,
-      }),
-
-      llm: new openai.LLM({
-        baseURL: process.env.LOCAL_LLM_URL || 'http://localhost:11434/v1',
-        model: process.env.LOCAL_LLM_MODEL || 'gemma3:4b',
-        apiKey: 'ollama',
-      }),
-
-      // Chatterbox with HTTP streaming - generates sentence-by-sentence
-      tts: new ChatterboxTTS({
-        baseURL: process.env.LOCAL_TTS_URL || 'http://localhost:8004',
-        voice: langConfig.tts.voice,
-        speed: langConfig.tts.speed || 1.0,
-        chunkSize: 80,  // Smaller chunks for faster first audio
-        language_id: langConfig.code,
-      }),
+      stt: sttService,
+      llm: llmService,
+      tts: ttsService,
     });
 
     // === CONVERSATION TRACKING ===

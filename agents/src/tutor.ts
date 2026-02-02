@@ -11,8 +11,7 @@ import { buildInstructions } from './config/prompts/base.js';
 import { db } from './db/index.js';
 import { users } from './db/schema.js';
 import { eq } from 'drizzle-orm';
-// import { CosyVoiceTTS } from './tts/cosyvoice.js';
-import { ChatterboxTTS } from './tts/chatterbox.js';
+import { CosyVoiceTTS } from './tts/cosyvoice.js';
 
 export default defineAgent({
   prewarm: async (proc: JobProcess) => {
@@ -112,12 +111,11 @@ export default defineAgent({
         apiKey: 'ollama',
       }),
 
-      // TTS: Chatterbox (Fatterbox)
-      tts: new ChatterboxTTS({
-        baseURL: process.env.LOCAL_TTS_URL || 'http://localhost:8005',
-        voice: 'Russian', // Fatterbox uses simple names
-        speed: 1.0,
-        language_id: langConfig.code, // This is 'ru' for Russian
+      // TTS: CosyVoice v3 (local streaming WebSocket)
+      tts: new CosyVoiceTTS({
+        url: process.env.LOCAL_TTS_URL || 'http://localhost:50000',
+        voice: langConfig.tts.voice,
+        speed: langConfig.tts.speed || 1.0,
       }),
     });
 
