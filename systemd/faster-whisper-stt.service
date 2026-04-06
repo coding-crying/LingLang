@@ -1,0 +1,34 @@
+[Unit]
+Description=Faster Whisper STT Server
+After=network.target nvidia-persistenced.service
+
+[Service]
+Type=simple
+User=will
+WorkingDirectory=/home/will/Desktop/faster-whisper-stt
+Environment="PATH=/home/will/Desktop/faster-whisper-stt/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="LD_LIBRARY_PATH=/home/will/Desktop/faster-whisper-stt/venv/lib/python3.13/site-packages/nvidia/cudnn/lib:/home/will/Desktop/faster-whisper-stt/venv/lib/python3.13/site-packages/nvidia/cublas/lib"
+Environment="WHISPER_MODEL=large-v3"
+Environment="WHISPER_DEVICE=cuda"
+Environment="WHISPER_COMPUTE=float16"
+
+# Restart policy
+Restart=always
+RestartSec=5s
+
+# Resource limits
+MemoryMax=8G
+
+# Start the server via launch script
+ExecStart=/bin/bash /home/will/Desktop/faster-whisper-stt/launch_stt.sh
+
+# Graceful shutdown
+TimeoutStopSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=faster-whisper-stt
+
+[Install]
+WantedBy=multi-user.target

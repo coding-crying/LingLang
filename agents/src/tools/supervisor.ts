@@ -3,9 +3,20 @@ import { db } from '../db/index.js';
 import { learningProgress, lexemes, units, users, grammarRules } from '../db/schema.js';
 import * as z from 'zod';
 import { llm } from '@livekit/agents';
-import { GoogleGenAI } from '@google/genai';
+import OpenAI from 'openai';
 
-const genAI = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY || "" });
+// Lazy init — avoids reading env vars before dotenv.config() runs in tutor.ts
+let _client: OpenAI | null = null;
+function getClient(): OpenAI {
+  if (!_client) {
+    _client = new OpenAI({
+      baseURL: process.env.SUPERVISOR_LLM_URL || 'https://openrouter.ai/api/v1',
+      apiKey: process.env.SUPERVISOR_LLM_KEY || '',
+      timeout: 15000,
+    });
+  }
+  return _client;
+}
 
 const learningAnalysisInstructions = `You are a comprehensive language learning analysis expert.
 Your role is to extract detailed grammatical information for building an intelligent graph-based learning system.
@@ -26,118 +37,136 @@ Return ONLY a JSON object with this structure:
   "grammarHints": ["string"]
 }`;
 
+interface TurnInput {
+  userId: string;
+  userUtterance: string;
+  context: string;
+}
+
+/**
+ * Core analysis logic — callable directly from event handlers.
+ */
+export async function analyzeTurn({ userId, userUtterance, context }: TurnInput) {
+  console.log(`[Supervisor] Analyzing: "${userUtterance}" for user ${userId}`);
+
+  // 1. Call Step 3.5 Flash via OpenRouter for Analysis
+  const model = process.env.SUPERVISOR_LLM_MODEL || 'stepfun/step-3.5-flash:free';
+  const result = await getClient().chat.completions.create({
+    model,
+    messages: [
+      { role: 'system', content: learningAnalysisInstructions },
+      { role: 'user', content: `Context: ${context}\nUser said: "${userUtterance}"` },
+    ],
+    temperature: 0.3,
+  });
+
+  const responseText = result.choices[0]?.message?.content ?? '';
+
+  // Extract JSON — handle bare JSON or ```json ... ``` code blocks
+  let jsonText = responseText.trim();
+  const codeBlock = jsonText.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlock?.[1]) jsonText = codeBlock[1].trim();
+
+  let analysis: any = {};
+  try {
+    analysis = JSON.parse(jsonText || '{}');
+  } catch {
+    console.warn('[Supervisor] Failed to parse LLM response as JSON:', jsonText.slice(0, 200));
+    return { analysis: { feedback: 'ok', correction: null } };
+  }
+  console.log("[Supervisor] Analysis result:", JSON.stringify(analysis, null, 2));
+
+  // Validate detected language matches user's target language
+  const user = await db.query.users.findFirst({
+    where: eq(users.id, userId)
+  });
+
+  if (user && analysis.language && analysis.language !== user.targetLanguage) {
+    console.warn(
+      `[Supervisor] Language mismatch! User learning ${user.targetLanguage}, ` +
+      `but spoke ${analysis.language}`
+    );
+  }
+
+  // 2. Update SQLite DB
+  await db.insert(users).values({ id: userId, createdAt: Date.now() }).onConflictDoNothing();
+
+  const targetLang = analysis.language || user?.targetLanguage || 'ru';
+
+  if (analysis.lexemes) {
+    for (const item of analysis.lexemes) {
+      // Match lexeme with correct language filter - try exact POS first
+      let existingLexeme = await db.query.lexemes.findFirst({
+        where: and(
+          eq(lexemes.lemma, item.lemma),
+          eq(lexemes.pos, item.pos),
+          eq(lexemes.language, targetLang)
+        )
+      });
+
+      // Fallback: try GENERAL pos for Duolingo words
+      if (!existingLexeme) {
+        existingLexeme = await db.query.lexemes.findFirst({
+          where: and(
+            eq(lexemes.lemma, item.lemma),
+            eq(lexemes.pos, 'GENERAL'),
+            eq(lexemes.language, targetLang)
+          )
+        });
+      }
+
+      if (existingLexeme) {
+        const currentProgress = await db.query.learningProgress.findFirst({
+          where: and(eq(learningProgress.userId, userId), eq(learningProgress.lexemeId, existingLexeme.id))
+        });
+
+        let newLevel = currentProgress?.srsLevel ?? 0;
+        if (item.performance === 'correct_use') newLevel = Math.min(newLevel + 1, 5);
+        else if (item.performance === 'wrong_use') newLevel = 1;
+
+        const daysToAdd = Math.pow(2, newLevel); // Leitner: 1, 2, 4, 8, 16 days
+        const nextReview = Date.now() + (daysToAdd * 24 * 60 * 60 * 1000);
+
+        if (currentProgress) {
+          await db.update(learningProgress)
+            .set({
+              srsLevel: newLevel,
+              nextReview,
+              lastSeen: Date.now(),
+              encounters: (currentProgress.encounters ?? 0) + 1,
+              correctUses: (currentProgress.correctUses ?? 0) + (item.performance === 'correct_use' ? 1 : 0)
+            })
+            .where(eq(learningProgress.id, currentProgress.id));
+        } else {
+          await db.insert(learningProgress).values({
+            userId,
+            lexemeId: existingLexeme.id,
+            srsLevel: newLevel,
+            nextReview,
+            lastSeen: Date.now(),
+            encounters: 1,
+            correctUses: item.performance === 'correct_use' ? 1 : 0
+          });
+        }
+      }
+    }
+  }
+
+  return {
+    analysis: {
+      feedback: analysis.grammarHints ? (analysis.grammarHints as string[]).join(' ') : 'Good job!',
+      correction: null
+    }
+  };
+}
+
+/** llm.tool wrapper — registers analyzeTurn as an agent-callable tool. */
 export const analyzeConversationTurn = llm.tool({
-  description: 'Analyzes the user\'s last utterance for detailed grammatical and morphological accuracy, and updates their learning progress.',
+  description: "Analyzes the user's last utterance for grammatical accuracy and updates their learning progress.",
   parameters: z.object({
     userId: z.string().describe('The ID of the user'),
     userUtterance: z.string().describe('The exact sentence the user said'),
     context: z.string().describe('The immediate conversation context'),
   }),
-  execute: async ({ userId, userUtterance, context }) => {
-    console.log(`[Supervisor] Analyzing: "${userUtterance}" for user ${userId}`);
-
-    // 1. Call Google Gemini for Analysis
-    const result = await genAI.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: `${learningAnalysisInstructions}\n\nContext: ${context}\nUser said: "${userUtterance}"` }]
-        }
-      ]
-    });
-    
-    const responseText = result.text || "";
-    
-    // Clean up potential markdown code blocks (```json ... ```)
-    const cleanedText = responseText.replace(/^```json\s*/, '').replace(/```$/, '');
-    
-    const analysis = JSON.parse(cleanedText || "{}");
-    console.log("[Supervisor] Analysis result:", JSON.stringify(analysis, null, 2));
-
-    // Validate detected language matches user's target language
-    const user = await db.query.users.findFirst({
-      where: eq(users.id, userId)
-    });
-
-    if (user && analysis.language && analysis.language !== user.targetLanguage) {
-      console.warn(
-        `[Supervisor] Language mismatch! User learning ${user.targetLanguage}, ` +
-        `but spoke ${analysis.language}`
-      );
-    }
-
-    // 2. Update SQLite DB
-    await db.insert(users).values({ id: userId, createdAt: Date.now() }).onConflictDoNothing();
-
-    if (analysis.lexemes) {
-        for (const item of analysis.lexemes) {
-            // Match lexeme with correct language filter - try exact POS first
-            let existingLexeme = await db.query.lexemes.findFirst({
-                where: and(
-                    eq(lexemes.lemma, item.lemma),
-                    eq(lexemes.pos, item.pos),
-                    eq(lexemes.language, analysis.language || user?.targetLanguage || 'ru')
-                )
-            });
-
-            // Fallback: try GENERAL pos for Duolingo words
-            if (!existingLexeme) {
-                existingLexeme = await db.query.lexemes.findFirst({
-                    where: and(
-                        eq(lexemes.lemma, item.lemma),
-                        eq(lexemes.pos, 'GENERAL'),
-                        eq(lexemes.language, analysis.language || user?.targetLanguage || 'ru')
-                    )
-                });
-            }
-
-            if (existingLexeme) {
-                // Update Progress
-                // Simple Leitner Logic: Correct -> Level + 1, Wrong -> Level 1
-                const currentProgress = await db.query.learningProgress.findFirst({
-                    where: and(eq(learningProgress.userId, userId), eq(learningProgress.lexemeId, existingLexeme.id))
-                });
-
-                let newLevel = currentProgress?.srsLevel || 0;
-                if (item.performance === 'correct_use') newLevel = Math.min(newLevel + 1, 5);
-                else if (item.performance === 'wrong_use') newLevel = 1;
-
-                // Calculate next review (exponential backoff)
-                const daysToAdd = Math.pow(2, newLevel); // 1, 2, 4, 8, 16...
-                const nextReview = Date.now() + (daysToAdd * 24 * 60 * 60 * 1000);
-
-                if (currentProgress) {
-                    await db.update(learningProgress)
-                        .set({
-                            srsLevel: newLevel,
-                            nextReview: nextReview,
-                            lastSeen: Date.now(),
-                            encounters: (currentProgress.encounters || 0) + 1,
-                            correctUses: (currentProgress.correctUses || 0) + (item.performance === 'correct_use' ? 1 : 0)
-                        })
-                        .where(eq(learningProgress.id, currentProgress.id));
-                } else {
-                    await db.insert(learningProgress).values({
-                        userId,
-                        lexemeId: existingLexeme.id,
-                        srsLevel: newLevel,
-                        nextReview: nextReview,
-                        lastSeen: Date.now(),
-                        encounters: 1,
-                        correctUses: item.performance === 'correct_use' ? 1 : 0
-                    });
-                }
-            }
-        }
-    }
-
-    // 3. Return feedback to the Agent
-    return {
-      analysis: {
-        feedback: analysis.grammarHints ? analysis.grammarHints.join(" ") : "Good job!",
-        correction: null 
-      }
-    };
-  },
+  execute: analyzeTurn,
 });

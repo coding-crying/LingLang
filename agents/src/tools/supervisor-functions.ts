@@ -99,12 +99,13 @@ export async function analyzeUtteranceWithLocalLLM(
   utterance: string,
   context: string,
   llmUrl: string = 'http://localhost:11434/v1'
-): Promise<UtteranceAnalysis | null> {
+): Promise<UtteranceAnalysisResult> {
   const model = process.env.LOCAL_LLM_MODEL || 'gemma3:4b';
 
   // Use simple prompt for small models, full prompt for larger ones
   const isSmallModel = model.includes('gemma3:4b') || model.includes('phi') || model.includes('qwen2:1');
   const prompt = isSmallModel ? ANALYSIS_PROMPT_SIMPLE : ANALYSIS_PROMPT_FULL;
+  const userPrompt = `Analyze: "${utterance}"`;
 
   console.log(`[Supervisor] Analyzing with ${model} (${isSmallModel ? 'simple' : 'full'} prompt)`);
 
@@ -118,7 +119,7 @@ export async function analyzeUtteranceWithLocalLLM(
         model,
         messages: [
           { role: 'system', content: prompt },
-          { role: 'user', content: `Analyze: "${utterance}"` }
+          { role: 'user', content: userPrompt }
         ],
         temperature: 0.1, // Low temperature for consistent JSON
         max_tokens: 500,  // Don't need long responses
@@ -129,7 +130,7 @@ export async function analyzeUtteranceWithLocalLLM(
 
     if (!response.ok) {
       console.error(`[Supervisor] LLM request failed: ${response.status}`);
-      return null;
+      return { analysis: null, rawPrompt: prompt + '\n' + userPrompt };
     }
 
     const data = await response.json() as any;
@@ -147,7 +148,7 @@ export async function analyzeUtteranceWithLocalLLM(
     const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
       console.error('[Supervisor] No JSON in response:', content.substring(0, 100));
-      return null;
+      return { analysis: null, rawPrompt: prompt + '\n' + userPrompt, rawResponse: content };
     }
 
     // Clean up common JSON formatting issues from LLMs
@@ -159,11 +160,11 @@ export async function analyzeUtteranceWithLocalLLM(
     const analysis = JSON.parse(cleanJson) as UtteranceAnalysis;
     console.log(`[Supervisor] Extracted ${analysis.lexemes?.length || 0} lexemes`);
 
-    return analysis;
+    return { analysis, rawPrompt: prompt + '\n' + userPrompt, rawResponse: content };
 
   } catch (err) {
     console.error('[Supervisor] Analysis error:', err);
-    return null;
+    return { analysis: null, rawPrompt: prompt + '\n' + userPrompt };
   }
 }
 
@@ -173,12 +174,14 @@ export async function analyzeUtteranceWithLocalLLM(
 export async function analyzeUtteranceWithGemini(
   utterance: string,
   context: string
-): Promise<UtteranceAnalysis | null> {
+): Promise<UtteranceAnalysisResult> {
   const apiKey = process.env.GOOGLE_API_KEY;
   if (!apiKey) {
     console.warn('[Supervisor] No GOOGLE_API_KEY, skipping Gemini analysis');
-    return null;
+    return { analysis: null };
   }
+
+  const promptText = `${ANALYSIS_PROMPT_FULL}\n\nContext: ${context}\nUser said: "${utterance}"`;
 
   try {
     console.log('[Supervisor] Analyzing with Gemini...');
@@ -192,7 +195,7 @@ export async function analyzeUtteranceWithGemini(
       model: 'gemini-2.5-flash',
       contents: [{
         role: 'user',
-        parts: [{ text: `${ANALYSIS_PROMPT_FULL}\n\nContext: ${context}\nUser said: "${utterance}"` }]
+        parts: [{ text: promptText }]
       }]
     });
 
@@ -205,11 +208,11 @@ export async function analyzeUtteranceWithGemini(
     const analysis = JSON.parse(cleanedText) as UtteranceAnalysis;
     console.log(`[Supervisor] Extracted ${analysis.lexemes?.length || 0} lexemes`);
 
-    return analysis;
+    return { analysis, rawPrompt: promptText, rawResponse: responseText };
 
   } catch (err) {
     console.error('[Supervisor] Gemini analysis error:', err);
-    return null;
+    return { analysis: null, rawPrompt: promptText };
   }
 }
 
@@ -255,9 +258,33 @@ export async function updateSRSFromAnalysis(
     }
 
     if (!existingLexeme) {
-      // Could auto-create lexeme here, or skip
-      console.log(`[Supervisor] Unknown lexeme: ${item.lemma} (${item.pos})`);
-      continue;
+      // Auto-create lexeme so the DB can actually learn from conversation.
+      // Note: translation is unknown at this stage; empty string is allowed.
+      const safeLemma = (item.lemma || '').trim();
+      const safePos = (item.pos || 'GENERAL').trim() || 'GENERAL';
+      const lexemeId = `${targetLang}:${safeLemma.toLowerCase()}:${safePos}`;
+
+      console.log(`[Processor] Auto-creating lexeme: ${safeLemma} (${safePos}) [${targetLang}]`);
+
+      await db.insert(lexemes).values({
+        id: lexemeId,
+        lemma: safeLemma,
+        pos: safePos,
+        language: targetLang,
+        translation: '',
+        unitId: null,
+        gender: null,
+        morphFeatures: null,
+      }).onConflictDoNothing();
+
+      existingLexeme = await db.query.lexemes.findFirst({
+        where: eq(lexemes.id, lexemeId),
+      });
+
+      if (!existingLexeme) {
+        console.warn(`[Processor] Failed to auto-create lexeme: ${lexemeId}`);
+        continue;
+      }
     }
 
     // Get current progress
@@ -326,6 +353,86 @@ export async function updateSRSFromAnalysis(
 }
 
 // ============================================================================
+// PROCESSOR (DB population)
+// ============================================================================
+
+export interface UtteranceAnalysisResult {
+  analysis: UtteranceAnalysis | null;
+  rawPrompt?: string;
+  rawResponse?: string;
+}
+
+export interface ProcessorResult {
+  analysis: UtteranceAnalysis | null;
+  rawPrompt?: string;
+  rawResponse?: string;
+  srsUpdates: { lexemeId: string; oldLevel: number; newLevel: number }[];
+  errors: string[];
+}
+
+/**
+ * Processor pipeline:
+ * 1) Analyze utterance (Gemini or local LLM)
+ * 2) Update DB (auto-create lexemes, update SRS)
+ *
+ * NOTE: This should be cheap + fast-ish and run on every user turn.
+ * Goal selection / "what to teach" is the Supervisor's job.
+ */
+export async function runProcessor(
+  userId: string,
+  utterance: string,
+  context: string,
+  options: {
+    useGemini?: boolean;
+    llmUrl?: string;
+  } = {}
+): Promise<ProcessorResult> {
+  const result: ProcessorResult = {
+    analysis: null,
+    srsUpdates: [],
+    errors: [],
+  };
+
+  console.log(`[Processor] Processing: "${utterance.substring(0, 50)}..."`);
+
+  // 1) Analyze utterance
+  let analysisResult: UtteranceAnalysisResult | null = null;
+  if (options.useGemini !== false && process.env.GOOGLE_API_KEY) {
+    analysisResult = await analyzeUtteranceWithGemini(utterance, context);
+  }
+
+  if (!analysisResult?.analysis) {
+    analysisResult = await analyzeUtteranceWithLocalLLM(
+      utterance,
+      context,
+      options.llmUrl
+    );
+  }
+
+  if (analysisResult) {
+    result.analysis = analysisResult.analysis;
+    result.rawPrompt = analysisResult.rawPrompt;
+    result.rawResponse = analysisResult.rawResponse;
+  }
+
+  if (!result.analysis) {
+    result.errors.push('Failed to analyze utterance');
+    console.warn('[Processor] Analysis failed, skipping SRS update');
+    return result;
+  }
+
+  // 2) Update SRS levels
+  try {
+    result.srsUpdates = await updateSRSFromAnalysis(userId, result.analysis);
+  } catch (err) {
+    result.errors.push(`SRS update failed: ${err}`);
+  }
+
+  console.log(`[Processor] Complete: ${result.srsUpdates.length} SRS updates`);
+  return result;
+}
+
+// ============================================================================
 // MAIN SUPERVISOR FUNCTION
 // ============================================================================
 
@@ -356,31 +463,11 @@ export async function runSupervisor(
 
   console.log(`[Supervisor] Processing: "${utterance.substring(0, 50)}..."`);
 
-  // 1. Analyze utterance
-  if (options.useGemini !== false && process.env.GOOGLE_API_KEY) {
-    result.analysis = await analyzeUtteranceWithGemini(utterance, context);
-  }
-
-  // Fallback to local LLM if Gemini failed or wasn't used
-  if (!result.analysis) {
-    result.analysis = await analyzeUtteranceWithLocalLLM(
-      utterance,
-      context,
-      options.llmUrl
-    );
-  }
-
-  if (!result.analysis) {
-    result.errors.push('Failed to analyze utterance');
-    console.warn('[Supervisor] Analysis failed, skipping SRS update');
-  } else {
-    // 2. Update SRS levels
-    try {
-      result.srsUpdates = await updateSRSFromAnalysis(userId, result.analysis);
-    } catch (err) {
-      result.errors.push(`SRS update failed: ${err}`);
-    }
-  }
+  // 1-2. Run processor (analysis + DB updates)
+  const proc = await runProcessor(userId, utterance, context, options);
+  result.analysis = proc.analysis;
+  result.srsUpdates = proc.srsUpdates;
+  result.errors.push(...proc.errors);
 
   // 3. Check goals (always runs, even if analysis failed)
   try {

@@ -1,0 +1,33 @@
+[Unit]
+Description=LingLang Local AI Services (STT + TTS)
+After=network.target nvidia-persistenced.service
+Wants=ollama.service
+
+[Service]
+Type=simple
+User=will
+WorkingDirectory=/home/will/Desktop/LingLang
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+
+# Restart policy
+Restart=always
+RestartSec=10s
+
+# Resource limits
+MemoryMax=16G
+CPUQuota=800%
+
+# Start the services
+ExecStart=/usr/bin/python3 /home/will/Desktop/LingLang/start_local_services.py
+
+# Graceful shutdown
+ExecStop=/bin/kill -SIGTERM $MAINPID
+TimeoutStopSec=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=linglang-services
+
+[Install]
+WantedBy=multi-user.target

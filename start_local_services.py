@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Local AI Services Launcher
-Starts STT (Faster Whisper) and TTS (Chatterbox) servers for LiveKit agent
+LingLang Local Stack Launcher
+Services: STT (Qwen3-ASR) + TTS (MossTTS) + LiveKit Agent + Dashboard
 """
 import subprocess
 import time
@@ -9,309 +9,179 @@ import requests
 import os
 import sys
 import signal
+import argparse
 from pathlib import Path
 
-# Load environment from .env.local if it exists
-ENV_FILE = Path(__file__).parent / "agents" / ".env.local"
-if ENV_FILE.exists():
-    with open(ENV_FILE) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                key, value = line.split('=', 1)
-                os.environ.setdefault(key.strip(), value.strip())
-
-# --- Configuration ---
+# --- Paths ---
 HOME = Path.home()
-STT_DIR = HOME / "Desktop/faster-whisper-stt"
-TTS_DIR = HOME / "Desktop/Lingo/Chatterbox-TTS-Server"
-COSYVOICE_DIR = HOME / "Desktop/cosyvoice-tts"
+STT_DIR = HOME / "Desktop/ASR/qwen3-asr"
+STT_VENV = HOME / "Desktop/TTS/MOSS-TTS/.venv/bin/python"   # shared venv
+TTS_DIR = HOME / "Desktop/TTS/MOSS-TTS/moss_tts_realtime"
+TTS_VENV = HOME / "Desktop/TTS/MOSS-TTS/.venv/bin/python"
+AGENT_DIR = HOME / "Desktop/LingLang/agents"
 
-# Toggle between TTS implementations
-USE_COSYVOICE = True  # Set to False to use Fatterbox instead
-
-STT_LAUNCH = STT_DIR / "launch_stt.sh"
-
-STT_PORT = 8000
-TTS_PORT = 50000 if USE_COSYVOICE else 8005
+# --- Ports ---
+STT_PORT = 8001
+TTS_PORT = 8880
 LLM_PORT = 11434
+DASHBOARD_PORT = 3001
 
-STT_HEALTH = f"http://localhost:{STT_PORT}/docs"
-TTS_HEALTH = f"http://localhost:{TTS_PORT}/docs"
-LLM_HEALTH = f"http://localhost:{LLM_PORT}"
-
-FATTERBOX_CONTAINER = "fatterbox-tts"
-FATTERBOX_IMAGE = "whywillwizardry/fatterbox-multilingual:v1.0"
-
-# --- Process Management ---
-processes = []
+# --- Process registry ---
+processes: list[tuple[str, subprocess.Popen]] = []
 
 def cleanup(signum=None, frame=None):
-    """Clean shutdown of all services"""
-    print("\n🛑 Stopping services...")
-
-    # Stop Docker container if using Fatterbox
-    if not USE_COSYVOICE:
-        print(f"   Stopping {FATTERBOX_CONTAINER}...")
-        subprocess.run(["docker", "stop", FATTERBOX_CONTAINER], stderr=subprocess.DEVNULL)
-
-    for name, proc in processes:
+    print("\nStopping services...")
+    for name, proc in reversed(processes):
         if proc.poll() is None:
-            print(f"   Terminating {name}...")
+            print(f"  Stopping {name} (PID {proc.pid})...")
             proc.terminate()
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
-    print("✅ All services stopped")
+    print("Done.")
     sys.exit(0)
 
 signal.signal(signal.SIGINT, cleanup)
 signal.signal(signal.SIGTERM, cleanup)
 
-# --- Health Checks ---
-def check_service(url, timeout=2):
-    """Check if service responds"""
+def check(url, timeout=2):
     try:
-        response = requests.get(url, timeout=timeout)
-        return response.status_code < 500
+        r = requests.get(url, timeout=timeout)
+        return r.status_code < 500
     except:
         return False
 
-def wait_for_service(name, url, max_wait=60):
-    """Wait for service to become healthy"""
-    print(f"   ⏳ Waiting for {name}...")
-    for i in range(max_wait):
-        if check_service(url):
-            print(f"   ✅ {name} is ready!")
+def wait_for(name, url, max_wait=90, interval=2):
+    print(f"  Waiting for {name} on {url}...", end="", flush=True)
+    for i in range(0, max_wait, interval):
+        if check(url):
+            print(f" ready ({i}s)")
             return True
-        if i > 0 and i % 10 == 0:
-            print(f"      ... still waiting ({i}s)")
-        time.sleep(1)
-    print(f"   ❌ {name} failed to start (timeout)")
+        if i > 0 and i % 20 == 0:
+            print(f"\n    ... still waiting ({i}s)", end="", flush=True)
+        time.sleep(interval)
+    print(f" TIMEOUT after {max_wait}s")
     return False
 
-# --- Service Startup ---
-def start_service(name, launch_script, log_file):
-    """Start a service using its launch script"""
-    print(f"\n🚀 Starting {name}...")
-
-    if not launch_script.exists():
-        print(f"   ❌ Launch script not found: {launch_script}")
-        return None
-
-    log_path = Path(log_file)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(log_path, 'w') as log:
+def launch(name, cmd, log_file, cwd=None, env=None):
+    log = Path(log_file)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    merged_env = {**os.environ, **(env or {})}
+    with open(log, 'w') as f:
         proc = subprocess.Popen(
-            [str(launch_script)],
-            stdout=log,
+            cmd,
+            stdout=f,
             stderr=subprocess.STDOUT,
-            cwd=launch_script.parent,
-            preexec_fn=os.setsid  # New process group for clean shutdown
+            cwd=str(cwd) if cwd else None,
+            env=merged_env,
+            preexec_fn=os.setsid,
         )
-
-    # Wait a bit to see if it immediately fails
-    time.sleep(2)
-    # Note: We don't check poll() here because some scripts (like STT) might spawn and exit.
-    # The health check later will confirm if it worked.
-
-    print(f"   Started {name} (PID: {proc.pid})")
-    print(f"   Logs: {log_file}")
+    processes.append((name, proc))
+    print(f"  {name} started (PID {proc.pid}) -> {log}")
     return proc
 
-def start_fatterbox(log_file):
-    """Start Fatterbox Docker container and stream logs"""
-    print(f"\n🚀 Starting Fatterbox (Image: {FATTERBOX_IMAGE})...")
+def start_stt():
+    print("\n[STT] Qwen3-ASR (port 8001)")
+    # Language is passed per-request by the agent from LiveKit room metadata — no lock needed here
+    launch(
+        "STT",
+        [str(STT_VENV), "server.py", "--model", "Qwen/Qwen3-ASR-1.7B", "--port", "8001"],
+        "/tmp/stt.log",
+        cwd=STT_DIR,
+    )
 
-    # Check if container exists, if not, we would need a 'docker run' command.
-    # For now, we assume the container exists but use the image name in logs for clarity.
-    try:
-        # Check if container exists
-        result = subprocess.run(["docker", "ps", "-a", "--filter", f"name={FATTERBOX_CONTAINER}", "--format", "{{.Names}}"], capture_output=True, text=True)
+def start_tts():
+    print("\n[TTS] MossTTS (port 8880) — ~30s to load")
+    launch(
+        "TTS",
+        [str(TTS_VENV), "openai_tts_server.py", "--port", "8880", "--device", "cuda:0"],
+        "/tmp/moss.log",
+        cwd=TTS_DIR,
+    )
 
-        if FATTERBOX_CONTAINER not in result.stdout:
-            print(f"   ⚠️  Container {FATTERBOX_CONTAINER} not found. You may need to run it first with your specific mounts.")
-            return None
+def start_agent():
+    print("\n[Agent] LiveKit tutor.ts")
+    launch(
+        "Agent",
+        ["pnpm", "dev:tutor"],
+        "/tmp/tutor-live.log",
+        cwd=AGENT_DIR,
+    )
 
-        subprocess.run(["docker", "start", FATTERBOX_CONTAINER], check=True, stdout=subprocess.DEVNULL)
-    except subprocess.CalledProcessError:
-        print(f"   ❌ Failed to start docker container: {FATTERBOX_CONTAINER}")
-        return None
-
-    # Follow logs
-    log_path = Path(log_file)
-    with open(log_path, 'w') as log:
-        proc = subprocess.Popen(
-            ["docker", "logs", "-f", FATTERBOX_CONTAINER],
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            preexec_fn=os.setsid
-        )
-
-    print(f"   Started Fatterbox (Container Running)")
-    print(f"   Logs: {log_file}")
-    return proc
-
-def start_cosyvoice(log_file):
-    """Start CosyVoice v3 TTS server with bidirectional streaming"""
-    print(f"\n🚀 Starting CosyVoice v3 (Port: {TTS_PORT})...")
-
-    venv_python = COSYVOICE_DIR / "venv" / "bin" / "python"
-    server_script = COSYVOICE_DIR / "openai_server_bistream.py"
-    model_dir = COSYVOICE_DIR / "pretrained_models" / "Fun-CosyVoice3-0.5B"
-
-    if not venv_python.exists():
-        print(f"   ❌ CosyVoice venv not found: {venv_python}")
-        return None
-
-    if not server_script.exists():
-        print(f"   ❌ CosyVoice server script not found: {server_script}")
-        return None
-
-    if not model_dir.exists():
-        print(f"   ❌ CosyVoice model not found: {model_dir}")
-        return None
-
-    log_path = Path(log_file)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(log_path, 'w') as log:
-        proc = subprocess.Popen(
-            [
-                str(venv_python),
-                str(server_script),
-                "--port", str(TTS_PORT),
-                "--model_dir", str(model_dir)
-            ],
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            cwd=str(COSYVOICE_DIR),
-            preexec_fn=os.setsid
-        )
-
-    time.sleep(2)
-    print(f"   Started CosyVoice v3 (PID: {proc.pid})")
-    print(f"   Logs: {log_file}")
-    return proc
+def start_dashboard():
+    print("\n[Dashboard] port 3001")
+    launch(
+        "Dashboard",
+        ["npx", "tsx", "src/dashboard/server.ts"],
+        "/tmp/dashboard.log",
+        cwd=AGENT_DIR,
+    )
 
 def main():
-    """Main orchestration"""
-    print("=" * 60)
-    print("🎯 Local AI Services - Startup")
-    print("=" * 60)
+    parser = argparse.ArgumentParser(description="LingLang local stack")
+    parser.add_argument("--no-agent", action="store_true", help="Skip starting the LiveKit agent")
+    parser.add_argument("--no-dashboard", action="store_true", help="Skip starting the dashboard")
+    parser.add_argument("--stt-only", action="store_true", help="Start STT only")
+    parser.add_argument("--tts-only", action="store_true", help="Start TTS only")
+    args = parser.parse_args()
 
-    # Ensure only the selected TTS is running
-    if USE_COSYVOICE:
-        print("\n🔄 Using CosyVoice v3 - stopping Fatterbox if running...")
-        subprocess.run(["docker", "stop", FATTERBOX_CONTAINER], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    print("=" * 55)
+    print("  LingLang Local Stack")
+    print("  STT: Qwen3-ASR  |  TTS: MossTTS")
+    print("  LLM: remote (NanoGPT/OpenRouter)")
+    print("=" * 55)
+
+    if args.tts_only:
+        start_tts()
+    elif args.stt_only:
+        start_stt()
     else:
-        print("\n🔄 Using Fatterbox - ensuring CosyVoice is stopped...")
-        subprocess.run(["pkill", "-f", "openai_server_bistream.py"], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        start_stt()
+        start_tts()
+        if not args.no_agent:
+            start_agent()
+        if not args.no_dashboard:
+            start_dashboard()
 
-    # Check Ollama
-    print("\n🔍 Checking Ollama...")
-    if check_service(LLM_HEALTH):
-        print(f"   ✅ Ollama running on port {LLM_PORT}")
-    else:
-        print(f"   ⚠️  Ollama not detected on port {LLM_PORT}")
-        print("      Start it with: ollama serve")
+    # Health checks
+    print("\n--- Health Checks ---")
+    stt_ok = True
+    tts_ok = True
 
-    # Start STT
-    stt_proc = start_service(
-        "STT (Faster Whisper)",
-        STT_LAUNCH,
-        "stt_service.log"
-    )
-    if stt_proc:
-        processes.append(("STT", stt_proc))
-
-    # Start TTS (CosyVoice or Fatterbox)
-    if USE_COSYVOICE:
-        tts_proc = start_cosyvoice("tts_service.log")
-        tts_name = "TTS (CosyVoice v3)"
-    else:
-        tts_proc = start_fatterbox("tts_service.log")
-        tts_name = "TTS (Fatterbox)"
-
-    if tts_proc:
-        processes.append((tts_name, tts_proc))
-
-    # Wait for health checks
-    print("\n🏥 Running health checks...")
-    stt_ok = wait_for_service("STT", STT_HEALTH, max_wait=30)
-    # CosyVoice needs more time for initial warmup (~26s)
-    tts_wait_time = 90 if USE_COSYVOICE else 30
-    tts_ok = wait_for_service("TTS", TTS_HEALTH, max_wait=tts_wait_time)
-
-    # Pre-warm LLM model
-    llm_ok = True
-    if check_service(LLM_HEALTH):
-        llm_model = os.getenv("LOCAL_LLM_MODEL", "ministral-3:14b")
-        print(f"\n🔥 Pre-warming LLM model: {llm_model}...")
-        try:
-            response = requests.post(
-                f"http://localhost:{LLM_PORT}/api/generate",
-                json={
-                    "model": llm_model,
-                    "prompt": "Ready",
-                    "stream": False,
-                    "keep_alive": "60m"  # Keep model loaded for 60 minutes
-                },
-                timeout=60
-            )
-            if response.status_code == 200:
-                print(f"   ✅ {llm_model} loaded and warmed!")
-            else:
-                print(f"   ⚠️  LLM pre-warm returned status {response.status_code}")
-                llm_ok = False
-        except requests.exceptions.Timeout:
-            print(f"   ⚠️  LLM pre-warm timed out (model may be large)")
-            llm_ok = False
-        except Exception as e:
-            print(f"   ⚠️  LLM pre-warm failed: {e}")
-            llm_ok = False
+    if not args.tts_only:
+        stt_ok = wait_for("STT", f"http://localhost:{STT_PORT}/health", max_wait=60)
+    if not args.stt_only:
+        tts_ok = wait_for("TTS", f"http://localhost:{TTS_PORT}/v1/models", max_wait=90)
 
     # Summary
-    print("\n" + "=" * 60)
-    if stt_ok and tts_ok:
-        print("✨ ALL SERVICES READY ✨")
-        print("\nService URLs:")
-        print(f"   STT:  http://localhost:{STT_PORT}")
-        print(f"   TTS:  http://localhost:{TTS_PORT}")
-        print(f"   LLM:  http://localhost:{LLM_PORT}")
-        if llm_ok:
-            print(f"        Model: {os.getenv('LOCAL_LLM_MODEL', 'ministral-3:14b')} (preloaded)")
-        print("\nLogs:")
-        print(f"   STT: {Path('stt_service.log').absolute()}")
-        print(f"   TTS: {Path('tts_service.log').absolute()}")
-        print("\nPress Ctrl+C to stop all services")
-        print("=" * 60)
+    print()
+    print("=" * 55)
+    status = "READY" if (stt_ok and tts_ok) else "PARTIAL (check logs)"
+    print(f"  {status}")
+    print()
+    print(f"  STT:       http://localhost:{STT_PORT}  (Qwen3-ASR)")
+    print(f"  TTS:       http://localhost:{TTS_PORT}  (MossTTS)")
+    print(f"  Dashboard: http://localhost:{DASHBOARD_PORT}")
+    print()
+    print("  Logs:")
+    print("    STT:       tail -f /tmp/stt.log")
+    print("    TTS:       tail -f /tmp/moss.log")
+    print("    Agent:     tail -f /tmp/tutor-live.log")
+    print("    Dashboard: tail -f /tmp/dashboard.log")
+    print()
+    print("  Ctrl+C to stop all")
+    print("=" * 55)
 
-        # Keep running
-        try:
-            while True:
-                time.sleep(1)
-                # Check if processes died
-                for name, proc in processes:
-                    if proc.poll() is not None:
-                        # Process exited. Check if service is still running (daemonized?)
-                        url = STT_HEALTH if "STT" in name else TTS_HEALTH
-                        if not check_service(url):
-                            print(f"\n⚠️  {name} exited unexpectedly and service is down!")
-                            cleanup()
-                        # If service is still up, just ignore the process exit (it likely forked)
-        except KeyboardInterrupt:
-            cleanup()
-    else:
-        print("❌ STARTUP FAILED")
-        print("\nCheck logs:")
-        print(f"   STT: {Path('stt_service.log').absolute()}")
-        print(f"   TTS: {Path('tts_service.log').absolute()}")
-        print("=" * 60)
+    # Keep alive + watch for crashes
+    try:
+        while True:
+            time.sleep(5)
+            for name, proc in processes:
+                if proc.poll() is not None:
+                    print(f"\n  {name} exited (code {proc.returncode}) — check logs")
+    except KeyboardInterrupt:
         cleanup()
-        sys.exit(1)
 
 if __name__ == "__main__":
     main()

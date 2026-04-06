@@ -36,6 +36,7 @@
     "dev:tutor": "tsx src/tutor.ts dev",
     "dev:tutor-duolingo": "tsx src/tutor_duolingo.ts dev",
     "dev:tutor-ed": "tsx src/tutor-event-driven.ts dev",
+    "dev:demo": "tsx src/demo.ts dev",
     "dashboard": "tsx src/dashboard/server.ts",
     "test:arch": "tsx test-architecture.ts",
     "test:db": "tsx test-database-flow.ts"
@@ -59,6 +60,7 @@
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@google/genai": "^1.13.0",
     "@livekit/agents": "^1.0.27",
+    "@livekit/agents-plugin-elevenlabs": "~1.0.27",
     "@livekit/agents-plugin-google": "^1.0.27",
     "@livekit/agents-plugin-openai": "^1.0.27",
     "@livekit/agents-plugin-silero": "^1.0.27",

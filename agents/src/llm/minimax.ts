@@ -19,7 +19,7 @@ export interface MiniMaxLLMOptions {
 
 const defaultOptions: MiniMaxLLMOptions = {
   model: 'MiniMax-Text-01', // Latest MiniMax 2.1 model
-  baseURL: 'https://api.minimaxi.com/v1',
+  baseURL: 'https://api.minimax.io/v1',
   temperature: 0.7,
   topP: 0.95,
   maxTokens: 2048,
@@ -43,36 +43,70 @@ export class MiniMaxLLM extends llm.LLM {
     }
   }
 
-  async chat(
-    chatCtx: ChatContext,
-    connOptions?: APIConnectOptions,
-  ): Promise<llm.LLMStream> {
-    const startTime = Date.now();
+  chat({
+    chatCtx,
+    connOptions,
+  }: {
+    chatCtx: ChatContext;
+    toolCtx?: any;
+    connOptions?: APIConnectOptions;
+    parallelToolCalls?: boolean;
+    toolChoice?: ToolChoice;
+    extraKwargs?: Record<string, unknown>;
+  }): llm.LLMStream {
+    if (!chatCtx || !chatCtx.items) {
+      this.#logger.error('[MiniMax LLM] Invalid chatCtx:', chatCtx);
+      throw new Error('Invalid ChatContext: missing items');
+    }
 
-    try {
-      this.#logger.debug('[MiniMax LLM] Sending chat request...');
+    this.#logger.debug('[MiniMax LLM] Sending chat request with', chatCtx.items.length, 'items');
 
-      // Convert ChatContext to MiniMax messages format
-      const messages = chatCtx.messages.map((msg: ChatMessage) => ({
+    // Convert ChatContext to MiniMax messages format
+    const messages = chatCtx.items
+      .filter((item: any) => item.type === 'message')
+      .map((msg: any) => ({
         role: msg.role === 'model' ? 'assistant' : msg.role,
-        content: msg.content,
+        content: typeof msg.content === 'string' ? msg.content :
+                 msg.content.map((c: any) => c.text || '').join(''),
       }));
 
-      const response = await fetch(`${this.#opts.baseURL}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${this.#opts.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: this.#opts.model,
-          messages,
-          temperature: this.#opts.temperature,
-          top_p: this.#opts.topP,
-          max_tokens: this.#opts.maxTokens,
-          stream: true,
-        }),
-      });
+    // Start the fetch and return stream immediately
+    const responsePromise = fetch(`${this.#opts.baseURL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.#opts.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: this.#opts.model,
+        messages,
+        temperature: this.#opts.temperature,
+        top_p: this.#opts.topP,
+        max_tokens: this.#opts.maxTokens,
+        stream: true,
+      }),
+    });
+
+    return new MiniMaxLLMStream(responsePromise, this.#logger);
+  }
+}
+
+class MiniMaxLLMStream extends llm.LLMStream {
+  #reader?: ReadableStreamDefaultReader<Uint8Array>;
+  #logger: any;
+  #buffer: string = '';
+  #responsePromise: Promise<Response>;
+
+  constructor(responsePromise: Promise<Response>, logger: any) {
+    super();
+    this.#responsePromise = responsePromise;
+    this.#logger = logger;
+  }
+
+  async *[Symbol.asyncIterator](): AsyncIterator<llm.ChatChunk> {
+    try {
+      // Await the response first
+      const response = await this.#responsePromise;
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -83,33 +117,11 @@ export class MiniMaxLLM extends llm.LLM {
         throw new Error('No response body');
       }
 
-      const elapsed = Date.now() - startTime;
-      this.#logger.info(`[MiniMax LLM] Request sent in ${elapsed}ms, streaming response...`);
+      this.#reader = response.body.getReader();
+      this.#logger.info('[MiniMax LLM] Streaming response...');
 
-      return new MiniMaxLLMStream(response.body, this.#logger);
-
-    } catch (error) {
-      this.#logger.error('[MiniMax LLM] Error:', error);
-      throw error;
-    }
-  }
-}
-
-class MiniMaxLLMStream extends llm.LLMStream {
-  #reader: ReadableStreamDefaultReader<Uint8Array>;
-  #logger: any;
-  #buffer: string = '';
-
-  constructor(body: ReadableStream<Uint8Array>, logger: any) {
-    super();
-    this.#reader = body.getReader();
-    this.#logger = logger;
-  }
-
-  async *[Symbol.asyncIterator](): AsyncIterator<llm.ChatChunk> {
-    try {
       while (true) {
-        const { done, value } = await this.#reader.read();
+        const { done, value } = await this.#reader!.read();
 
         if (done) {
           break;
@@ -157,14 +169,17 @@ class MiniMaxLLMStream extends llm.LLMStream {
         }
       }
     } catch (error) {
-      this.#logger.error('[MiniMax LLM Stream] Error:', error);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      this.#logger.error(`[MiniMax LLM Stream] Error: ${errorMsg}`);
       throw error;
     }
   }
 
   async aclose(): Promise<void> {
     try {
-      await this.#reader.cancel();
+      if (this.#reader) {
+        await this.#reader.cancel();
+      }
     } catch (err) {
       this.#logger.warn('[MiniMax] Error closing stream:', err);
     }

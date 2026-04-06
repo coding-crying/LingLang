@@ -4,6 +4,7 @@ import { SPANISH_INSTRUCTIONS } from './prompts/spanish.js'
 import { FRENCH_INSTRUCTIONS } from './prompts/french.js'
 import { PORTUGUESE_INSTRUCTIONS } from './prompts/portuguese.js'
 import { ARABIC_INSTRUCTIONS } from './prompts/arabic.js'
+import { ENGLISH_POWER_VOCAB_INSTRUCTIONS } from './prompts/english.js'
 import type { PromptVariant } from './prompts/common.js'
 
 export interface LanguageConfig {
@@ -14,11 +15,12 @@ export interface LanguageConfig {
 
   // Speech Services
   stt: {
-    language: string        // Whisper language code
+    language: string        // Qwen3-ASR full language name (e.g. 'Russian', 'English')
   }
 
   tts: {
-    voice: string          // Voice file/ID
+    voice: string          // ElevenLabs voice ID (cloud) or display name
+    mossVoice: string      // MossTTS voice prompt name (from voices/ dir)
     speed?: number         // Speech rate (default: 1.0)
   }
 
@@ -36,17 +38,45 @@ export interface LanguageConfig {
 }
 
 export const LANGUAGES: Record<string, LanguageConfig> = {
+  en: {
+    code: 'en',
+    name: 'English (Power Vocabulary)',
+    nativeName: 'English',
+
+    stt: {
+      language: 'English',
+    },
+
+    tts: {
+      voice: 'English',
+      mossVoice: 'english_prompt_24k',
+      speed: 1.0,
+    },
+
+    pedagogy: {
+      // Same-language learning; keep it snappy and mostly English.
+      targetLanguageRatio: 1.0,
+    },
+
+    prompts: {
+      greeting: 'All right. Say one sentence. Make it interesting.',
+      instructionsTemplate: ENGLISH_POWER_VOCAB_INSTRUCTIONS,
+      variant: 'mixed',
+    },
+  },
+
   ru: {
     code: 'ru',
     name: 'Russian',
     nativeName: 'Русский',
 
     stt: {
-      language: 'ru',
+      language: 'Russian',
     },
 
     tts: {
       voice: 'Russian',
+      mossVoice: 'russian_prompt_24k',
       speed: 1.0,
     },
 
@@ -55,7 +85,7 @@ export const LANGUAGES: Record<string, LanguageConfig> = {
     },
 
     prompts: {
-      greeting: 'Привет! Ready to learn?',
+      greeting: 'Okay, Russian. Привет — that\'s hello. What do you already know?',
       instructionsTemplate: RUSSIAN_INSTRUCTIONS,
       variant: 'mixed',
     },
@@ -67,11 +97,12 @@ export const LANGUAGES: Record<string, LanguageConfig> = {
     nativeName: 'Español',
 
     stt: {
-      language: 'es',
+      language: 'Spanish',
     },
 
     tts: {
-      voice: 'Spanish.mp3',
+      voice: 'Spanish',
+      mossVoice: 'spanish_prompt_24k',
       speed: 1.0,
     },
 
@@ -80,7 +111,7 @@ export const LANGUAGES: Record<string, LanguageConfig> = {
     },
 
     prompts: {
-      greeting: '¡Hola! Ready to learn?',
+      greeting: 'Okay, Spanish. ¡Hola! — that\'s hello. What do you already know?',
       instructionsTemplate: SPANISH_INSTRUCTIONS,
       variant: 'mixed',
     },
@@ -92,11 +123,12 @@ export const LANGUAGES: Record<string, LanguageConfig> = {
     nativeName: 'Français',
 
     stt: {
-      language: 'fr',
+      language: 'French',
     },
 
     tts: {
-      voice: 'French.wav',
+      voice: 'French',
+      mossVoice: 'english_prompt_24k',
       speed: 1.0,
     },
 
@@ -105,7 +137,7 @@ export const LANGUAGES: Record<string, LanguageConfig> = {
     },
 
     prompts: {
-      greeting: 'Bonjour! Ready to learn?',
+      greeting: 'Okay, French. Bonjour — that\'s hello. What do you already know?',
       instructionsTemplate: FRENCH_INSTRUCTIONS,
       variant: 'mixed',
     },
@@ -117,11 +149,12 @@ export const LANGUAGES: Record<string, LanguageConfig> = {
     nativeName: 'Português Europeu',
 
     stt: {
-      language: 'pt',
+      language: 'Portuguese',
     },
 
     tts: {
       voice: 'Portuguese',
+      mossVoice: 'portuguese_prompt_24k',
       speed: 1.0,
     },
 
@@ -130,7 +163,7 @@ export const LANGUAGES: Record<string, LanguageConfig> = {
     },
 
     prompts: {
-      greeting: 'Olá! Ready to learn?',
+      greeting: 'Okay, Portuguese. Olá — that\'s hello. What do you already know?',
       instructionsTemplate: PORTUGUESE_INSTRUCTIONS,
       variant: 'mixed',
     },
@@ -142,11 +175,12 @@ export const LANGUAGES: Record<string, LanguageConfig> = {
     nativeName: 'العربية',
 
     stt: {
-      language: 'ar',
+      language: 'Arabic',
     },
 
     tts: {
       voice: 'Alexander',
+      mossVoice: 'english_prompt_24k',
       speed: 1.0,
     },
 

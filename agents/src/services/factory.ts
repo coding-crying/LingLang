@@ -8,14 +8,13 @@ import * as openai from '@livekit/agents-plugin-openai';
 import * as silero from '@livekit/agents-plugin-silero';
 import type { llm, stt, tts } from '@livekit/agents';
 
-import { CosyVoiceTTS } from '../tts/cosyvoice.js';
-import { ChatterboxTTS } from '../tts/chatterbox.js';
-import { ElevenLabsSTT } from '../stt/elevenlabs.js';
-import { ElevenLabsTTS } from '../tts/elevenlabs.js';
-import { MiniMaxLLM } from '../llm/minimax.js';
+import { createTTS } from '../tts/fallback.js';
 import { getLanguageConfig } from '../config/languages.js';
+import { GemmaAudioSTT } from '../stt/gemma-audio-stt.js';
+import { GemmaAudioLLM } from '../llm/gemma-audio-llm.js';
+import { ElevenLabsRealtimeSTT } from '../stt/elevenlabs-realtime.js';
 
-export type ServiceMode = 'local' | 'cloud';
+export type ServiceMode = 'local' | 'cloud' | 'local-gemma-audio';
 
 export interface ServiceFactoryOptions {
   mode?: ServiceMode;
@@ -35,87 +34,48 @@ export class ServiceFactory {
   }
 
   /**
-   * Create STT (Speech-to-Text) service
+   * Create STT (Speech-to-Text) service — Qwen3-ASR on port 8001
    */
   createSTT(): stt.STT {
-    if (this.mode === 'cloud') {
-      console.log('[ServiceFactory] Using ElevenLabs STT');
-      const langConfig = getLanguageConfig(this.targetLanguage);
-
-      return new ElevenLabsSTT({
-        apiKey: process.env.ELEVENLABS_API_KEY,
-        language: langConfig.stt.language,
-        model: 'scribe-multilingual-v2',
-      });
-    } else {
-      console.log('[ServiceFactory] Using Local STT (Faster Whisper)');
-      const langConfig = getLanguageConfig(this.targetLanguage);
-
-      return new openai.STT({
-        baseURL: process.env.LOCAL_STT_URL || 'http://localhost:8000/v1',
-        apiKey: 'dummy',
-        language: langConfig.stt.language,
-      });
+    if (this.mode === 'local-gemma-audio') {
+      console.log(`[ServiceFactory] STT: Gemma 4 E4B (Audio Pass-Through)`);
+      return new GemmaAudioSTT();
     }
+
+    const langConfig = getLanguageConfig(this.targetLanguage);
+    console.log(`[ServiceFactory] STT: Qwen3-ASR (${langConfig.stt.language})`);
+    return new openai.STT({
+      baseURL: process.env.LOCAL_STT_URL || 'http://localhost:8001/v1',
+      apiKey: 'dummy',
+      language: langConfig.stt.language,
+    });
   }
 
   /**
    * Create LLM (Language Model) service
    */
   createLLM(): llm.LLM {
-    if (this.mode === 'cloud') {
-      console.log('[ServiceFactory] Using MiniMax LLM');
-
-      return new MiniMaxLLM({
-        apiKey: process.env.MINIMAX_API_KEY,
-        model: 'MiniMax-Text-01',
-        temperature: 0.7,
-      });
-    } else {
-      console.log('[ServiceFactory] Using Local LLM (Ollama)');
-
-      return new openai.LLM({
-        baseURL: process.env.LOCAL_LLM_URL || 'http://localhost:11434/v1',
-        model: process.env.LOCAL_LLM_MODEL || 'ministral-3:14b',
-        apiKey: 'ollama',
+    if (this.mode === 'local-gemma-audio') {
+      console.log(`[ServiceFactory] LLM: Gemma 4 E4B (Multimodal Reconstructor)`);
+      return new GemmaAudioLLM({
+        baseURL: process.env.LOCAL_STT_URL || 'http://localhost:8001/v1',
+        model: 'google/gemma-4-E4B-it'
       });
     }
+
+    const url = process.env.CONVERSATION_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:11434/v1';
+    const model = process.env.CONVERSATION_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma3:4b';
+    const key = process.env.CONVERSATION_LLM_KEY || 'ollama';
+    console.log(`[ServiceFactory] LLM: ${model}`);
+    return new openai.LLM({ baseURL: url, model, apiKey: key });
   }
 
   /**
-   * Create TTS (Text-to-Speech) service
+   * Create TTS — MossTTS with ElevenLabs fallback
    */
-  createTTS(): tts.TTS {
-    if (this.mode === 'cloud') {
-      console.log('[ServiceFactory] Using ElevenLabs TTS');
-      const langConfig = getLanguageConfig(this.targetLanguage);
-
-      return new ElevenLabsTTS({
-        apiKey: process.env.ELEVENLABS_API_KEY,
-        language: this.targetLanguage,
-        voiceId: ElevenLabsTTS.getVoiceForLanguage(this.targetLanguage),
-        model: 'eleven_turbo_v2_5',
-      });
-    } else {
-      console.log('[ServiceFactory] Using Local TTS (CosyVoice)');
-      const langConfig = getLanguageConfig(this.targetLanguage);
-
-      const useCosyVoice = process.env.LOCAL_TTS_URL?.includes('50000');
-
-      if (useCosyVoice) {
-        return new CosyVoiceTTS({
-          url: process.env.LOCAL_TTS_URL || 'http://localhost:50000',
-          voice: langConfig.tts.voice,
-          speed: langConfig.tts.speed || 1.0,
-        });
-      } else {
-        return new ChatterboxTTS({
-          baseURL: process.env.LOCAL_TTS_URL || 'http://localhost:8005',
-          voice: langConfig.tts.voice.replace('.wav', ''),
-          speed: langConfig.tts.speed || 1.0,
-        });
-      }
-    }
+  async createTTS(): Promise<tts.TTS> {
+    const langConfig = getLanguageConfig(this.targetLanguage);
+    return createTTS(langConfig);
   }
 
   /**

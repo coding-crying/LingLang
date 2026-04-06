@@ -38,8 +38,12 @@ import {
 import * as openai from '@livekit/agents-plugin-openai';
 import * as silero from '@livekit/agents-plugin-silero';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
+import { resolve, dirname } from 'node:path';
+import { writeFile, rename } from 'node:fs/promises';
+import http from 'node:http';
 
-import { runSupervisor } from './tools/supervisor-functions.js';
+import { runProcessor } from './tools/supervisor-functions.js';
 import { ContextManager, PlaceholderGoals } from './lib/context.js';
 import { getLanguageConfig } from './config/languages.js';
 import { buildInstructions } from './config/prompts/base.js';
@@ -94,11 +98,81 @@ class ConversationHistory {
 }
 
 // ============================================================================
+// LOCAL SERVICE AUTO-START
+// ============================================================================
+
+function httpGet(url: string, timeoutMs = 2000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), timeoutMs);
+    http.get(url, (res) => {
+      clearTimeout(timer);
+      resolve(res.statusCode !== undefined && res.statusCode < 500);
+    }).on('error', () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+  });
+}
+
+async function ensureLocalServices(): Promise<void> {
+  const mode = process.env.SERVICE_MODE || 'local';
+  if (mode !== 'local') return;
+
+  const ttsMode = process.env.TTS_MODE || mode;
+  const checks = [
+    { name: 'STT',  url: 'http://localhost:8000/docs' },
+    ...(ttsMode === 'local' ? [{ name: 'TTS',  url: 'http://localhost:50000/docs' }] : []),
+    { name: 'LLM',  url: 'http://localhost:11434' },
+  ];
+
+  const results = await Promise.all(checks.map(async (c) => ({ ...c, ok: await httpGet(c.url) })));
+  const down = results.filter(r => !r.ok);
+
+  if (down.length === 0) {
+    console.log('[LocalServices] All services healthy');
+    return;
+  }
+
+  console.log(`[LocalServices] Down: ${down.map(d => d.name).join(', ')} — launching start_local_services.py`);
+
+  // Resolve path relative to project root (one dir up from agents/src/)
+  const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const script = resolve(projectRoot, 'start_local_services.py');
+
+  const child = spawn('python3', ['-u', script], {
+    cwd: projectRoot,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+  });
+
+  child.stdout?.on('data', (d: Buffer) => process.stdout.write(`[LocalServices] ${d}`));
+  child.stderr?.on('data', (d: Buffer) => process.stderr.write(`[LocalServices] ${d}`));
+  child.unref(); // Don't keep the agent alive just for this
+
+  // Poll until all needed services are up (max 120s)
+  const needed = down.map(d => d.url);
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 2000));
+    const still = await Promise.all(needed.map(url => httpGet(url).then(ok => ok ? null : url)));
+    const remaining = still.filter(Boolean);
+    if (remaining.length === 0) {
+      console.log('[LocalServices] All services ready');
+      return;
+    }
+  }
+  console.warn('[LocalServices] Timed out waiting for services — continuing anyway');
+}
+
+// ============================================================================
 // AGENT DEFINITION
 // ============================================================================
 
 export default defineAgent({
   prewarm: async (proc: JobProcess) => {
+    // Ensure local STT/TTS/LLM are running before we need them
+    await ensureLocalServices();
+
     console.log('[Tutor-ED] Prewarming VAD...');
     proc.userData.vad = await silero.VAD.load();
     console.log('[Tutor-ED] VAD prewarmed');
@@ -143,12 +217,8 @@ export default defineAgent({
     let initialContext = '';
     try {
       initialContext = await ContextManager.getInitialContext(userId);
-
-      // Also check for any pending goals
-      const pendingGoal = await ContextManager.getDynamicGoal(userId);
-      if (pendingGoal) {
-        initialContext += '\n\n' + pendingGoal;
-      }
+      // Goal selection + teaching plan is handled by the Supervisor tool (on-demand + timer),
+      // not baked into initialContext here.
     } catch (error) {
       console.error('[Tutor-ED] Failed to load context:', error);
       initialContext = `Learning: ${langConfig.name}\nProficiency: ${user.proficiencyLevel}`;
@@ -162,16 +232,77 @@ export default defineAgent({
       initialContext,
     });
 
-    // === CREATE AGENT (NO TOOLS - event-driven instead) ===
+    // === DYNAMIC INSTRUCTIONS (Supervisor-driven teaching plan) ===
+    const baseInstructions = instructions;
+
+    let supervisorPlanText = 'None yet.';
+    let supervisorPlanJson: any = null;
+    let planStale = true;
+    let lastPlanAt = 0;
+
+    // Signals accumulate between supervisor refreshes.
+    const pendingSignals: string[] = [];
+
+    // Minimal runtime introspection for the dashboard.
+    let lastWatcherDecision: any = null;
+    let lastProcessorRun: any = null;
+    let lastPlannerRun: any = null;
+    const runtimeStatePath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'runtime_state.json');
+    let runtimeStateWritePending: NodeJS.Timeout | null = null;
+    const writeRuntimeStateSoon = () => {
+      if (runtimeStateWritePending) return;
+      runtimeStateWritePending = setTimeout(() => {
+        runtimeStateWritePending = null;
+        try {
+          const state = {
+            userId,
+            targetLang,
+            lastPlanAt,
+            planStale,
+            pendingSignals,
+            supervisorPlan: supervisorPlanJson,
+            lastWatcherDecision,
+            lastProcessorRun,
+            lastPlannerRun,
+            updatedAt: Date.now(),
+          };
+          // Write atomically
+          const tmp = runtimeStatePath + '.tmp';
+          writeFile(tmp, JSON.stringify(state, null, 2), 'utf-8')
+            .then(() => rename(tmp, runtimeStatePath))
+            .catch(() => {});
+        } catch {}
+      }, 250);
+    };
+
+    const buildDynamicInstructions = () => {
+      const last = lastPlanAt ? new Date(lastPlanAt).toISOString() : 'never';
+      return `${baseInstructions}
+
+# Supervisor (DO NOT ROLEPLAY THIS SECTION)
+PLAN_STALE: ${planStale}
+LAST_PLAN_AT: ${last}
+
+CURRENT_TEACHING_PLAN:
+${supervisorPlanText}
+
+Rules:
+- You are the conversation tutor (you speak to the user).
+- The Supervisor updates CURRENT_TEACHING_PLAN automatically (timer + signals). You do not need to call tools.
+- Follow CURRENT_TEACHING_PLAN closely, but keep the conversation natural.
+- If the user explicitly requests a different learning style, adapt immediately and the Supervisor will update the plan.
+`;
+    };
+
+    // === CREATE AGENT ===
     const agent = new voice.Agent({
-      instructions,
-      // No tools needed - supervisor runs on events
+      instructions: buildDynamicInstructions(),
     });
 
     // === CREATE SERVICES (LOCAL OR CLOUD) ===
     const { ServiceFactory } = await import('./services/factory.js');
     const serviceFactory = new ServiceFactory({
-      mode: (process.env.SERVICE_MODE as 'local' | 'cloud') || 'local',
+      mode: (process.env.SERVICE_MODE as 'local' | 'cloud' | 'local-gemma-audio') || 'local',
       targetLanguage: targetLang,
       userId,
     });
@@ -193,148 +324,267 @@ export default defineAgent({
 
     // === CONVERSATION TRACKING ===
     const history = new ConversationHistory();
-    let pendingGoalNote: string | null = null;
 
-    // === EVENT HANDLERS ===
+    // === HELPERS: instruction refresh ===
+    const refreshInstructions = async () => {
+      (agent as any)._instructions = buildDynamicInstructions();
+      await agent.updateChatCtx((agent as any)._chatCtx);
+    };
 
-    // Track agent state to know when GPU is free
-    let lastAgentState = 'initializing';
-    let pendingAnalysis: { transcription: string; context: string } | null = null;
+    // === SUPERVISOR (background planner) ===
+    // A lightweight "watcher" model can decide whether we should regenerate the plan.
+    // This avoids regenerating every turn while still reacting quickly.
 
-    // Optimization: Turn counter and dirty flag
-    let turnCounter = 0;
-    let goalNeedsCheck = true; // Start true to get initial goal
-    const PROCESSOR_INTERVAL = 5; // Run processor every N turns
+    const shouldUpdatePlan = async (reasonHint: string) => {
+      // Hard refresh if plan is too old
+      const maxAgeMs = Number(process.env.PLAN_MAX_AGE_MS || 60_000);
+      const now = Date.now();
+      if (!lastPlanAt || now - lastPlanAt > maxAgeMs) {
+        return { should: true, reason: 'plan_too_old' };
+      }
 
-    // On user transcription: queue analysis (don't run yet - wait for agent to finish)
+      // If we already flagged stale, update (but watcher still decides if the signal is weak)
+      // We treat staleness + accumulated signals as a reason hint.
+
+      const watcherUrl = process.env.WATCHER_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:11434/v1';
+      const watcherModel = process.env.WATCHER_LLM_MODEL || 'gemma3:4b';
+      const watcherKey = process.env.WATCHER_LLM_KEY || 'ollama';
+
+      const recent = history.getContext();
+
+      const system = `You are a lightweight watcher for a language tutor.
+Decide if the Supervisor should regenerate the teaching plan now.
+Return JSON ONLY: {"should": true|false, "reason": "string"}.
+Say should=true when:
+- user asks to change learning style/pacing/corrections
+- user seems confused/stuck or asks "what should we do"
+- enough new learning signals happened that the plan might change
+Otherwise false.`;
+
+      const ageMs = now - lastPlanAt;
+      const signals = pendingSignals.slice(-10).join(', ') || 'none';
+
+      const user = `Reason hint: ${reasonHint}
+Plan age (ms): ${ageMs}
+Pending signals: ${signals}
+Last plan at: ${lastPlanAt}
+Plan summary: ${supervisorPlanText.substring(0, 400)}
+Recent conversation:\n${recent}`;
+
+      try {
+        const resp = await fetch(`${watcherUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${watcherKey}`,
+          },
+          body: JSON.stringify({
+            model: watcherModel,
+            messages: [
+              { role: 'system', content: system },
+              { role: 'user', content: user },
+            ],
+            temperature: 0.1,
+            max_tokens: 120,
+          }),
+        });
+
+        const data = (await resp.json()) as any;
+        const content = data.choices?.[0]?.message?.content || '';
+        let jsonText = String(content).trim();
+        const block = jsonText.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (block?.[1]) jsonText = block[1].trim();
+        const parsed = JSON.parse(jsonText);
+        const decision = { should: !!parsed.should, reason: String(parsed.reason || 'watcher') };
+        lastWatcherDecision = { 
+          ...decision, 
+          at: Date.now(), 
+          reasonHint,
+          rawPrompt: system + '\n\n' + user,
+          rawResponse: content
+        };
+        writeRuntimeStateSoon();
+        return decision;
+      } catch (e) {
+        // Watcher failure should not break the session; default to no.
+        const decision = { should: false, reason: 'watcher_error' };
+        lastWatcherDecision = { 
+          ...decision, 
+          at: Date.now(), 
+          reasonHint,
+          error: String(e)
+        };
+        writeRuntimeStateSoon();
+        return decision;
+      }
+    };
+
+    const updatePlanNow = async (reason: string) => {
+      const now = Date.now();
+      const cooldownMs = Number(process.env.PLAN_COOLDOWN_MS || 30_000);
+      if (lastPlanAt && now - lastPlanAt < cooldownMs && reason !== 'user_request') {
+        return;
+      }
+
+      const recentHistory = history.getContext();
+      const dbContext = await ContextManager.getInitialContext(userId);
+      const goalNote = await ContextManager.getDynamicGoal(userId);
+
+      // Use Step 3.5 Flash (via OpenRouter) by default for deeper planning.
+      const plannerUrl = process.env.SUPERVISOR_PLANNER_LLM_URL || 'https://openrouter.ai/api/v1';
+      const plannerModel = process.env.SUPERVISOR_PLANNER_LLM_MODEL || 'stepfun/step-3.5-flash';
+      const plannerKey = process.env.SUPERVISOR_PLANNER_LLM_KEY || process.env.SUPERVISOR_LLM_KEY || '';
+
+      const systemPrompt = `You are the Supervisor for a language-learning voice tutor.
+
+You will be given:
+- The previous teaching plan (your last output)
+- The recent conversation
+- A DB snapshot (SRS due items, new vocab candidates, active goal state)
+
+Your job: update the teaching plan *incrementally*.
+- Keep parts of the previous plan that are still valid.
+- Only change what needs changing.
+- If nothing should change, return the same plan with a note explaining why.
+
+Return JSON ONLY with:
+{
+  "preferences": {"style": "drills|conversation|mixed", "correction": "gentle|strict", "explanations": "minimal|normal|detailed", "pace": "slow|normal|fast"},
+  "teachingPlan": {"goal": "string", "targets": ["lexemeId"], "tactics": ["string"], "nextPrompt": "string", "targetLanguageRatio": 0.0},
+  "notes": ["string"]
+}
+Be concise. The plan should be executable immediately.`;
+
+      const prevPlan = supervisorPlanJson ? JSON.stringify(supervisorPlanJson) : 'null';
+      const ageMs = lastPlanAt ? (Date.now() - lastPlanAt) : -1;
+      const signals = pendingSignals.slice(-20).join(', ') || 'none';
+
+      const userPrompt = `Reason: ${reason}
+Plan age (ms): ${ageMs}
+Pending signals: ${signals}
+
+PREVIOUS_PLAN_JSON:\n${prevPlan}\n
+DB snapshot:\n${dbContext}\n\nActive goal note:\n${goalNote || 'None'}\n\nRecent conversation:\n${recentHistory}`;
+
+      const resp = await fetch(`${plannerUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${plannerKey}`,
+        },
+        body: JSON.stringify({
+          model: plannerModel,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          temperature: 0.2,
+          max_tokens: 700,
+        }),
+      });
+
+      const data = (await resp.json()) as any;
+      const content = data.choices?.[0]?.message?.content || '';
+      let jsonText = String(content).trim();
+      const block = jsonText.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (block?.[1]) jsonText = block[1].trim();
+      const parsed = JSON.parse(jsonText);
+
+      supervisorPlanJson = parsed;
+      supervisorPlanText = JSON.stringify(parsed, null, 2);
+
+      lastPlannerRun = {
+        at: now,
+        reason,
+        rawPrompt: systemPrompt + '\n\n' + userPrompt,
+        rawResponse: content
+      };
+
+      lastPlanAt = now;
+      planStale = false;
+      pendingSignals.length = 0;
+      writeRuntimeStateSoon();
+
+      await refreshInstructions();
+    };
+
+    // Timer: check at least every 30s, force refresh at least every 60s.
+    const PLAN_TICK_MS = Number(process.env.PLAN_TICK_MS || 30_000);
+    const planTimer = setInterval(() => {
+      shouldUpdatePlan('timer').then(({ should, reason }) => {
+        if (should) return updatePlanNow(reason);
+      }).catch(() => {});
+    }, PLAN_TICK_MS);
+
+    // Generate an initial plan quickly once we have session context.
+    updatePlanNow('session_start').catch(() => {});
+
+    await refreshInstructions();
+
+    // === PROCESSOR (DB population) ===
+    // Batch ingestion: run the processor every N user turns and feed it the last N turns.
+    const PROCESSOR_TURN_INTERVAL = Number(process.env.PROCESSOR_TURN_INTERVAL || 3);
+    const pendingUserTurns: string[] = [];
+    let totalUserTurns = 0;
+
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, async (ev: any) => {
       if (!ev.isFinal) return;
 
       const transcription = ev.transcript || ev.text || '';
+      if (!transcription) return;
+
       console.log(`[User] ${transcription}`);
       history.addUserTurn(transcription);
 
-      turnCounter++;
-
-      // Only queue processor if we're at the interval
-      const shouldRunProcessor = turnCounter % PROCESSOR_INTERVAL === 0;
-
-      if (shouldRunProcessor || goalNeedsCheck) {
-        // Queue the analysis - we'll run it after agent stops speaking
-        // This avoids GPU competition between conversation LLM and supervisor LLM
-        pendingAnalysis = {
-          transcription,
-          context: history.getContext(),
-        };
-        console.log(`[Supervisor] Analysis queued (turn ${turnCounter}, processor: ${shouldRunProcessor}, goal: ${goalNeedsCheck})`);
-      } else {
-        console.log(`[Supervisor] Skipping analysis (turn ${turnCounter}/${PROCESSOR_INTERVAL})`);
+      totalUserTurns++;
+      pendingUserTurns.push(transcription);
+      if (pendingUserTurns.length > PROCESSOR_TURN_INTERVAL) {
+        pendingUserTurns.shift();
       }
+
+      // Only run the processor every N turns
+      if (totalUserTurns % PROCESSOR_TURN_INTERVAL !== 0) return;
+
+      const batchUtterance = pendingUserTurns.join('\n');
+
+      runProcessor(userId, batchUtterance, history.getContext(), {
+        useGemini: false,
+        llmUrl: process.env.PROCESSOR_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:11434/v1',
+      }).then((result) => {
+        lastProcessorRun = {
+          at: Date.now(),
+          batch: pendingUserTurns.slice(),
+          analysisLexemeCount: result.analysis?.lexemes?.length || 0,
+          srsUpdateCount: result.srsUpdates?.length || 0,
+          errors: result.errors,
+          rawPrompt: result.rawPrompt,
+          rawResponse: result.rawResponse,
+        };
+        writeRuntimeStateSoon();
+        if (result.errors.length) {
+          console.warn('[Processor] Errors:', result.errors);
+        }
+
+        // Any processor run is a potential supervisor trigger, but we gate by watcher/cooldowns.
+        if ((result.analysis?.lexemes?.length || 0) > 0) {
+          pendingSignals.push('processor_analysis');
+        }
+        if ((result.srsUpdates?.length || 0) > 0) {
+          pendingSignals.push('srs_updated');
+        }
+
+        // Mark stale so watcher/supervisor considers a refresh ASAP.
+        planStale = true;
+        writeRuntimeStateSoon();
+        refreshInstructions().catch(() => {});
+      }).catch((err) => {
+        console.error('[Processor] Failed:', err);
+      });
     });
 
-    // Watch agent state changes - run supervisor when agent finishes speaking
-    session.on(voice.AgentSessionEventTypes.AgentStateChanged, async (ev: any) => {
-      const newState = ev.newState;
-      console.log(`[Agent] State: ${lastAgentState} → ${newState}`);
-
-      // When agent transitions FROM speaking to idle/listening, GPU is free
-      if (lastAgentState === 'speaking' && (newState === 'idle' || newState === 'listening')) {
-        console.log('[Agent] Finished speaking');
-
-        // Run queued analysis now that GPU is free
-        if (pendingAnalysis) {
-          const { transcription, context } = pendingAnalysis;
-          pendingAnalysis = null;
-
-          const shouldRunProcessor = turnCounter % PROCESSOR_INTERVAL === 0;
-
-          try {
-            let srsUpdates: any[] = [];
-
-            // PROCESSOR: Analyze + update SRS (only every N turns)
-            if (shouldRunProcessor) {
-              console.log('[Processor] Running analysis (GPU now free)...');
-
-              const result = await runSupervisor(userId, transcription, context, {
-                useGemini: false,  // Use local LLM only (no Gemini API needed)
-                llmUrl: process.env.LOCAL_LLM_URL || 'http://localhost:11434/v1',
-              });
-
-              srsUpdates = result.srsUpdates;
-
-              console.log(`[Processor] Analysis complete:`,
-                `${result.srsUpdates.length} SRS updates,`,
-                `${result.errors.length} errors`);
-
-              if (result.errors.length > 0) {
-                console.warn('[Processor] Errors:', result.errors);
-              }
-
-              // If we updated SRS, goal might have changed
-              if (srsUpdates.length > 0) {
-                goalNeedsCheck = true;
-                console.log('[Processor] SRS updated - marking goal for recheck');
-              }
-            }
-
-            // SUPERVISOR: Check goals (only when dirty flag is set)
-            if (goalNeedsCheck) {
-              console.log('[Supervisor] Checking goal status...');
-
-              // TESTING: Use placeholder goals instead of database
-              const USE_PLACEHOLDER_GOALS = process.env.USE_PLACEHOLDER_GOALS === 'true';
-
-              let goalUpdate: string | null = null;
-
-              if (USE_PLACEHOLDER_GOALS) {
-                // Simple rotation every 5 turns
-                if (turnCounter % 5 === 0) {
-                  goalUpdate = PlaceholderGoals.getNextGoal();
-                  console.log('[Supervisor] (PLACEHOLDER) New goal:', goalUpdate);
-                }
-              } else {
-                // Use real database-backed goals
-                goalUpdate = await ContextManager.getDynamicGoal(userId);
-              }
-
-              goalNeedsCheck = false; // Reset flag
-
-              if (goalUpdate) {
-                console.log(`[Supervisor] Goal update detected`);
-
-                // Check what type of goal update
-                if (goalUpdate.includes('COMPLETED')) {
-                  // User completed a goal - praise them!
-                  const match = goalUpdate.match(/successfully used "([^"]+)"/);
-                  const word = match ? match[1] : '';
-
-                  // Inject praise into conversation
-                  setTimeout(() => {
-                    if (word) {
-                      session.say(`Отлично! Great job using "${word}"!`);
-                    }
-                  }, 500); // Small delay to feel natural
-
-                  // Goal completed - need to check for new goal
-                  goalNeedsCheck = true;
-
-                } else if (goalUpdate.includes('NEW GOAL')) {
-                  // New goal set - store for context (don't interrupt immediately)
-                  pendingGoalNote = goalUpdate;
-                  console.log('[Supervisor] New goal stored for next context refresh');
-                }
-              } else {
-                console.log('[Supervisor] No goal changes');
-              }
-            }
-
-          } catch (err) {
-            console.error('[Supervisor] Failed:', err);
-          }
-        }
-      }
-
-      lastAgentState = newState;
+    // Cleanup timer
+    ctx.room.on('disconnected', () => {
+      clearInterval(planTimer);
     });
 
     session.on(voice.AgentSessionEventTypes.Error, (ev: any) => {

@@ -64,6 +64,8 @@ export const users = sqliteTable('users', {
   targetLanguage: text('target_language').notNull().default('ru'),
   nativeLanguage: text('native_language').notNull().default('en'),
   proficiencyLevel: text('proficiency_level').default('beginner'),
+
+  // (no demo metadata columns)
 });
 
 export const usersRelations = relations(users, ({ many }) => ({

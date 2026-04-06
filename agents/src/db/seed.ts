@@ -30,11 +30,49 @@ const russianUnits = [
   }
 ];
 
+// English Power Vocabulary (SAT/GRE)
+// Keep this small and high-signal for the demo.
+const englishUnits = [
+  {
+    id: 'en-unit-1',
+    title: 'Argument & Precision (English)',
+    description: 'Words you use to sound sharp when analyzing claims and evidence',
+    language: 'en',
+    order: 1,
+    difficulty: 'advanced',
+    prerequisites: [],
+    lexemes: [
+      { lemma: 'equivocal', pos: 'ADJ', translation: 'ambiguous; intentionally unclear' },
+      { lemma: 'specious', pos: 'ADJ', translation: 'seems plausible but is actually wrong' },
+      { lemma: 'cogent', pos: 'ADJ', translation: 'clear, logical, and convincing' },
+      { lemma: 'ameliorate', pos: 'VERB', translation: 'to make better; improve' },
+      { lemma: 'obviate', pos: 'VERB', translation: 'to remove the need for; make unnecessary' },
+      { lemma: 'inimical', pos: 'ADJ', translation: 'harmful; hostile to' },
+    ]
+  },
+  {
+    id: 'en-unit-2',
+    title: 'Tone & Character (English)',
+    description: 'Words for subtle attitudes, motives, and behavior',
+    language: 'en',
+    order: 2,
+    difficulty: 'advanced',
+    prerequisites: ['en-unit-1'],
+    lexemes: [
+      { lemma: 'sardonic', pos: 'ADJ', translation: 'grimly mocking; cynical' },
+      { lemma: 'obsequious', pos: 'ADJ', translation: 'excessively flattering; servile' },
+      { lemma: 'fastidious', pos: 'ADJ', translation: 'very attentive to detail; hard to please' },
+      { lemma: 'magnanimous', pos: 'ADJ', translation: 'generous and forgiving' },
+      { lemma: 'capricious', pos: 'ADJ', translation: 'impulsive; unpredictable' },
+    ]
+  }
+];
+
 async function seed() {
   console.log('Seeding database...');
 
   // 1. Create Units & Lexemes
-  for (const unit of russianUnits) {
+  for (const unit of [...russianUnits, ...englishUnits]) {
     console.log(`Creating unit: ${unit.title}`);
     await db.insert(schema.units).values({
       id: unit.id,

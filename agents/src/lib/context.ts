@@ -1,6 +1,6 @@
 import { db } from '../db/index.js';
 import { learningProgress, units, lexemes, users, activeGoals, duolingoMetadata } from '../db/schema.js';
-import { eq, and, asc, desc } from 'drizzle-orm';
+import { eq, and, asc, desc, lte } from 'drizzle-orm';
 
 export class ContextManager {
 
@@ -29,7 +29,8 @@ export class ContextManager {
     const targetLang = user.targetLanguage || 'ru';
     console.log(`[Context] Target language: ${targetLang}`);
 
-    // Get current unit FOR THIS LANGUAGE
+    // Curriculum: pick the earliest unit for the target language.
+    // (Lightweight demo behavior. Later we can advance unit by unit.)
     const currentUnit = await db.query.units.findFirst({
       where: eq(units.language, targetLang),
       orderBy: [asc(units.order)],
@@ -39,13 +40,17 @@ export class ContextManager {
     if (!currentUnit) return "No curriculum found.";
 
     const now = Date.now();
-    console.log(`[Context] Querying reviews...`);
+
+    // SRS: only show items that are actually due.
+    console.log(`[Context] Querying due reviews...`);
     const dueReviews = await db.query.learningProgress.findMany({
-        where: and(
-            eq(learningProgress.userId, userId)
-        ),
-        with: { lexeme: true },
-        limit: 5,
+      where: and(
+        eq(learningProgress.userId, userId),
+        lte(learningProgress.nextReview, now)
+      ),
+      with: { lexeme: true },
+      orderBy: [asc(learningProgress.nextReview)],
+      limit: 5,
     });
     console.log(`[Context] Found ${dueReviews.length} reviews`);
 
@@ -53,11 +58,11 @@ export class ContextManager {
 
     console.log(`[Context] Querying new words...`);
     const unitLexemes = await db.query.lexemes.findMany({
-        where: and(
-            eq(lexemes.unitId, currentUnit.id),
-            eq(lexemes.language, targetLang)
-        ),
-        limit: 5,
+      where: and(
+        eq(lexemes.unitId, currentUnit.id),
+        eq(lexemes.language, targetLang)
+      ),
+      limit: 12,
     });
     console.log(`[Context] Found ${unitLexemes.length} unit lexemes`);
     
@@ -68,18 +73,25 @@ export class ContextManager {
         .map((l: typeof lexemes.$inferSelect) => `${l.lemma} (${l.translation})`)
         .join(', ');
 
+    const hasAnyProgress = (await db.query.learningProgress.findFirst({
+      where: eq(learningProgress.userId, userId),
+      columns: { id: true }
+    })) != null;
+    const isNewUser = !hasAnyProgress;
+
     return `
-    User ID: ${userId}
-    Target Language: ${targetLang}
-    Native Language: ${user.nativeLanguage}
-    Proficiency Level: ${user.proficiencyLevel}
+User ID: ${userId}
+Target Language: ${targetLang}
+Native Language: ${user.nativeLanguage}
+Proficiency Level: ${user.proficiencyLevel}
+NEW_USER: ${isNewUser ? 'true' : 'false'}
 
-    Current Goal: ${currentUnit.title}
-    Description: ${currentUnit.description}
+Curriculum Unit: ${currentUnit.title}
+Unit Description: ${currentUnit.description}
 
-    Vocabulary to Review: ${reviewList || "None"}
-    New Vocabulary to Introduce: ${newWords || "None"}
-    `;
+Vocabulary to Review (DUE by SRS): ${reviewList || "None"}
+New Vocabulary to Introduce (next in curriculum): ${newWords || "None"}
+    `.trim();
   }
 
   /**

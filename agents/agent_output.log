@@ -1,0 +1,118 @@
+
+> @livekit/agents@1.0.30 dev:tutor-ed /home/will/Desktop/LingLang/agents
+> tsx src/tutor-event-driven.ts dev
+
+[DB] Initializing database at: /home/will/Desktop/LingLang/agents/tutor.db
+[dotenv@17.2.3] injecting env (14) from .env.local -- tip: 🔐 prevent committing .env to code: https://dotenvx.com/precommit
+[00:50:56.757] [32mINFO[39m (369780): [36mstarting worker[39m
+    version: "0.1.0"
+[00:50:56.784] [32mINFO[39m (369780): [36mServer is listening on port 33301[39m
+[00:50:56.939] [32mINFO[39m (369780): [36mregistered worker[39m
+    version: "0.1.0"
+    id: "AW_453vBwB2wagU"
+    server_info: {
+      "edition": "Cloud",
+      "version": "1.9.11",
+      "protocol": 16,
+      "region": "US West B",
+      "nodeId": "NC_OPHOENIX1B_2TvSbptAftLq",
+      "debugInfo": "",
+      "agentProtocol": 0
+    }
+[00:51:01.955] [32mINFO[39m (369780): [36mreceived job request[39m
+    version: "0.1.0"
+    jobId: "AJ_rK8jFVW8kKrN"
+    resuming: false
+    agentName: ""
+[00:51:01.963] [32mINFO[39m (369780): [36mreceived job request[39m
+    version: "0.1.0"
+    jobId: "AJ_Ts8StcaZCbJY"
+    resuming: false
+    agentName: ""
+[DB] Initializing database at: /home/will/Desktop/LingLang/agents/tutor.db
+[dotenv@17.2.3] injecting env (0) from .env.local -- tip: 📡 add observability to secrets: https://dotenvx.com/ops
+[Tutor-ED] Prewarming VAD...
+[DB] Initializing database at: /home/will/Desktop/LingLang/agents/tutor.db
+[dotenv@17.2.3] injecting env (0) from .env.local -- tip: ✅ audit secrets and track compliance: https://dotenvx.com/ops
+[Tutor-ED] Prewarming VAD...
+[Tutor-ED] VAD prewarmed
+[Tutor-ED] Connecting to room...
+Nvidia Encoder is supported.
+Nvidia Decoder is supported.
+[Tutor-ED] VAD prewarmed
+[Tutor-ED] Connecting to room...
+Nvidia Encoder is supported.
+Nvidia Decoder is supported.
+{"level":20,"time":1770022264381,"pid":369958,"hostname":"fedora","name":"lk-rtc","msg":"Connect callback received"}
+[Tutor-ED] Connected to room
+{"level":20,"time":1770022264606,"pid":369959,"hostname":"fedora","name":"lk-rtc","msg":"Connect callback received"}
+[Tutor-ED] Connected to room
+[Tutor-ED] Starting session for user: identity-8vb1
+[Tutor-ED] Creating new user: identity-8vb1
+[Tutor-ED] Language: Russian
+[Context] Fetching context for identity-8vb1...
+[Context] Target language: ru
+[Context] Current unit: Dates&Time
+[Context] Querying reviews...
+[Context] Found 0 reviews
+[Context] Querying new words...
+[Context] Found 5 unit lexemes
+[GoalSeek] Searching for next goal for user identity-8vb1...
+[GoalSeek] No active goal. Checking for remediation...
+[GoalSeek] No remediation needed. Looking for new vocabulary...
+[GoalSeek] Setting new vocabulary goal: "привет"
+[ServiceFactory] Mode: cloud, Language: ru
+[ServiceFactory] Using ElevenLabs Scribe v2 Realtime STT
+[ServiceFactory] Using MiniMax LLM
+[ServiceFactory] Using ElevenLabs TTS (Official Plugin)
+[Tutor-ED] Service mode: cloud
+[00:51:04.669] [32mINFO[39m (369959): [36mparticipantValue.trackPublications[39m
+    participantValue: "identity-8vb1"
+    trackPublications: [
+      {
+        "info": {
+          "sid": "TR_AMQRYwovuinCYC",
+          "name": "",
+          "kind": "KIND_AUDIO",
+          "source": "SOURCE_MICROPHONE",
+          "simulcasted": false,
+          "width": 0,
+          "height": 0,
+          "mimeType": "audio/red",
+          "muted": false,
+          "remote": true,
+          "encryptionType": "NONE",
+          "audioFeatures": [
+            "TF_AUTO_GAIN_CONTROL",
+            "TF_ECHO_CANCELLATION",
+            "TF_NOISE_SUPPRESSION"
+          ]
+        },
+        "ffiHandle": {},
+        "subscribed": true,
+        "track": {
+          "info": {
+            "sid": "TR_AMQRYwovuinCYC",
+            "name": "",
+            "kind": "KIND_AUDIO",
+            "streamState": "STATE_ACTIVE",
+            "muted": false,
+            "remote": true
+          },
+          "ffi_handle": {}
+        }
+      }
+    ]
+    lengthOfTrackPublications: 1
+[Agent] State: initializing → listening
+[Tutor-ED] Sending initial greeting...
+[00:51:04.688] [31mERROR[39m (369959): [36mError running STT task: TypeError: Cannot read properties of undefined (reading 'streaming')[39m
+[Agent] State: listening → speaking
+[Agent] State: speaking → listening
+[Agent] Finished speaking
+[00:51:46.896] [32mINFO[39m (369959): [36mclosing agent session due to participant disconnect (disable via `RoomInputOptions.closeOnDisconnect=False`)[39m
+    participant: "identity-8vb1"
+    reason: "CLIENT_INITIATED"
+[00:51:46.897] [32mINFO[39m (369959): [36mmainTask: draining and no more speech tasks[39m
+[00:51:46.897] [32mINFO[39m (369959): [36mAgentActivity mainTask: exiting[39m
+[Tutor-ED] Session ended
