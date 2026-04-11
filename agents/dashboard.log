@@ -1,0 +1,14 @@
+
+> @livekit/agents@1.0.30 dashboard /home/will/Desktop/LingLang/agents
+> tsx src/dashboard/server.ts
+
+[DB] Initializing database at: /home/will/Desktop/LingLang/agents/tutor.db
+
+╔════════════════════════════════════════════════════════════╗
+║              LingLang Dashboard Server                     ║
+╠════════════════════════════════════════════════════════════╣
+║  URL: http://localhost:3001                               ║
+║  API: http://localhost:3001/api/services                  ║
+╚════════════════════════════════════════════════════════════╝
+  
+ ELIFECYCLE  Command failed.

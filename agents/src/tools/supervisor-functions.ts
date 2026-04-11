@@ -98,9 +98,10 @@ Performance values:
 export async function analyzeUtteranceWithLocalLLM(
   utterance: string,
   context: string,
-  llmUrl: string = 'http://localhost:11434/v1'
+  llmUrl: string = 'http://localhost:11434/v1',
+  llmModel?: string
 ): Promise<UtteranceAnalysisResult> {
-  const model = process.env.LOCAL_LLM_MODEL || 'gemma3:4b';
+  const model = llmModel || process.env.LOCAL_LLM_MODEL || 'gemma3:4b';
 
   // Use simple prompt for small models, full prompt for larger ones
   const isSmallModel = model.includes('gemma3:4b') || model.includes('phi') || model.includes('qwen2:1');
@@ -385,6 +386,7 @@ export async function runProcessor(
   options: {
     useGemini?: boolean;
     llmUrl?: string;
+    llmModel?: string;
   } = {}
 ): Promise<ProcessorResult> {
   const result: ProcessorResult = {
@@ -405,7 +407,8 @@ export async function runProcessor(
     analysisResult = await analyzeUtteranceWithLocalLLM(
       utterance,
       context,
-      options.llmUrl
+      options.llmUrl,
+      options.llmModel
     );
   }
 

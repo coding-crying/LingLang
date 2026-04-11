@@ -173,9 +173,15 @@ export default defineAgent({
     // Ensure local STT/TTS/LLM are running before we need them
     await ensureLocalServices();
 
-    console.log('[Tutor-ED] Prewarming VAD...');
-    proc.userData.vad = await silero.VAD.load();
-    console.log('[Tutor-ED] VAD prewarmed');
+    // Only prewarm VAD if NOT using gemini mode (RealtimeModel handles VAD internally)
+    const mode = process.env.SERVICE_MODE || 'local';
+    if (mode !== 'gemini') {
+      console.log('[Tutor-ED] Prewarming VAD...');
+      proc.userData.vad = await silero.VAD.load();
+      console.log('[Tutor-ED] VAD prewarmed');
+    } else {
+      console.log('[Tutor-ED] Skipping VAD prewarm (RealtimeModel handles VAD internally)');
+    }
   },
 
   entry: async (ctx: JobContext) => {
@@ -247,6 +253,13 @@ export default defineAgent({
     let lastWatcherDecision: any = null;
     let lastProcessorRun: any = null;
     let lastPlannerRun: any = null;
+    const subagentChats: any[] = [];
+
+    const addSubagentChat = (role: string, prompt: string, response: string) => {
+      subagentChats.push({ role, timestamp: Date.now(), prompt, response });
+      if (subagentChats.length > 50) subagentChats.shift();
+    };
+
     const runtimeStatePath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'runtime_state.json');
     let runtimeStateWritePending: NodeJS.Timeout | null = null;
     const writeRuntimeStateSoon = () => {
@@ -264,6 +277,7 @@ export default defineAgent({
             lastWatcherDecision,
             lastProcessorRun,
             lastPlannerRun,
+            subagentChats,
             updatedAt: Date.now(),
           };
           // Write atomically
@@ -299,28 +313,38 @@ Rules:
       instructions: buildDynamicInstructions(),
     });
 
-    // === CREATE SERVICES (LOCAL OR CLOUD) ===
+    // === CREATE SERVICES (LOCAL, CLOUD, OR GEMINI) ===
     const { ServiceFactory } = await import('./services/factory.js');
     const serviceFactory = new ServiceFactory({
-      mode: (process.env.SERVICE_MODE as 'local' | 'cloud' | 'local-gemma-audio') || 'local',
+      mode: (process.env.SERVICE_MODE as 'local' | 'cloud' | 'local-gemma-audio' | 'gemini') || 'local',
       targetLanguage: targetLang,
       userId,
     });
 
-    const sttService = serviceFactory.createSTT();
-    const llmService = serviceFactory.createLLM();
-    const ttsService = serviceFactory.createTTS();
+    const mode = serviceFactory.getMode();
+    const isGemini = mode === 'gemini';
 
-    console.log(`[Tutor-ED] Service mode: ${serviceFactory.getMode()}`);
+    const sttService = isGemini ? undefined : serviceFactory.createSTT();
+    const llmService = await serviceFactory.createLLM();
+    const ttsService = isGemini ? undefined : await serviceFactory.createTTS();
+
+    console.log(`[Tutor-ED] Service mode: ${mode}`);
 
     // === CREATE SESSION ===
-    const session = new voice.AgentSession({
+    // RealtimeModel handles its own VAD, STT, and TTS internally
+    const sessionConfig: any = {
       agent,
-      vad: ctx.proc.userData.vad! as silero.VAD,
-      stt: sttService,
       llm: llmService,
-      tts: ttsService,
-    });
+    };
+
+    // Only add VAD/STT/TTS for non-RealtimeModel modes
+    if (!isGemini) {
+      sessionConfig.vad = ctx.proc.userData.vad as silero.VAD;
+      sessionConfig.stt = sttService;
+      sessionConfig.tts = ttsService;
+    }
+
+    const session = new voice.AgentSession(sessionConfig);
 
     // === CONVERSATION TRACKING ===
     const history = new ConversationHistory();
@@ -346,9 +370,9 @@ Rules:
       // If we already flagged stale, update (but watcher still decides if the signal is weak)
       // We treat staleness + accumulated signals as a reason hint.
 
-      const watcherUrl = process.env.WATCHER_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:11434/v1';
-      const watcherModel = process.env.WATCHER_LLM_MODEL || 'gemma3:4b';
-      const watcherKey = process.env.WATCHER_LLM_KEY || 'ollama';
+      const watcherUrl = process.env.WATCHER_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1';
+      const watcherModel = process.env.WATCHER_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma4-26b';
+      const watcherKey = process.env.WATCHER_LLM_KEY || process.env.LOCAL_LLM_KEY || 'ollama';
 
       const recent = history.getContext();
 
@@ -403,6 +427,7 @@ Recent conversation:\n${recent}`;
           rawPrompt: system + '\n\n' + user,
           rawResponse: content
         };
+        addSubagentChat('Watcher', system + '\n\n' + user, content);
         writeRuntimeStateSoon();
         return decision;
       } catch (e) {
@@ -414,6 +439,7 @@ Recent conversation:\n${recent}`;
           reasonHint,
           error: String(e)
         };
+        addSubagentChat('Watcher', system + '\n\n' + user, 'Error: ' + String(e));
         writeRuntimeStateSoon();
         return decision;
       }
@@ -431,9 +457,9 @@ Recent conversation:\n${recent}`;
       const goalNote = await ContextManager.getDynamicGoal(userId);
 
       // Use Step 3.5 Flash (via OpenRouter) by default for deeper planning.
-      const plannerUrl = process.env.SUPERVISOR_PLANNER_LLM_URL || 'https://openrouter.ai/api/v1';
-      const plannerModel = process.env.SUPERVISOR_PLANNER_LLM_MODEL || 'stepfun/step-3.5-flash';
-      const plannerKey = process.env.SUPERVISOR_PLANNER_LLM_KEY || process.env.SUPERVISOR_LLM_KEY || '';
+      const plannerUrl = process.env.SUPERVISOR_PLANNER_LLM_URL || process.env.SUPERVISOR_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1';
+      const plannerModel = process.env.SUPERVISOR_PLANNER_LLM_MODEL || process.env.SUPERVISOR_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma4-26b';
+      const plannerKey = process.env.SUPERVISOR_PLANNER_LLM_KEY || process.env.SUPERVISOR_LLM_KEY || process.env.LOCAL_LLM_KEY || '';
 
       const systemPrompt = `You are the Supervisor for a language-learning voice tutor.
 
@@ -499,6 +525,7 @@ DB snapshot:\n${dbContext}\n\nActive goal note:\n${goalNote || 'None'}\n\nRecent
         rawPrompt: systemPrompt + '\n\n' + userPrompt,
         rawResponse: content
       };
+      addSubagentChat('Planner (Supervisor)', systemPrompt + '\n\n' + userPrompt, content);
 
       lastPlanAt = now;
       planStale = false;
@@ -549,7 +576,8 @@ DB snapshot:\n${dbContext}\n\nActive goal note:\n${goalNote || 'None'}\n\nRecent
 
       runProcessor(userId, batchUtterance, history.getContext(), {
         useGemini: false,
-        llmUrl: process.env.PROCESSOR_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:11434/v1',
+        llmUrl: process.env.PROCESSOR_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1',
+        llmModel: process.env.PROCESSOR_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma4-26b',
       }).then((result) => {
         lastProcessorRun = {
           at: Date.now(),
@@ -560,6 +588,7 @@ DB snapshot:\n${dbContext}\n\nActive goal note:\n${goalNote || 'None'}\n\nRecent
           rawPrompt: result.rawPrompt,
           rawResponse: result.rawResponse,
         };
+        addSubagentChat('Processor', result.rawPrompt || 'No prompt', result.rawResponse || 'No response');
         writeRuntimeStateSoon();
         if (result.errors.length) {
           console.warn('[Processor] Errors:', result.errors);
@@ -591,6 +620,56 @@ DB snapshot:\n${dbContext}\n\nActive goal note:\n${goalNote || 'None'}\n\nRecent
       console.error('[Session] Error:', ev.error);
     });
 
+    session.on(voice.AgentSessionEventTypes.SpeechCreated, (ev: any) => {
+      console.log(`[Session] SpeechCreated (source: ${ev.source})`);
+    });
+
+    session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev: any) => {
+      console.log(`[Session] AgentStateChanged: ${ev.newState}`);
+    });
+
+    session.on(voice.AgentSessionEventTypes.FunctionToolsExecuted, (ev: any) => {
+      console.log(`[Session] FunctionToolsExecuted:`, ev);
+    });
+
+    // Additional debug events for RealtimeModel
+    session.on('UserInputTranscribed' as any, (ev: any) => {
+      console.log(`[Session] UserInputTranscribed:`, ev.transcript, `final=${ev.isFinal}`);
+    });
+
+    if (isGemini) {
+      console.log('[Tutor-ED] Gemini mode: enabling additional event logging');
+      session.on('UserStateChanged' as any, (ev: any) => {
+        console.log(`[Session] UserStateChanged: ${ev.newState}`);
+      });
+    }
+
+    // === DIAGNOSTIC: Deep trace of _startImpl ===
+    const sessProto = Object.getPrototypeOf(session);
+    const origStartImpl = sessProto._startImpl;
+    sessProto._startImpl = async function(this: any, opts: any) {
+      console.log(`[DIAG] _startImpl called, this===session: ${this === session}, room=${!!opts.room}`);
+      console.log(`[DIAG] Pre-startImpl props: roomIO=${!!this.roomIO} _roomIO=${!!this._roomIO} input.audio=${!!this.input?.audio} output.audio=${!!this.output?.audio}`);
+      try {
+        await origStartImpl.call(this, opts);
+      } catch (e) {
+        console.error(`[DIAG] _startImpl threw:`, e);
+        throw e;
+      }
+      console.log(`[DIAG] _startImpl completed, roomIO=${!!this.roomIO} _roomIO=${!!this._roomIO}`);
+      console.log(`[DIAG] Post-startImpl: input.audio=${!!this.input?.audio} output.audio=${!!this.output?.audio}`);
+    };
+
+    // Also patch registerByteStreamHandler
+    const origRegister = ctx.room.registerByteStreamHandler.bind(ctx.room);
+    (ctx.room as any).registerByteStreamHandler = (topic: string, cb: any) => {
+      console.log(`[DIAG] registerByteStreamHandler called for topic: ${topic}`);
+      origRegister(topic, cb);
+      console.log(`[DIAG] registerByteStreamHandler done for topic: ${topic}`);
+    };
+
+    console.log(`[DIAG] About to call session.start(), room connected: ${ctx.room.isConnected}`);
+
     // === START SESSION ===
     await session.start({
       room: ctx.room,
@@ -600,8 +679,17 @@ DB snapshot:\n${dbContext}\n\nActive goal note:\n${goalNote || 'None'}\n\nRecent
       }
     });
 
+    console.log(`[DIAG] session.start() completed`);
+    console.log(`[DIAG] session.roomIO exists: ${!!(session as any).roomIO}`);
+    console.log(`[DIAG] session._roomIO exists: ${!!(session as any)._roomIO}`);
+
     console.log('[Tutor-ED] Sending initial greeting...');
-    session.say(langConfig.prompts.greeting);
+    // RealtimeModel doesn't support say() - AgentSession handles it internally
+    // The agent instructions already contain the greeting context
+    if (!isGemini) {
+      session.say(langConfig.prompts.greeting);
+    }
+    // For gemini, let AgentSession handle the initial response naturally
 
     // Cleanup on disconnect
     ctx.room.on('disconnected', () => {

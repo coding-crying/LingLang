@@ -6,7 +6,8 @@
  * Docs: https://elevenlabs.io/docs/api-reference/speech-to-text/v-1-speech-to-text-realtime
  */
 
-import { log, stt } from '@livekit/agents';
+import { log } from '../log.js';
+import * as stt from './stt.js';
 import type { AudioFrame } from '@livekit/rtc-node';
 import WebSocket from 'ws';
 

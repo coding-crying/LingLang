@@ -1,0 +1,33 @@
+{
+  "userId": "identity-ZKqJ",
+  "targetLang": "pt",
+  "lastPlanAt": 0,
+  "planStale": true,
+  "pendingSignals": [],
+  "supervisorPlan": null,
+  "lastWatcherDecision": null,
+  "lastProcessorRun": {
+    "at": 1775605722568,
+    "batch": [
+      "Eu já sei que você é preservativo.",
+      "Olá",
+      "Olá"
+    ],
+    "analysisLexemeCount": 0,
+    "srsUpdateCount": 0,
+    "errors": [
+      "Failed to analyze utterance"
+    ],
+    "rawPrompt": "Extract words from the user's utterance and auto-detect the language. Return JSON only.\n\nFormat:\n{\"language\":\"ISO-639-1 code\",\"lexemes\":[{\"lemma\":\"word\",\"pos\":\"NOUN\",\"performance\":\"correct_use\"}]}\n\npos: NOUN, VERB, ADJ, ADV, PRON, PREP, CONJ, NUM\nperformance: correct_use (used correctly), wrong_use (error made)\n\nIMPORTANT: Detect which language is being used (ru, es, fr, pt, ar, etc.) and return its ISO code in the \"language\" field.\n\nExample:\nInput: \"Я хочу воду\"\nOutput: {\"language\":\"ru\",\"lexemes\":[{\"lemma\":\"я\",\"pos\":\"PRON\",\"performance\":\"correct_use\"},{\"lemma\":\"хотеть\",\"pos\":\"VERB\",\"performance\":\"correct_use\"},{\"lemma\":\"вода\",\"pos\":\"NOUN\",\"performance\":\"correct_use\"}]}\nAnalyze: \"Eu já sei que você é preservativo.\nEu já sei que você é preservativo.\nOlá\""
+  },
+  "lastPlannerRun": null,
+  "subagentChats": [
+    {
+      "role": "Processor",
+      "timestamp": 1775605722568,
+      "prompt": "Extract words from the user's utterance and auto-detect the language. Return JSON only.\n\nFormat:\n{\"language\":\"ISO-639-1 code\",\"lexemes\":[{\"lemma\":\"word\",\"pos\":\"NOUN\",\"performance\":\"correct_use\"}]}\n\npos: NOUN, VERB, ADJ, ADV, PRON, PREP, CONJ, NUM\nperformance: correct_use (used correctly), wrong_use (error made)\n\nIMPORTANT: Detect which language is being used (ru, es, fr, pt, ar, etc.) and return its ISO code in the \"language\" field.\n\nExample:\nInput: \"Я хочу воду\"\nOutput: {\"language\":\"ru\",\"lexemes\":[{\"lemma\":\"я\",\"pos\":\"PRON\",\"performance\":\"correct_use\"},{\"lemma\":\"хотеть\",\"pos\":\"VERB\",\"performance\":\"correct_use\"},{\"lemma\":\"вода\",\"pos\":\"NOUN\",\"performance\":\"correct_use\"}]}\nAnalyze: \"Eu já sei que você é preservativo.\nEu já sei que você é preservativo.\nOlá\"",
+      "response": "No response"
+    }
+  ],
+  "updatedAt": 1775605722818
+}

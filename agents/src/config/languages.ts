@@ -21,6 +21,7 @@ export interface LanguageConfig {
   tts: {
     voice: string          // ElevenLabs voice ID (cloud) or display name
     mossVoice: string      // MossTTS voice prompt name (from voices/ dir)
+    geminiVoice?: string  // Gemini RealtimeModel voice name (Puck, Charon, Kore, Fenrir, Aoede, Leda, Orus, Zephyr)
     speed?: number         // Speech rate (default: 1.0)
   }
 
@@ -50,6 +51,7 @@ export const LANGUAGES: Record<string, LanguageConfig> = {
     tts: {
       voice: 'English',
       mossVoice: 'english_prompt_24k',
+      geminiVoice: 'Puck',
       speed: 1.0,
     },
 
@@ -77,6 +79,7 @@ export const LANGUAGES: Record<string, LanguageConfig> = {
     tts: {
       voice: 'Russian',
       mossVoice: 'russian_prompt_24k',
+      geminiVoice: 'Aoede',
       speed: 1.0,
     },
 
@@ -103,6 +106,7 @@ export const LANGUAGES: Record<string, LanguageConfig> = {
     tts: {
       voice: 'Spanish',
       mossVoice: 'spanish_prompt_24k',
+      geminiVoice: 'Charon',
       speed: 1.0,
     },
 
@@ -129,6 +133,7 @@ export const LANGUAGES: Record<string, LanguageConfig> = {
     tts: {
       voice: 'French',
       mossVoice: 'english_prompt_24k',
+      geminiVoice: 'Kore',
       speed: 1.0,
     },
 
@@ -155,6 +160,7 @@ export const LANGUAGES: Record<string, LanguageConfig> = {
     tts: {
       voice: 'Portuguese',
       mossVoice: 'portuguese_prompt_24k',
+      geminiVoice: 'Leda',
       speed: 1.0,
     },
 
@@ -181,6 +187,7 @@ export const LANGUAGES: Record<string, LanguageConfig> = {
     tts: {
       voice: 'Alexander',
       mossVoice: 'english_prompt_24k',
+      geminiVoice: 'Fenrir',
       speed: 1.0,
     },
 

@@ -447,6 +447,13 @@
   <!-- ===== THOUGHTS & PROMPTS TAB ===== -->
   <div id="tab-thoughts" class="tab-content">
     <div class="card">
+      <h2>Subagent Chat History (Watcher, Planner, Processor)</h2>
+      <div id="subagentChatHistory" style="background:#090b14; border:1px solid #2d3456; border-radius:8px; padding:16px; font-family:'Courier New', monospace; font-size:0.85em; line-height:1.4; max-height:500px; overflow-y:auto; color:#9ca3af; margin-bottom:20px;">
+        <div class="loading">Waiting for subagent chats...</div>
+      </div>
+    </div>
+
+    <div class="card">
       <h2>Supervisor (Planner) - Latest Run</h2>
       <div class="two-col">
         <div>
@@ -775,6 +782,39 @@
 
         // Populate Thoughts & Prompts
         const el = (id, text) => { const e = document.getElementById(id); if (e) e.textContent = text; };
+        
+        // Chat History
+        const chatContainer = document.getElementById('subagentChatHistory');
+        if (s.subagentChats && s.subagentChats.length > 0) {
+          // Check if we were scrolled to bottom before updating
+          const isScrolledToBottom = chatContainer.scrollHeight - chatContainer.clientHeight <= chatContainer.scrollTop + 10;
+          
+          chatContainer.innerHTML = s.subagentChats.map(c => `
+            <div style="margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid #1a1f35;">
+              <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+                <strong style="color: #a78bfa;">${escapeHtml(c.role)}</strong>
+                <span style="color: #6b7280; font-size: 0.9em;">${new Date(c.timestamp).toLocaleTimeString()}</span>
+              </div>
+              <div style="display:flex; gap: 10px;">
+                <div style="flex:1; background:#0f1117; padding:8px; border-radius:4px; border-left:2px solid #6d28d9;">
+                  <div style="font-size:0.8em; color:#6b7280; margin-bottom:2px;">PROMPT</div>
+                  <div style="white-space:pre-wrap; color:#c4b5fd;">${escapeHtml(String(c.prompt || ''))}</div>
+                </div>
+                <div style="flex:1; background:#0f1117; padding:8px; border-radius:4px; border-left:2px solid #22c55e;">
+                  <div style="font-size:0.8em; color:#6b7280; margin-bottom:2px;">RESPONSE</div>
+                  <div style="white-space:pre-wrap; color:#4ade80;">${escapeHtml(String(c.response || ''))}</div>
+                </div>
+              </div>
+            </div>
+          `).join('');
+
+          if (isScrolledToBottom) {
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+          }
+        } else {
+          chatContainer.innerHTML = '<div style="color:#6b7280;">No subagent chats available in runtime state.</div>';
+        }
+
         el('plannerPrompt', s.lastPlannerRun?.rawPrompt || 'No planner run data yet.');
         el('plannerResponse', s.lastPlannerRun?.rawResponse || 'No planner run data yet.');
         el('watcherPrompt', s.lastWatcherDecision?.rawPrompt || 'No watcher decision data yet.');
