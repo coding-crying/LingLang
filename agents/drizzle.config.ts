@@ -3,8 +3,8 @@ import { defineConfig } from 'drizzle-kit';
 export default defineConfig({
   schema: './src/db/schema.ts',
   out: './drizzle',
-  dialect: 'sqlite',
+  dialect: 'postgresql',
   dbCredentials: {
-    url: 'tutor.db',
+    url: process.env.DATABASE_URL || 'postgresql://linglang:linglang_dev@localhost:5433/linglang',
   },
 });

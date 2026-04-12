@@ -709,16 +709,18 @@
           srsDiv.innerHTML = '<div style="color:#6b7280;padding:20px">No SRS updates in the last hour</div>';
         } else {
           srsDiv.innerHTML = d.recentProgress.map(p => {
-            const ago = timeAgo(p.lastSeen);
-            const correct = Math.round((p.correctUses / Math.max(p.encounters, 1)) * 100);
+            const ago = timeAgo(p.lastReview);
+            const stateLabels = ['New', 'Learning', 'Review', 'Relearning'];
+            const stateLabel = stateLabels[p.state] || 'Unknown';
+            const successRate = p.reps > 0 ? Math.round(((p.reps - p.lapses) / p.reps) * 100) : 0;
             return `
               <div class="activity-item">
                 <div>
                   <div class="activity-word">${p.lexeme.lemma}
-                    <span class="srs-badge srs-${p.srsLevel}">SRS ${p.srsLevel}</span>
+                    <span class="srs-badge srs-${p.state}">${stateLabel} (S=${p.stability?.toFixed(1) ?? '?'})</span>
                   </div>
                   <div class="activity-detail">
-                    ${p.lexeme.pos} · ${p.encounters} encounters · ${correct}% correct
+                    ${p.lexeme.pos} · ${p.reps} reviews · ${successRate}% accuracy
                     ${p.lexeme.translation ? ' · ' + p.lexeme.translation : ''}
                   </div>
                 </div>
@@ -975,7 +977,7 @@
                 <span class="vocab-word">${p.lexeme.lemma}</span>
                 <span class="vocab-translation"> — ${p.lexeme.translation || '—'}</span>
               </div>
-              <div class="vocab-stats">SRS ${p.srsLevel} · ${p.encounters} seen · ${p.correctUses} correct</div>
+              <div class="vocab-stats">${['New','Learning','Review','Relearning'][p.state] || '?'} · S=${p.stability?.toFixed(1) ?? '?'} D=${p.difficulty?.toFixed(1) ?? '?'} · ${p.reps} reviews · ${p.lapses} lapses</div>
             </div>
           `).join('');
 

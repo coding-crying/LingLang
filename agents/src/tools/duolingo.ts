@@ -1,7 +1,7 @@
 import { eq, and, asc } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import {
-  learningProgress,
+  userVocabulary,
   lexemes,
   units,
   users,
@@ -16,23 +16,16 @@ import { DuolingoClient } from '../lib/duolingoClient.js';
 const duoClient = new DuolingoClient();
 
 /**
- * Map Duolingo strength (0.0 - 1.0) to SRS level (0 - 5)
+ * Map Duolingo strength (0.0 - 1.0) to approximate FSRS state and stability.
  */
-function mapStrengthToSRS(strength: number): number {
-  if (strength < 0.2) return 0; // New
-  if (strength < 0.4) return 1; // Learning
-  if (strength < 0.6) return 2; // Reviewing
-  if (strength < 0.8) return 3; // Familiar
-  if (strength < 0.95) return 4; // Well Known
-  return 5; // Mastered
-}
-
-/**
- * Calculate next review timestamp based on SRS level
- */
-function calculateNextReview(srsLevel: number, lastSeen: number): number {
-  const daysInterval = Math.pow(2, srsLevel); // 1, 2, 4, 8, 16, 32 days
-  return lastSeen + (daysInterval * 24 * 60 * 60 * 1000);
+function mapStrengthToFSRS(strength: number): { state: number; stability: number; difficulty: number; scheduledDays: number } {
+  // Approximate mapping from Duolingo strength to FSRS params
+  if (strength < 0.2) return { state: 0, stability: 0, difficulty: 0, scheduledDays: 0 }; // New
+  if (strength < 0.4) return { state: 1, stability: 1, difficulty: 5, scheduledDays: 1 }; // Learning
+  if (strength < 0.6) return { state: 2, stability: 3.5, difficulty: 4.5, scheduledDays: 3 }; // Early Review
+  if (strength < 0.8) return { state: 2, stability: 7, difficulty: 4, scheduledDays: 7 }; // Review
+  if (strength < 0.95) return { state: 2, stability: 15, difficulty: 3.5, scheduledDays: 15 }; // Strong
+  return { state: 2, stability: 30, difficulty: 3, scheduledDays: 30 }; // Mastered
 }
 
 export interface SyncResult {
@@ -209,17 +202,21 @@ export async function performDuolingoSync(userId: string): Promise<SyncResult> {
                 
                 // Also initialize progress for this word if it's new
                 // If the skill is "learned", we can assume some familiarity (SRS 2)
-                // If not, it's new (SRS 0 or 1)
-                const initialSrs = skill.learned ? 2 : 1;
-                
-                await db.insert(learningProgress).values({
+                // If not, it's new — create with FSRS initial state
+                const initialState = skill.learned
+                  ? { state: 2, stability: 3.5, difficulty: 4.5, scheduledDays: 3 }
+                  : { state: 1, stability: 1, difficulty: 5, scheduledDays: 1 };
+
+                await db.insert(userVocabulary).values({
                     userId,
                     lexemeId,
-                    srsLevel: initialSrs,
-                    lastSeen: Date.now(),
-                    nextReview: Date.now(), // Due immediately for review/check
-                    encounters: 1,
-                    correctUses: 0,
+                    state: initialState.state,
+                    stability: initialState.stability,
+                    difficulty: initialState.difficulty,
+                    scheduledDays: initialState.scheduledDays,
+                    due: new Date(), // Due immediately for review/check
+                    reps: 1,
+                    lapses: 0,
                 });
             }
         }
@@ -255,39 +252,50 @@ export async function performDuolingoSync(userId: string): Promise<SyncResult> {
         newWords++;
       }
 
-      // Insert/update learning progress
-      const srsLevel = mapStrengthToSRS(item.strength);
+      // Insert/update vocabulary with FSRS state from Duolingo strength
+      const fsrsState = mapStrengthToFSRS(item.strength);
       const lastSeen = item.last_practiced
-        ? new Date(item.last_practiced).getTime()
-        : Date.now();
-      const nextReview = calculateNextReview(srsLevel, lastSeen);
+        ? new Date(item.last_practiced)
+        : new Date();
+      const due = new Date(Date.now() + fsrsState.scheduledDays * 86400000);
 
-      const existingProgress = await db.query.learningProgress.findFirst({
+      const existingProgress = await db.query.userVocabulary.findFirst({
         where: and(
-          eq(learningProgress.userId, userId),
-          eq(learningProgress.lexemeId, lexemeId)
+          eq(userVocabulary.userId, userId),
+          eq(userVocabulary.lexemeId, lexemeId)
         )
       });
 
       if (existingProgress) {
-        await db.update(learningProgress)
-          .set({
-            srsLevel,
-            lastSeen,
-            nextReview,
-            encounters: (existingProgress.encounters || 0) + 1,
-          })
-          .where(eq(learningProgress.id, existingProgress.id));
-        updatedWords++;
+        // Only update if the voice tutor hasn't graded this word yet (reps === 0).
+        // If we've already got real FSRS data from the tutor, Duolingo's aggregate
+        // strength is coarser — don't overwrite the tutor-honed stability.
+        if (existingProgress.reps === 0) {
+          await db.update(userVocabulary)
+            .set({
+              state: fsrsState.state,
+              stability: fsrsState.stability,
+              difficulty: fsrsState.difficulty,
+              scheduledDays: fsrsState.scheduledDays,
+              due,
+              lastReview: lastSeen,
+            })
+            .where(eq(userVocabulary.id, existingProgress.id));
+          updatedWords++;
+        }
+        // If reps > 0, the voice tutor has already refined this word — skip.
       } else {
-        await db.insert(learningProgress).values({
+        await db.insert(userVocabulary).values({
           userId,
           lexemeId,
-          srsLevel,
-          lastSeen,
-          nextReview,
-          encounters: 1,
-          correctUses: 0,
+          state: fsrsState.state,
+          stability: fsrsState.stability,
+          difficulty: fsrsState.difficulty,
+          scheduledDays: fsrsState.scheduledDays,
+          due,
+          lastReview: lastSeen,
+          reps: 0,
+          lapses: 0,
         });
       }
     }
@@ -295,10 +303,10 @@ export async function performDuolingoSync(userId: string): Promise<SyncResult> {
     // Update sync timestamp
     await db.update(duolingoMetadata)
       .set({
-        lastSyncTimestamp: Date.now(),
+        lastSyncTimestamp: new Date(),
         syncStatus: 'success',
         syncError: null,
-        updatedAt: Date.now(),
+        updatedAt: new Date(),
       })
       .where(eq(duolingoMetadata.userId, userId));
 
@@ -324,7 +332,7 @@ export async function performDuolingoSync(userId: string): Promise<SyncResult> {
       .set({
         syncStatus: 'failed',
         syncError: error.message,
-        updatedAt: Date.now(),
+        updatedAt: new Date(),
       })
       .where(eq(duolingoMetadata.userId, userId))
       .catch(() => {});
@@ -363,24 +371,20 @@ export const authenticateDuolingo = llm.tool({
       // Ensure LingLang user exists
       await db.insert(users).values({
         id: userId,
-        createdAt: Date.now(),
         targetLanguage: language,
         nativeLanguage: 'en',
         proficiencyLevel: 'beginner',
       }).onConflictDoNothing();
 
       // Store metadata
-      const now = Date.now();
       await db.insert(duolingoMetadata).values({
         userId,
         duolingoUsername,
-        duolingoPassword, // Store for auto-sync later
+        duolingoPassword,
         duolingoJWT: jwt,
         duolingoUserId: duoUserId,
         learningLanguage: language,
         syncStatus: 'pending',
-        createdAt: now,
-        updatedAt: now,
       }).onConflictDoUpdate({
         target: duolingoMetadata.userId,
         set: {
@@ -388,7 +392,6 @@ export const authenticateDuolingo = llm.tool({
           duolingoJWT: jwt,
           duolingoUserId: duoUserId,
           syncStatus: 'pending',
-          updatedAt: now,
         }
       });
 
@@ -441,26 +444,27 @@ export const getDuolingoWeakWords = llm.tool({
     console.log(`[Duolingo Weak Words] Fetching weak words for ${userId}...`);
 
     try {
-      // Get words with low SRS level (0-2 means strength < 0.6)
-      const weakWords = await db.query.learningProgress.findMany({
-        where: eq(learningProgress.userId, userId),
+      // Get words with low FSRS stability (weak = state 0-2)
+      const weakWords = await db.query.userVocabulary.findMany({
+        where: eq(userVocabulary.userId, userId),
         with: { lexeme: true },
-        orderBy: [asc(learningProgress.srsLevel)],
+        orderBy: [asc(userVocabulary.stability)],
         limit: limit,
       });
 
-      // Filter to only include words with SRS level 0-2
-      const filteredWords = weakWords.filter(p => p.srsLevel <= 2);
+      // Filter to only include words with FSRS state 0-2 (new/learning)
+      const filteredWords = weakWords.filter(p => p.state <= 2);
 
       const wordList = filteredWords.map(p => ({
         word: p.lexeme.lemma,
         translation: p.lexeme.translation,
         pos: p.lexeme.pos,
-        srsLevel: p.srsLevel,
-        strengthDescription: p.srsLevel === 0 ? 'New' :
-                            p.srsLevel === 1 ? 'Learning' :
+        state: p.state,
+        strengthDescription: p.state === 0 ? 'New' :
+                            p.state === 1 ? 'Learning' :
+                            p.state === 3 ? 'Relearning' :
                             'Reviewing',
-        lastSeen: new Date(p.lastSeen).toISOString(),
+        lastSeen: p.lastReview ? new Date(p.lastReview).toISOString() : 'never',
       }));
 
       console.log(`[Duolingo Weak Words] Found ${wordList.length} weak words`);

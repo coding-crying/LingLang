@@ -61,7 +61,6 @@ async function createDemoUser(targetLanguage: string, nativeLanguage: string): P
   const userId = `demo-${randomUUID()}`;
   await db.insert(users).values({
     id: userId,
-    createdAt: Date.now(),
     targetLanguage,
     nativeLanguage,
     proficiencyLevel: 'beginner',

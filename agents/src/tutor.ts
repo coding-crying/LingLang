@@ -40,7 +40,6 @@ export default defineAgent({
       console.log(`[Tutor] Creating new user: ${userId}`);
       await db.insert(users).values({
         id: userId,
-        createdAt: Date.now(),
         targetLanguage: process.env.DEFAULT_TARGET_LANGUAGE || 'ru',
         nativeLanguage: process.env.DEFAULT_NATIVE_LANGUAGE || 'en',
         proficiencyLevel: 'beginner',

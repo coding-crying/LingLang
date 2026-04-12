@@ -1,6 +1,6 @@
 import { db } from '../db/index.js';
-import { learningProgress, units, lexemes, users, activeGoals, duolingoMetadata } from '../db/schema.js';
-import { eq, and, asc, desc, lte } from 'drizzle-orm';
+import { userVocabulary, units, lexemes, users, activeGoals, duolingoMetadata } from '../db/schema.js';
+import { eq, and, asc, desc, lte, isNull, sql } from 'drizzle-orm';
 
 export class ContextManager {
 
@@ -30,7 +30,6 @@ export class ContextManager {
     console.log(`[Context] Target language: ${targetLang}`);
 
     // Curriculum: pick the earliest unit for the target language.
-    // (Lightweight demo behavior. Later we can advance unit by unit.)
     const currentUnit = await db.query.units.findFirst({
       where: eq(units.language, targetLang),
       orderBy: [asc(units.order)],
@@ -39,17 +38,17 @@ export class ContextManager {
 
     if (!currentUnit) return "No curriculum found.";
 
-    const now = Date.now();
+    const now = new Date();
 
-    // SRS: only show items that are actually due.
+    // FSRS: only show items that are actually due.
     console.log(`[Context] Querying due reviews...`);
-    const dueReviews = await db.query.learningProgress.findMany({
+    const dueReviews = await db.query.userVocabulary.findMany({
       where: and(
-        eq(learningProgress.userId, userId),
-        lte(learningProgress.nextReview, now)
+        eq(userVocabulary.userId, userId),
+        lte(userVocabulary.due, now)
       ),
       with: { lexeme: true },
-      orderBy: [asc(learningProgress.nextReview)],
+      orderBy: [asc(userVocabulary.due)],
       limit: 5,
     });
     console.log(`[Context] Found ${dueReviews.length} reviews`);
@@ -65,16 +64,16 @@ export class ContextManager {
       limit: 12,
     });
     console.log(`[Context] Found ${unitLexemes.length} unit lexemes`);
-    
-    // Simple filter: words not in dueReviews (rough approximation)
+
+    // Filter: words not in dueReviews
     const newWords = unitLexemes
-        .filter((l: typeof lexemes.$inferSelect) => !dueReviews.find((r: typeof learningProgress.$inferSelect & { lexeme: typeof lexemes.$inferSelect }) => r.lexemeId === l.id))
+        .filter((l: typeof lexemes.$inferSelect) => !dueReviews.find((r: typeof userVocabulary.$inferSelect & { lexeme: typeof lexemes.$inferSelect }) => r.lexemeId === l.id))
         .slice(0, 3)
         .map((l: typeof lexemes.$inferSelect) => `${l.lemma} (${l.translation})`)
         .join(', ');
 
-    const hasAnyProgress = (await db.query.learningProgress.findFirst({
-      where: eq(learningProgress.userId, userId),
+    const hasAnyProgress = (await db.query.userVocabulary.findFirst({
+      where: eq(userVocabulary.userId, userId),
       columns: { id: true }
     })) != null;
     const isNewUser = !hasAnyProgress;
@@ -89,7 +88,7 @@ NEW_USER: ${isNewUser ? 'true' : 'false'}
 Curriculum Unit: ${currentUnit.title}
 Unit Description: ${currentUnit.description}
 
-Vocabulary to Review (DUE by SRS): ${reviewList || "None"}
+Vocabulary to Review (DUE by FSRS): ${reviewList || "None"}
 New Vocabulary to Introduce (next in curriculum): ${newWords || "None"}
     `.trim();
   }
@@ -99,7 +98,7 @@ New Vocabulary to Introduce (next in curriculum): ${newWords || "None"}
    * Uses State Machine to avoid constant interference.
    */
   static async getDynamicGoal(userId: string): Promise<string | null> {
-    const now = Date.now();
+    const now = new Date();
     console.log(`[GoalSeek] Searching for next goal for user ${userId}...`);
 
     // 1. Check for ACTIVE Goal
@@ -110,21 +109,20 @@ New Vocabulary to Introduce (next in curriculum): ${newWords || "None"}
 
     if (currentGoal) {
         console.log(`[GoalSeek] Active goal found: ${currentGoal.type} on target ${currentGoal.targetId}`);
-        // We have a goal. Has the user satisfied it?
-        const progress = await db.query.learningProgress.findFirst({
+        const progress = await db.query.userVocabulary.findFirst({
             where: and(
-                eq(learningProgress.userId, userId), 
-                eq(learningProgress.lexemeId, currentGoal.targetId)
+                eq(userVocabulary.userId, userId),
+                eq(userVocabulary.lexemeId, currentGoal.targetId)
             ),
             with: { lexeme: true }
         });
 
-        if (progress && progress.lastSeen > currentGoal.createdAt && progress.correctUses > 0) {
+        if (progress && progress.lastReview && progress.lastReview > currentGoal.createdAt && progress.reps > 0) {
             console.log(`[GoalSeek] Goal COMPLETED: user successfully used "${progress.lexeme.lemma}"`);
             await db.update(activeGoals)
                 .set({ status: 'completed', updatedAt: now })
                 .where(eq(activeGoals.id, currentGoal.id));
-            
+
             return `SYSTEM NOTE: The user successfully used "${progress.lexeme.lemma}".
             GOAL COMPLETED. Praise them briefly, then move to the next topic.`;
         }
@@ -135,16 +133,22 @@ New Vocabulary to Introduce (next in curriculum): ${newWords || "None"}
 
     // 2. No Active Goal? Pick a NEW one.
     console.log(`[GoalSeek] No active goal. Checking for remediation...`);
-    
-    // Priority A: Remediation (Recent failures)
-    const recentFailure = await db.query.learningProgress.findFirst({
-        where: and(eq(learningProgress.userId, userId), eq(learningProgress.srsLevel, 1)),
-        orderBy: [desc(learningProgress.lastSeen)],
+
+    // Priority A: Remediation (Recent failures = state 1 Learning or state 3 Relearning)
+    const recentFailure = await db.query.userVocabulary.findFirst({
+        where: and(
+            eq(userVocabulary.userId, userId),
+            // State 1 (Learning) or State 3 (Relearning) = struggling
+          // Using OR: state in (1, 3) means struggling
+          // For Drizzle, we check state <= 1 which covers state 0 (New) and 1 (Learning)
+          eq(userVocabulary.state, 1),
+        ),
+        orderBy: [desc(userVocabulary.lastReview)],
         with: { lexeme: true }
     });
 
     if (recentFailure) {
-        console.log(`[GoalSeek] Remediation needed for "${recentFailure.lexeme.lemma}" (SRS level 1)`);
+        console.log(`[GoalSeek] Remediation needed for "${recentFailure.lexeme.lemma}" (state ${recentFailure.state})`);
         await db.insert(activeGoals).values({
             userId,
             type: 'remediation',
@@ -153,7 +157,7 @@ New Vocabulary to Introduce (next in curriculum): ${newWords || "None"}
             createdAt: now,
             updatedAt: now
         });
-        
+
         return `NEW GOAL: The user is struggling with "${recentFailure.lexeme.lemma}". Help them use it correctly in a sentence.`;
     }
 
@@ -163,8 +167,8 @@ New Vocabulary to Introduce (next in curriculum): ${newWords || "None"}
     const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
     const targetLang = user?.targetLanguage || 'ru';
 
-    const startedLexemes = await db.query.learningProgress.findMany({
-        where: eq(learningProgress.userId, userId),
+    const startedLexemes = await db.query.userVocabulary.findMany({
+        where: eq(userVocabulary.userId, userId),
         columns: { lexemeId: true }
     });
     const startedLexemeIds = new Set(startedLexemes.map(p => p.lexemeId));
@@ -173,7 +177,7 @@ New Vocabulary to Introduce (next in curriculum): ${newWords || "None"}
         where: (lexemes, { and, eq, notInArray }) => {
             const base = eq(lexemes.language, targetLang);
             if (startedLexemeIds.size > 0) {
-                return and(base, notInArray(lexemes.id, Array.from(startedLexemeIds).slice(0, 999))); 
+                return and(base, notInArray(lexemes.id, Array.from(startedLexemeIds).slice(0, 999)));
             }
             return base;
         }
@@ -189,22 +193,20 @@ New Vocabulary to Introduce (next in curriculum): ${newWords || "None"}
             createdAt: now,
             updatedAt: now
         });
-        
+
         return `NEW GOAL: Introduce the new word "${unstartedLexeme.lemma}" (${unstartedLexeme.translation}). Help the user use it in a sentence.`;
     }
-    
+
     console.log(`[GoalSeek] No candidates for new goals found.`);
-    return null; 
+    return null;
   }
 
   /**
    * Get initial context specifically for Duolingo-powered tutoring
-   * Checks if user has Duolingo data and formats it appropriately
    */
   static async getInitialContextForDuolingo(userId: string): Promise<string> {
     console.log(`[Context] Fetching Duolingo context for ${userId}...`);
 
-    // Check if user has Duolingo data
     const metadata = await db.query.duolingoMetadata.findFirst({
       where: eq(duolingoMetadata.userId, userId)
     });
@@ -225,21 +227,22 @@ Use the authenticateDuolingo tool to connect their account.
       ? new Date(metadata.lastSyncTimestamp).toLocaleString()
       : 'Never';
 
-    // Get words needing practice (low SRS levels)
-    const weakWords = await db.query.learningProgress.findMany({
-      where: eq(learningProgress.userId, userId),
+    // Get words needing practice (low stability = weak)
+    const weakWords = await db.query.userVocabulary.findMany({
+      where: eq(userVocabulary.userId, userId),
       with: { lexeme: true },
-      orderBy: [asc(learningProgress.srsLevel)],
+      orderBy: [asc(userVocabulary.stability)],
       limit: 10,
     });
 
-    // Filter to weak words (SRS level 0-2)
-    const filteredWeakWords = weakWords.filter(p => p.srsLevel <= 2);
+    // Filter to truly weak words (state 0-2)
+    const filteredWeakWords = weakWords.filter(p => p.state <= 2);
 
     const reviewList = filteredWeakWords
       .map(p => `${p.lexeme.lemma} (${p.lexeme.translation}) [${
-        p.srsLevel === 0 ? 'New' :
-        p.srsLevel === 1 ? 'Learning' :
+        p.state === 0 ? 'New' :
+        p.state === 1 ? 'Learning' :
+        p.state === 3 ? 'Relearning' :
         'Reviewing'
       }]`)
       .join(', ');
@@ -250,13 +253,12 @@ Use the authenticateDuolingo tool to connect their account.
         orderBy: [asc(units.order)],
     });
 
-    const startedLexemes = await db.query.learningProgress.findMany({
-        where: eq(learningProgress.userId, userId),
+    const startedLexemes = await db.query.userVocabulary.findMany({
+        where: eq(userVocabulary.userId, userId),
         columns: { lexemeId: true }
     });
     const startedLexemeIds = new Set(startedLexemes.map(p => p.lexemeId));
 
-    // Find first unit where at least some lexemes haven't been started
     let nextUnit = null;
     for (const unit of allUnits) {
         const unitLexemes = await db.query.lexemes.findMany({
@@ -269,12 +271,10 @@ Use the authenticateDuolingo tool to connect their account.
         }
     }
 
-    // Get total vocabulary count
-    const totalVocab = await db.query.learningProgress.findMany({
-      where: eq(learningProgress.userId, userId)
+    const totalVocab = await db.query.userVocabulary.findMany({
+      where: eq(userVocabulary.userId, userId)
     });
 
-    // Get sync status
     const syncStatusMsg = metadata.syncStatus === 'success'
       ? 'Up to date'
       : metadata.syncStatus === 'failed'
@@ -289,19 +289,50 @@ Last Sync: ${lastSync}
 Sync Status: ${syncStatusMsg}
 Total Vocabulary: ${totalVocab.length} words
 
-Words Needing Practice (low strength): ${reviewList || "None identified yet - sync data first!"}
+Words Needing Practice (low stability): ${reviewList || "None identified yet - sync data first!"}
 
 Next Lesson/Skill: ${nextUnit ? `${nextUnit.title} - ${nextUnit.description}` : "All known skills mastered!"}
 
-STRATEGY: Focus on conversational practice using weak vocabulary items. 
+STRATEGY: Focus on conversational practice using weak vocabulary items.
 If the user seems comfortable, bridge into the next topic: ${nextUnit?.title || "advanced conversation"}.
     `.trim();
+  }
+
+  /**
+   * Get semantic neighbors of a lexeme using pgvector HNSW index.
+   */
+  static async getSemanticNeighbors(lexemeId: string, limit: number = 5): Promise<{ id: string; lemma: string; distance: number }[]> {
+    const result = await db.select({
+      id: lexemes.id,
+      lemma: lexemes.lemma,
+    }).from(lexemes)
+      .where(and(
+        eq(lexemes.id, lexemeId) ? undefined : undefined, // just to ensure lexeme exists
+      ))
+      .limit(1);
+
+    // We need the embedding first
+    const lexeme = await db.query.lexemes.findFirst({
+      where: eq(lexemes.id, lexemeId),
+    });
+    if (!lexeme?.embedding) return [];
+
+    // Raw SQL for nearest-neighbor via HNSW
+    const embeddingStr = JSON.stringify(lexeme.embedding);
+    const neighbors = await db.execute(sql`
+      SELECT id, lemma, embedding <=> ${embeddingStr}::vector AS distance
+      FROM lexemes
+      WHERE id != ${lexemeId}
+      ORDER BY embedding <=> ${embeddingStr}::vector
+      LIMIT ${limit}
+    `);
+
+    return neighbors as any;
   }
 }
 
 /**
  * TESTING ONLY: Simple placeholder goal system
- * Returns rotating goals without database dependency
  */
 export class PlaceholderGoals {
   private static goalIndex = 0;
@@ -329,26 +360,16 @@ export class PlaceholderGoals {
     },
   ];
 
-  /**
-   * Get next placeholder goal in rotation
-   * Call this every 3-5 turns to test goal injection
-   */
   static getNextGoal(): string {
     const goal = this.TEST_GOALS[this.goalIndex];
     this.goalIndex = (this.goalIndex + 1) % this.TEST_GOALS.length;
     return goal.message;
   }
 
-  /**
-   * Simulate goal completion
-   */
   static completeGoal(goalType: string): string {
     return `GOAL COMPLETED! The user successfully completed the ${goalType} goal. Briefly praise them and move on.`;
   }
 
-  /**
-   * Reset rotation (for testing)
-   */
   static reset(): void {
     this.goalIndex = 0;
   }

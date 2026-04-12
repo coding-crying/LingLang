@@ -1,30 +1,9 @@
 {
-  "name": "@livekit/agents",
-  "version": "1.0.30",
-  "description": "LiveKit Agents - Node.js",
-  "main": "dist/index.js",
-  "require": "dist/index.cjs",
-  "types": "dist/index.d.ts",
-  "exports": {
-    "import": {
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
-    },
-    "require": {
-      "types": "./dist/index.d.cts",
-      "default": "./dist/index.cjs"
-    }
-  },
-  "author": "LiveKit",
+  "name": "@linglang/tutor",
+  "version": "0.1.0",
+  "description": "LingLang Language Tutor Agent",
   "type": "module",
-  "repository": "git@github.com:livekit/agents-js.git",
   "license": "Apache-2.0",
-  "files": [
-    "dist",
-    "src",
-    "resources",
-    "README.md"
-  ],
   "scripts": {
     "build": "tsup --onSuccess \"pnpm build:types\"",
     "build:types": "tsc --declaration --emitDeclarationOnly && node ../scripts/copyDeclarationOutput.js",
@@ -44,7 +23,6 @@
   "devDependencies": {
     "@livekit/rtc-node": "^0.13.22",
     "@microsoft/api-extractor": "^7.35.0",
-    "@types/better-sqlite3": "^7.6.13",
     "@types/fluent-ffmpeg": "^2.1.28",
     "@types/json-schema": "^7.0.15",
     "@types/node": "^22.5.5",
@@ -83,6 +61,7 @@
     "@types/pidusage": "^2.0.5",
     "axios": "^1.13.2",
     "better-sqlite3": "^12.5.0",
+    "postgres": "^3.4.5",
     "commander": "^12.0.0",
     "dotenv": "^17.2.3",
     "drizzle-orm": "^0.44.7",

@@ -50,7 +50,6 @@ async function main() {
     console.log(`User ${userId} not found. Creating...`);
     await db.insert(users).values({
       id: userId,
-      createdAt: Date.now(),
       targetLanguage: lang,
       nativeLanguage: 'en',
       proficiencyLevel: 'beginner',
@@ -70,7 +69,6 @@ async function main() {
         const client = new DuolingoClient();
         const auth = await client.authenticate(duolingoUsername, duolingoPassword);
         
-        const now = Date.now();
         await db.insert(duolingoMetadata).values({
             userId,
             duolingoUsername,
@@ -79,8 +77,6 @@ async function main() {
             duolingoUserId: auth.userId,
             learningLanguage: lang,
             syncStatus: 'pending',
-            createdAt: now,
-            updatedAt: now,
         }).onConflictDoUpdate({
             target: duolingoMetadata.userId,
             set: {
@@ -89,7 +85,6 @@ async function main() {
                 duolingoJWT: auth.jwt,
                 duolingoUserId: auth.userId,
                 learningLanguage: lang,
-                updatedAt: now,
             }
         });
         console.log('Authentication successful and stored.');
@@ -105,9 +100,8 @@ async function main() {
     const duoUserId = extractUserIdFromJwt(jwt) || 'unknown_user';
     console.log(`Extracted Duolingo User ID: ${duoUserId}`);
 
-    const now = Date.now();
     const finalUsername = duolingoUsername || 'manual_jwt_user';
-    
+
     // Update metadata
     await db.insert(duolingoMetadata).values({
         userId,
@@ -116,8 +110,6 @@ async function main() {
         duolingoUserId: duoUserId,
         learningLanguage: lang,
         syncStatus: 'pending',
-        createdAt: now,
-        updatedAt: now,
     }).onConflictDoUpdate({
         target: duolingoMetadata.userId,
         set: {
@@ -125,7 +117,6 @@ async function main() {
             duolingoJWT: jwt,
             duolingoUserId: duoUserId,
             learningLanguage: lang,
-            updatedAt: now,
         }
     });
     console.log(`JWT injected for username: ${finalUsername}`);

@@ -1,19 +1,18 @@
-import { drizzle } from 'drizzle-orm/better-sqlite3';
-import Database from 'better-sqlite3';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres from 'postgres';
 import * as schema from './schema.js';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dbPath = path.resolve(__dirname, '../../tutor.db');
+const connectionString = process.env.DATABASE_URL || 'postgresql://linglang:linglang_dev@localhost:5433/linglang';
 
-console.log(`[DB] Initializing database at: ${dbPath}`);
-const sqlite = new Database(dbPath);
+console.log(`[DB] Connecting to PostgreSQL at: ${connectionString.replace(/:[^:@]+@/, ':****@')}`);
 
-export const db: ReturnType<typeof drizzle<typeof schema>> = drizzle(sqlite, { schema });
+const client = postgres(connectionString);
+
+export const db = drizzle(client, { schema });
 
 // Export schema helper types
 export type Unit = typeof schema.units.$inferSelect;
 export type Lexeme = typeof schema.lexemes.$inferSelect;
 export type GrammarRule = typeof schema.grammarRules.$inferSelect;
-export type LearningProgress = typeof schema.learningProgress.$inferSelect;
+export type UserVocabulary = typeof schema.userVocabulary.$inferSelect;
+export type ReviewLog = typeof schema.reviewLogs.$inferSelect;

@@ -11,7 +11,7 @@
 import express from 'express';
 import fs from 'node:fs';
 import { db } from '../db/index.js';
-import { users, lexemes, learningProgress, activeGoals, units, duolingoMetadata } from '../db/schema.js';
+import { users, lexemes, userVocabulary, activeGoals, units, duolingoMetadata } from '../db/schema.js';
 import { eq, desc, sql, gte } from 'drizzle-orm';
 import { execSync } from 'child_process';
 import path from 'path';
@@ -58,8 +58,8 @@ app.get('/api/users/:userId', async (req, res) => {
     }
 
     // Get progress stats
-    const progress = await db.query.learningProgress.findMany({
-      where: eq(learningProgress.userId, userId),
+    const progress = await db.query.userVocabulary.findMany({
+      where: eq(userVocabulary.userId, userId),
       with: { lexeme: true }
     });
 
@@ -74,20 +74,20 @@ app.get('/api/users/:userId', async (req, res) => {
       where: eq(duolingoMetadata.userId, userId)
     });
 
-    // Calculate stats
-    const srsDistribution = {
-      level0: 0,
-      level1: 0,
-      level2: 0,
-      level3: 0,
-      level4: 0,
-      level5: 0,
+    // Calculate stats using FSRS state distribution
+    const stateDistribution = {
+      new: 0,
+      learning: 0,
+      review: 0,
+      relearning: 0,
     };
 
     for (const p of progress) {
-      const level = p.srsLevel;
-      if (level >= 0 && level <= 5) {
-        srsDistribution[`level${level}` as keyof typeof srsDistribution]++;
+      switch (p.state) {
+        case 0: stateDistribution.new++; break;
+        case 1: stateDistribution.learning++; break;
+        case 2: stateDistribution.review++; break;
+        case 3: stateDistribution.relearning++; break;
       }
     }
 
@@ -98,7 +98,7 @@ app.get('/api/users/:userId', async (req, res) => {
       duolingoData: duoData,
       stats: {
         totalVocab: progress.length,
-        srsDistribution,
+        stateDistribution,
         activeGoals: goals.filter(g => g.status === 'active').length,
         completedGoals: goals.filter(g => g.status === 'completed').length,
       }
@@ -112,18 +112,18 @@ app.get('/api/users/:userId', async (req, res) => {
 app.get('/api/users/:userId/vocabulary', async (req, res) => {
   try {
     const { userId } = req.params;
-    const { srsLevel, limit = '100' } = req.query;
+    const { state, limit = '100' } = req.query;
 
-    let progress = await db.query.learningProgress.findMany({
-      where: eq(learningProgress.userId, userId),
+    let progress = await db.query.userVocabulary.findMany({
+      where: eq(userVocabulary.userId, userId),
       with: { lexeme: true },
-      orderBy: [desc(learningProgress.lastSeen)],
+      orderBy: [desc(userVocabulary.lastReview)],
       limit: parseInt(limit as string),
     });
 
-    // Filter by SRS level if specified
-    if (srsLevel !== undefined) {
-      progress = progress.filter(p => p.srsLevel === parseInt(srsLevel as string));
+    // Filter by FSRS state if specified
+    if (state !== undefined) {
+      progress = progress.filter(p => p.state === parseInt(state as string));
     }
 
     res.json(progress);
@@ -220,7 +220,7 @@ app.get('/api/stats', async (req, res) => {
       .from(lexemes);
 
     const progressCount = await db.select({ count: sql<number>`count(*)` })
-      .from(learningProgress);
+      .from(userVocabulary);
 
     const unitCount = await db.select({ count: sql<number>`count(*)` })
       .from(units);
@@ -230,10 +230,10 @@ app.get('/api/stats', async (req, res) => {
       .from(units);
 
     res.json({
-      users: userCount[0].count,
-      lexemes: lexemeCount[0].count,
-      progressEntries: progressCount[0].count,
-      units: unitCount[0].count,
+      users: userCount[0]?.count ?? 0,
+      lexemes: lexemeCount[0]?.count ?? 0,
+      progressEntries: progressCount[0]?.count ?? 0,
+      units: unitCount[0]?.count ?? 0,
       languages: languages.map(l => l.language),
     });
   } catch (error) {
@@ -251,7 +251,7 @@ app.get('/api/db/:table', async (req, res) => {
     let data;
     if (table === 'users') data = await db.query.users.findMany({ limit: 100 });
     else if (table === 'lexemes') data = await db.query.lexemes.findMany({ limit: 100 });
-    else if (table === 'progress') data = await db.query.learningProgress.findMany({ limit: 100 });
+    else if (table === 'progress') data = await db.query.userVocabulary.findMany({ limit: 100 });
     else if (table === 'goals') data = await db.query.activeGoals.findMany({ limit: 100 });
     else if (table === 'units') data = await db.query.units.findMany({ limit: 100 });
     else return res.status(404).json({ error: 'Table not found' });
@@ -314,7 +314,7 @@ app.get('/api/services', async (req, res) => {
       const parts = line.split(',').map((s: string) => s.trim());
       const pid = parts[0];
       const memoryMiB = parseInt(parts[1]);
-      let label = parts[2]?.split('/').pop() ?? parts[2];
+      let label = parts[2]?.split('/').pop() ?? parts[2] ?? 'unknown';
       try {
         const cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim();
         if (cmd.includes('server_stt')) label = 'STT (Faster Whisper)';
@@ -336,12 +336,12 @@ app.get('/api/services', async (req, res) => {
 
 app.get('/api/activity', async (req, res) => {
   try {
-    const since = Date.now() - 86400000; // last 24 hours
+    const since = new Date(Date.now() - 86400000); // last 24 hours
 
-    const recentProgress = await db.query.learningProgress.findMany({
-      where: gte(learningProgress.lastSeen, since),
+    const recentProgress = await db.query.userVocabulary.findMany({
+      where: gte(userVocabulary.lastReview, since),
       with: { lexeme: true },
-      orderBy: [desc(learningProgress.lastSeen)],
+      orderBy: [desc(userVocabulary.lastReview)],
       limit: 40,
     });
 

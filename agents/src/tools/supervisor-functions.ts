@@ -15,10 +15,11 @@
  *        TTS speaks                     Update DB + Goals
  */
 
-import { eq, and, desc } from 'drizzle-orm';
+import { eq, and, desc, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
-import { learningProgress, lexemes, units, users, activeGoals } from '../db/schema.js';
+import { userVocabulary, lexemes, units, users, activeGoals, reviewLogs } from '../db/schema.js';
 import { ContextManager } from '../lib/context.js';
+import { fsrsReview, voiceToGrade, type FSRSGrade, type FSRSCard, type VoicePerformance } from '../lib/fsrs.js';
 
 // ============================================================================
 // TYPES
@@ -40,7 +41,7 @@ export interface UtteranceAnalysis {
 
 export interface SupervisorResult {
   analysis: UtteranceAnalysis | null;
-  srsUpdates: { lexemeId: string; oldLevel: number; newLevel: number }[];
+  srsUpdates: { lexemeId: string; oldState: number; newState: number; grade: number }[];
   goalUpdate: string | null;
   errors: string[];
 }
@@ -222,13 +223,15 @@ export async function analyzeUtteranceWithGemini(
 // ============================================================================
 
 /**
- * Update SRS levels based on analysis results
+ * Update FSRS state based on analysis results.
+ * Maps LLM performance labels to FSRS grades, applies the FSRS algorithm,
+ * logs reviews, and applies semantic ripple effects.
  */
 export async function updateSRSFromAnalysis(
   userId: string,
   analysis: UtteranceAnalysis
-): Promise<{ lexemeId: string; oldLevel: number; newLevel: number }[]> {
-  const updates: { lexemeId: string; oldLevel: number; newLevel: number }[] = [];
+): Promise<{ lexemeId: string; oldState: number; newState: number; grade: FSRSGrade }[]> {
+  const updates: { lexemeId: string; oldState: number; newState: number; grade: FSRSGrade }[] = [];
 
   // Get user's target language
   const user = await db.query.users.findFirst({
@@ -247,7 +250,7 @@ export async function updateSRSFromAnalysis(
       )
     });
 
-    // Fallback: try GENERAL pos for Duolingo words
+    // Fallback: try GENERAL pos
     if (!existingLexeme) {
       existingLexeme = await db.query.lexemes.findFirst({
         where: and(
@@ -259,8 +262,7 @@ export async function updateSRSFromAnalysis(
     }
 
     if (!existingLexeme) {
-      // Auto-create lexeme so the DB can actually learn from conversation.
-      // Note: translation is unknown at this stage; empty string is allowed.
+      // Auto-create lexeme
       const safeLemma = (item.lemma || '').trim();
       const safePos = (item.pos || 'GENERAL').trim() || 'GENERAL';
       const lexemeId = `${targetLang}:${safeLemma.toLowerCase()}:${safePos}`;
@@ -288,69 +290,148 @@ export async function updateSRSFromAnalysis(
       }
     }
 
-    // Get current progress
-    const currentProgress = await db.query.learningProgress.findFirst({
+    // Map performance to FSRS grade
+    const grade = voiceToGrade({
+      performance: item.performance,
+      // Default escalation level; in production this would come from the live tutor context
+    });
+
+    // Get current vocabulary state
+    const currentVocab = await db.query.userVocabulary.findFirst({
       where: and(
-        eq(learningProgress.userId, userId),
-        eq(learningProgress.lexemeId, existingLexeme.id)
+        eq(userVocabulary.userId, userId),
+        eq(userVocabulary.lexemeId, existingLexeme.id)
       )
     });
 
-    const oldLevel = currentProgress?.srsLevel || 0;
-    let newLevel = oldLevel;
+    const oldState = currentVocab?.state ?? 0;
 
-    // Apply Leitner box logic
-    switch (item.performance) {
-      case 'correct_use':
-        newLevel = Math.min(oldLevel + 1, 5);
-        break;
-      case 'wrong_use':
-      case 'recall_fail':
-        newLevel = 1; // Back to box 1
-        break;
-      case 'introduced':
-        newLevel = 0; // New word starts at 0
-        break;
-    }
+    // Build FSRS card from current state
+    const card: FSRSCard = currentVocab ? {
+      state: currentVocab.state as 0 | 1 | 2 | 3,
+      difficulty: currentVocab.difficulty,
+      stability: currentVocab.stability,
+      elapsedDays: currentVocab.elapsedDays,
+      scheduledDays: currentVocab.scheduledDays,
+      reps: currentVocab.reps,
+      lapses: currentVocab.lapses,
+      due: currentVocab.due,
+      lastReview: currentVocab.lastReview,
+    } : {
+      state: 0,
+      difficulty: 0,
+      stability: 0,
+      elapsedDays: 0,
+      scheduledDays: 0,
+      reps: 0,
+      lapses: 0,
+      due: new Date(),
+      lastReview: null,
+    };
 
-    // Calculate next review (exponential backoff)
-    const daysToAdd = Math.pow(2, newLevel); // 1, 2, 4, 8, 16, 32 days
-    const nextReview = Date.now() + (daysToAdd * 24 * 60 * 60 * 1000);
+    // Apply FSRS algorithm
+    const result = fsrsReview(card, grade);
 
-    // Update or create progress record
-    if (currentProgress) {
-      await db.update(learningProgress)
+    // Update or create vocabulary record FIRST (we need the ID for review_logs)
+    let vocabId: string;
+    if (currentVocab) {
+      vocabId = currentVocab.id;
+      await db.update(userVocabulary)
         .set({
-          srsLevel: newLevel,
-          nextReview,
-          lastSeen: Date.now(),
-          encounters: (currentProgress.encounters || 0) + 1,
-          correctUses: (currentProgress.correctUses || 0) +
-            (item.performance === 'correct_use' ? 1 : 0),
+          state: result.state,
+          difficulty: result.difficulty,
+          stability: result.stability,
+          scheduledDays: result.scheduledDays,
+          due: result.due,
+          reps: result.reps,
+          lapses: result.lapses,
+          lastReview: new Date(),
         })
-        .where(eq(learningProgress.id, currentProgress.id));
+        .where(eq(userVocabulary.id, currentVocab.id));
     } else {
-      await db.insert(learningProgress).values({
+      const inserted = await db.insert(userVocabulary).values({
         userId,
         lexemeId: existingLexeme.id,
-        srsLevel: newLevel,
-        nextReview,
-        lastSeen: Date.now(),
-        encounters: 1,
-        correctUses: item.performance === 'correct_use' ? 1 : 0,
-      });
+        state: result.state,
+        due: result.due,
+        stability: result.stability,
+        difficulty: result.difficulty,
+        scheduledDays: result.scheduledDays,
+        reps: result.reps,
+        lapses: result.lapses,
+        lastReview: new Date(),
+      }).returning({ id: userVocabulary.id });
+      vocabId = inserted[0]!.id;
+    }
+
+    // Log the review
+    await db.insert(reviewLogs).values({
+      userVocabularyId: vocabId,
+      userId,
+      grade,
+      state: card.state,
+      stability: card.stability,
+      difficulty: card.difficulty,
+      elapsedDays: card.elapsedDays,
+      scheduledDays: card.scheduledDays,
+    });
+
+    // Apply semantic ripple effect
+    if (existingLexeme.embedding) {
+      try {
+        await applySemanticRipple(userId, existingLexeme.id, grade, existingLexeme.embedding);
+      } catch (err) {
+        console.warn(`[Supervisor] Ripple effect failed for ${existingLexeme.lemma}:`, err);
+      }
     }
 
     updates.push({
       lexemeId: existingLexeme.id,
-      oldLevel,
-      newLevel,
+      oldState,
+      newState: result.state,
+      grade,
     });
 
-    console.log(`[Supervisor] SRS update: ${item.lemma} ${oldLevel} → ${newLevel}`);
+    console.log(`[Supervisor] FSRS update: ${item.lemma} state ${oldState} → ${result.state} (grade ${grade}, stability ${result.stability.toFixed(2)}, due in ${result.scheduledDays}d)`);
   }
 
   return updates;
+}
+
+/**
+ * Semantic ripple: when a word is reviewed, apply fractional micro-boosts/penalties
+ * to its nearest semantic neighbors via pgvector HNSW.
+ */
+async function applySemanticRipple(
+  userId: string,
+  lexemeId: string,
+  grade: FSRSGrade,
+  embedding: number[],
+): Promise<void> {
+  const embeddingStr = JSON.stringify(embedding);
+
+  // Find nearest semantic neighbors via HNSW
+  const neighbors = await db.execute(sql`
+    SELECT id, lemma, embedding <=> ${embeddingStr}::vector AS distance
+    FROM lexemes
+    WHERE id != ${lexemeId}
+    ORDER BY embedding <=> ${embeddingStr}::vector
+    LIMIT 5
+  `);
+
+  // Apply fractional micro-boost (grade 3-4) or penalty (grade 1-2)
+  for (const neighbor of neighbors as any[]) {
+    const microAdjust = grade >= 3 ? 0.02 : -0.02;
+    // Closer words get stronger ripple
+    const rippleStrength = microAdjust * (1 - neighbor.distance);
+
+    await db.update(userVocabulary)
+      .set({ stability: sql`stability * (1 + ${rippleStrength})` })
+      .where(and(
+        eq(userVocabulary.userId, userId),
+        eq(userVocabulary.lexemeId, neighbor.id)
+      ));
+  }
 }
 
 // ============================================================================
@@ -367,7 +448,7 @@ export interface ProcessorResult {
   analysis: UtteranceAnalysis | null;
   rawPrompt?: string;
   rawResponse?: string;
-  srsUpdates: { lexemeId: string; oldLevel: number; newLevel: number }[];
+  srsUpdates: { lexemeId: string; oldState: number; newState: number; grade: number }[];
   errors: string[];
 }
 

@@ -1,0 +1,16 @@
+services:
+  linglang-db:
+    image: pgvector/pgvector:pg16
+    container_name: linglang-db
+    environment:
+      POSTGRES_USER: linglang
+      POSTGRES_PASSWORD: ${LL_DB_PASSWORD:-linglang_dev}
+      POSTGRES_DB: linglang
+    ports:
+      - "5433:5432"
+    volumes:
+      - linglang-pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  linglang-pgdata:
