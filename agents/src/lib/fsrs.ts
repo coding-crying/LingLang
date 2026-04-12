@@ -223,8 +223,8 @@ function constrainDifficulty(d: number): number {
 // ============================================================================
 
 export interface VoicePerformance {
-  /** How the user performed: correct_use, wrong_use, recall_fail, introduced */
-  performance: 'introduced' | 'correct_use' | 'wrong_use' | 'recall_fail';
+  /** How the user performed: correct_use, wrong_use, recall_fail */
+  performance: 'correct_use' | 'wrong_use' | 'recall_fail';
   /** Escalation level used (1=natural, 2=nudge, 3=direct correction) */
   escalationLevel?: number;
   /** Pronunciation confidence from ASR (0-1) */
@@ -250,10 +250,9 @@ export function voiceToGrade(perf: VoicePerformance): FSRSGrade {
       if (perf.escalationLevel === 3) return 1; // Failed even with direct correction
       return 1;
 
-    case 'introduced':
-      return 1; // New word encountered, counts as "Again" for scheduling
-
     case 'correct_use':
+    default:
+      // correct_use is the default; also handles any legacy 'not_assessed' labels
       if (perf.unprompted && (perf.pronunciationScore ?? 1) > 0.8) return 4; // Easy
       if (perf.escalationLevel === 2) return 2; // Needed a nudge
       if ((perf.pronunciationScore ?? 1) < 0.5) return 2; // Poor pronunciation

@@ -29,7 +29,7 @@ export interface LexemeAnalysis {
   lemma: string;
   form: string;
   pos: string;
-  performance: 'introduced' | 'correct_use' | 'wrong_use' | 'recall_fail';
+  performance: 'not_assessed' | 'correct_use' | 'wrong_use' | 'recall_fail'; // not_assessed kept for backward compat if LLM outputs it
   grammarRule?: { rule: string; example: string };
 }
 
@@ -50,24 +50,39 @@ export interface SupervisorResult {
 // ANALYSIS FUNCTION
 // ============================================================================
 
-// Simplified prompt for small local models (gemma3:4b, phi3, etc.)
-const ANALYSIS_PROMPT_SIMPLE = `Extract words from the user's utterance and auto-detect the language. Return JSON only.
+/**
+ * Build the simplified analysis prompt for small local models.
+ * Injects the target language hint so the LLM can verify its auto-detection.
+ */
+function buildSimplePrompt(targetLanguage: string): string {
+  return `Extract words from the user's utterance. The user is learning ${targetLanguage}. Auto-detect the language and use the hint as ground truth. Return JSON only.
 
 Format:
 {"language":"ISO-639-1 code","lexemes":[{"lemma":"word","pos":"NOUN","performance":"correct_use"}]}
 
 pos: NOUN, VERB, ADJ, ADV, PRON, PREP, CONJ, NUM
-performance: correct_use (used correctly), wrong_use (error made)
+performance:
+- correct_use: used correctly (default for common function words like articles, basic prepositions, pronouns, conjunctions)
+- wrong_use: error made (wrong form, wrong case, wrong agreement)
+- recall_fail: user couldn't remember the word
 
-IMPORTANT: Detect which language is being used (ru, es, fr, pt, ar, etc.) and return its ISO code in the "language" field.
+IMPORTANT: List ALL words including function words. Tag common function words (articles, basic prepositions, pronouns, conjunctions) as correct_use by default — they're trivially correct. Only tag a function word as wrong_use if the user clearly misused it (e.g. wrong case after a preposition). Do NOT tag any word as "introduced" — you cannot know if a word was introduced for the first time.
 
 Example:
 Input: "Я хочу воду"
 Output: {"language":"ru","lexemes":[{"lemma":"я","pos":"PRON","performance":"correct_use"},{"lemma":"хотеть","pos":"VERB","performance":"correct_use"},{"lemma":"вода","pos":"NOUN","performance":"correct_use"}]}`;
+}
 
-// Full prompt for more capable models (Gemini, GPT-4, Ministral)
-const ANALYSIS_PROMPT_FULL = `You are a comprehensive language learning analysis expert.
+/**
+ * Build the full analysis prompt for capable models (Gemini, GPT-4, Ministral, etc.).
+ * Includes few-shot examples and function-word guidance.
+ * Exported so supervisor.ts can import it instead of duplicating.
+ */
+export function buildFullPrompt(targetLanguage: string): string {
+  return `You are a comprehensive language learning analysis expert.
 Your role is to extract detailed grammatical information for building an intelligent graph-based learning system.
+
+The user is learning ${targetLanguage}. Auto-detect the language from the utterance but use this hint as ground truth — if the detected language differs, flag it.
 
 # Output Format
 Return ONLY a JSON object with this structure:
@@ -78,35 +93,64 @@ Return ONLY a JSON object with this structure:
       "lemma": "string (root form)",
       "form": "string (used form)",
       "pos": "NOUN|VERB|ADJ...",
-      "performance": "introduced|correct_use|wrong_use|recall_fail",
+      "performance": "correct_use|wrong_use|recall_fail",
       "grammarRule": { "rule": "string", "example": "string" } (optional)
     }
   ],
   "grammarHints": ["string"]
 }
 
-Performance values:
-- "introduced": First time user encountered this word
-- "correct_use": User used the word correctly in context
-- "wrong_use": User made an error with this word (wrong form, wrong meaning)
-- "recall_fail": User couldn't remember or struggled with the word`;
+# Performance Labels
+- "correct_use": User used the word correctly in context. This is the default for common function words (articles, basic prepositions, pronouns, conjunctions) — they're trivially correct, tag them as correct_use.
+- "wrong_use": User made an error with this word (wrong form, wrong meaning, wrong case, wrong gender agreement). Even function words can be wrong_use if misused (e.g. wrong case after a preposition).
+- "recall_fail": User couldn't remember or struggled with the word (long pause, incomplete attempt, gave up).
+
+DO NOT use any performance label other than the three above. In particular, do NOT use "introduced" or "not_assessed" — you cannot determine whether a word was encountered for the first time, and every word the user produces should be evaluated.
+
+# Function Word Guidance
+List ALL words the user said, including function words. Tag common function words (articles, basic prepositions, pronouns, conjunctions) as correct_use by default — they are trivially correct and not worth nitpicking for errors. Only tag a function word as wrong_use if the user clearly misused it (e.g. "в магазине" when they meant direction "в магазин").
+
+Examples of words to tag correct_use by default: и, а, но, в, на, с, к, я, ты, он, мы, el, la, le, les, un, une, y, o, en, de, the, a, an, and, but, in, on, I, you, he, she.
+
+# Few-Shot Examples
+
+Example 1 — Correct Russian sentence:
+Input: "Я хочу пить воду"
+Output:
+{"language":"ru","lexemes":[{"lemma":"я","form":"я","pos":"PRON","performance":"correct_use"},{"lemma":"хотеть","form":"хочу","pos":"VERB","performance":"correct_use"},{"lemma":"пить","form":"пить","pos":"VERB","performance":"correct_use"},{"lemma":"вода","form":"воду","pos":"NOUN","performance":"correct_use","grammarRule":{"rule":"accusative case for direct objects","example":"вода → воду (nominative → accusative)"}}],"grammarHints":[]}
+
+Example 2 — Sentence with an error:
+Input: "Я хочеть воду"
+Output:
+{"language":"ru","lexemes":[{"lemma":"я","form":"я","pos":"PRON","performance":"correct_use"},{"lemma":"хотеть","form":"хочеть","pos":"VERB","performance":"wrong_use","grammarRule":{"rule":"1st person singular conjugation of хотеть","example":"я хочу (not хочеть)"}},{"lemma":"вода","form":"воду","pos":"NOUN","performance":"correct_use"}],"grammarHints":["хотеть conjugation: я хочу, ты хочешь, он хочет, мы хотим, вы хотите, они хотят"]}
+
+Example 3 — Mixed correct and incorrect usage:
+Input: "Вчера я шёл в магазине"
+Output:
+{"language":"ru","lexemes":[{"lemma":"вчера","form":"вчера","pos":"ADV","performance":"correct_use"},{"lemma":"я","form":"я","pos":"PRON","performance":"correct_use"},{"lemma":"идти","form":"шёл","pos":"VERB","performance":"correct_use"},{"lemma":"в","form":"в","pos":"PREP","performance":"correct_use"},{"lemma":"магазин","form":"магазине","pos":"NOUN","performance":"wrong_use","grammarRule":{"rule":"в + accusative for direction (movement toward), not prepositional","example":"в магазин (to the store) vs. в магазине (at the store)"}}],"grammarHints":["в + accusative = direction of movement (в магазин), в + prepositional = location (в магазине)"]}`;
+}
+
+/** Backward-compatible alias: the full prompt template with a default language. */
+export const ANALYSIS_PROMPT_FULL = buildFullPrompt('Russian');
 
 /**
- * Analyze an utterance using the local LLM (Ollama)
+ * Analyze an utterance using the local LLM (llama-swap)
  * Uses simplified prompt for small models like gemma3:4b
  * Falls back gracefully if analysis fails
  */
 export async function analyzeUtteranceWithLocalLLM(
   utterance: string,
   context: string,
-  llmUrl: string = 'http://localhost:11434/v1',
-  llmModel?: string
+  llmUrl: string = 'http://localhost:8082/v1',
+  llmModel?: string,
+  targetLanguage: string = 'Russian'
 ): Promise<UtteranceAnalysisResult> {
-  const model = llmModel || process.env.LOCAL_LLM_MODEL || 'gemma3:4b';
+  const model = llmModel || process.env.LOCAL_LLM_MODEL || 'gemma4-26b';
 
   // Use simple prompt for small models, full prompt for larger ones
-  const isSmallModel = model.includes('gemma3:4b') || model.includes('phi') || model.includes('qwen2:1');
-  const prompt = isSmallModel ? ANALYSIS_PROMPT_SIMPLE : ANALYSIS_PROMPT_FULL;
+  // Models with <4B params or explicit :4b quant tags use simple prompt
+  const isSmallModel = model.includes(':4b') || model.includes(':1b') || model.includes(':0.5b') || model.includes('phi3:');
+  const prompt = isSmallModel ? buildSimplePrompt(targetLanguage) : buildFullPrompt(targetLanguage);
   const userPrompt = `Analyze: "${utterance}"`;
 
   console.log(`[Supervisor] Analyzing with ${model} (${isSmallModel ? 'simple' : 'full'} prompt)`);
@@ -175,7 +219,8 @@ export async function analyzeUtteranceWithLocalLLM(
  */
 export async function analyzeUtteranceWithGemini(
   utterance: string,
-  context: string
+  context: string,
+  targetLanguage: string = 'Russian'
 ): Promise<UtteranceAnalysisResult> {
   const apiKey = process.env.GOOGLE_API_KEY;
   if (!apiKey) {
@@ -183,7 +228,7 @@ export async function analyzeUtteranceWithGemini(
     return { analysis: null };
   }
 
-  const promptText = `${ANALYSIS_PROMPT_FULL}\n\nContext: ${context}\nUser said: "${utterance}"`;
+  const promptText = `${buildFullPrompt(targetLanguage)}\n\nContext: ${context}\nUser said: "${utterance}"`;
 
   try {
     console.log('[Supervisor] Analyzing with Gemini...');
@@ -212,8 +257,9 @@ export async function analyzeUtteranceWithGemini(
 
     return { analysis, rawPrompt: promptText, rawResponse: responseText };
 
-  } catch (err) {
-    console.error('[Supervisor] Gemini analysis error:', err);
+  } catch (err: any) {
+    const msg = err?.message || String(err);
+    console.warn(`[Supervisor] Gemini analysis error: ${msg.slice(0, 120)}`);
     return { analysis: null, rawPrompt: promptText };
   }
 }
@@ -261,6 +307,16 @@ export async function updateSRSFromAnalysis(
       });
     }
 
+    // Fallback: match by lemma+language regardless of POS (LLMs often disagree on POS tags)
+    if (!existingLexeme) {
+      existingLexeme = await db.query.lexemes.findFirst({
+        where: and(
+          eq(lexemes.lemma, item.lemma),
+          eq(lexemes.language, targetLang)
+        )
+      });
+    }
+
     if (!existingLexeme) {
       // Auto-create lexeme
       const safeLemma = (item.lemma || '').trim();
@@ -291,9 +347,10 @@ export async function updateSRSFromAnalysis(
     }
 
     // Map performance to FSRS grade
+    // Treat 'not_assessed' as 'correct_use' (trivially correct) — the prompt tells
+    // the LLM to use correct_use for function words, but we handle legacy output too.
     const grade = voiceToGrade({
-      performance: item.performance,
-      // Default escalation level; in production this would come from the live tutor context
+      performance: item.performance === 'not_assessed' ? 'correct_use' : item.performance,
     });
 
     // Get current vocabulary state
@@ -426,7 +483,7 @@ async function applySemanticRipple(
     const rippleStrength = microAdjust * (1 - neighbor.distance);
 
     await db.update(userVocabulary)
-      .set({ stability: sql`stability * (1 + ${rippleStrength})` })
+      .set({ stability: sql`stability * (1 + ${rippleStrength}::real)` })
       .where(and(
         eq(userVocabulary.userId, userId),
         eq(userVocabulary.lexemeId, neighbor.id)
@@ -478,10 +535,27 @@ export async function runProcessor(
 
   console.log(`[Processor] Processing: "${utterance.substring(0, 50)}..."`);
 
+  // Fetch user's target language for prompt injection
+  let targetLanguage = 'Russian';
+  try {
+    const user = await db.query.users.findFirst({
+      where: eq(users.id, userId)
+    });
+    if (user?.targetLanguage) {
+      // Convert ISO code to display name if needed
+      const langNames: Record<string, string> = {
+        ru: 'Russian', es: 'Spanish', fr: 'French', pt: 'Portuguese',
+        ar: 'Arabic', de: 'German', zh: 'Chinese', ja: 'Japanese',
+        ko: 'Korean', it: 'Italian',
+      };
+      targetLanguage = langNames[user.targetLanguage] || user.targetLanguage;
+    }
+  } catch { /* non-fatal — fall back to default */ }
+
   // 1) Analyze utterance
   let analysisResult: UtteranceAnalysisResult | null = null;
   if (options.useGemini !== false && process.env.GOOGLE_API_KEY) {
-    analysisResult = await analyzeUtteranceWithGemini(utterance, context);
+    analysisResult = await analyzeUtteranceWithGemini(utterance, context, targetLanguage);
   }
 
   if (!analysisResult?.analysis) {
@@ -489,7 +563,8 @@ export async function runProcessor(
       utterance,
       context,
       options.llmUrl,
-      options.llmModel
+      options.llmModel,
+      targetLanguage
     );
   }
 
@@ -536,6 +611,7 @@ export async function runSupervisor(
   options: {
     useGemini?: boolean;
     llmUrl?: string;
+    llmModel?: string;
   } = {}
 ): Promise<SupervisorResult> {
   const result: SupervisorResult = {

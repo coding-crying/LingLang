@@ -80,6 +80,7 @@ export default defineAgent({
       targetRatio: langConfig.pedagogy.targetLanguageRatio,
       userLevel: user.proficiencyLevel || 'beginner',
       initialContext,
+      mode: 'voice',
     });
 
     // === CREATE AGENT ===

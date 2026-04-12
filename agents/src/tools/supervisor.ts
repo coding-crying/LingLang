@@ -4,6 +4,7 @@ import { userVocabulary, lexemes, units, users, grammarRules } from '../db/schem
 import * as z from 'zod';
 import { llm } from '@livekit/agents';
 import OpenAI from 'openai';
+import { buildFullPrompt } from './supervisor-functions.js';
 
 // Lazy init — avoids reading env vars before dotenv.config() runs in tutor.ts
 let _client: OpenAI | null = null;
@@ -18,25 +19,6 @@ function getClient(): OpenAI {
   return _client;
 }
 
-const learningAnalysisInstructions = `You are a comprehensive language learning analysis expert.
-Your role is to extract detailed grammatical information for building an intelligent graph-based learning system.
-
-# Output Format
-Return ONLY a JSON object with this structure:
-{
-  "language": "auto-detected ISO code (ru, es, fr, etc.)",
-  "lexemes": [
-    {
-      "lemma": "string (root form)",
-      "form": "string (used form)",
-      "pos": "NOUN|VERB|ADJ...",
-      "performance": "introduced|correct_use|wrong_use|recall_fail",
-      "grammarRule": { "rule": "string", "example": "string" } (optional)
-    }
-  ],
-  "grammarHints": ["string"]
-}`;
-
 interface TurnInput {
   userId: string;
   userUtterance: string;
@@ -49,12 +31,20 @@ interface TurnInput {
 export async function analyzeTurn({ userId, userUtterance, context }: TurnInput) {
   console.log(`[Supervisor] Analyzing: "${userUtterance}" for user ${userId}`);
 
+  // Look up user's target language for the analysis prompt
+  const user = await db.query.users.findFirst({
+    where: eq(users.id, userId)
+  });
+
+  const ISO_TO_NAME: Record<string, string> = { ru: 'Russian', es: 'Spanish', fr: 'French', pt: 'Portuguese', ar: 'Arabic', en: 'English' };
+  const targetLangName = ISO_TO_NAME[user?.targetLanguage || 'ru'] || 'Russian';
+
   // 1. Call Step 3.5 Flash via OpenRouter for Analysis
   const model = process.env.SUPERVISOR_LLM_MODEL || 'stepfun/step-3.5-flash:free';
   const result = await getClient().chat.completions.create({
     model,
     messages: [
-      { role: 'system', content: learningAnalysisInstructions },
+      { role: 'system', content: buildFullPrompt(targetLangName) },
       { role: 'user', content: `Context: ${context}\nUser said: "${userUtterance}"` },
     ],
     temperature: 0.3,
@@ -71,16 +61,12 @@ export async function analyzeTurn({ userId, userUtterance, context }: TurnInput)
   try {
     analysis = JSON.parse(jsonText || '{}');
   } catch {
-    console.warn('[Supervisor] Failed to parse LLM response as JSON:', jsonText.slice(0, 200));
+    console.warn('[Supervisor] Failed to parse analysis response as JSON');
     return { analysis: { feedback: 'ok', correction: null } };
   }
   console.log("[Supervisor] Analysis result:", JSON.stringify(analysis, null, 2));
 
   // Validate detected language matches user's target language
-  const user = await db.query.users.findFirst({
-    where: eq(users.id, userId)
-  });
-
   if (user && analysis.language && analysis.language !== user.targetLanguage) {
     console.warn(
       `[Supervisor] Language mismatch! User learning ${user.targetLanguage}, ` +
@@ -88,7 +74,7 @@ export async function analyzeTurn({ userId, userUtterance, context }: TurnInput)
     );
   }
 
-  // 2. Update SQLite DB
+  // 2. Update DB
   await db.insert(users).values({ id: userId }).onConflictDoNothing();
 
   const targetLang = analysis.language || user?.targetLanguage || 'ru';
@@ -115,10 +101,20 @@ export async function analyzeTurn({ userId, userUtterance, context }: TurnInput)
         });
       }
 
+      // Fallback: match by lemma+language regardless of POS (LLMs disagree on POS tags)
+      if (!existingLexeme) {
+        existingLexeme = await db.query.lexemes.findFirst({
+          where: and(
+            eq(lexemes.lemma, item.lemma),
+            eq(lexemes.language, targetLang)
+          )
+        });
+      }
+
       if (existingLexeme) {
         // Use FSRS algorithm via supervisor-functions
         const { updateSRSFromAnalysis } = await import('../tools/supervisor-functions.js');
-        await updateSRSFromAnalysis(userId, { language: targetLang, lexemes: [item] });
+        await updateSRSFromAnalysis(userId, { language: targetLang, lexemes: [item], grammarHints: analysis.grammarHints || [] });
       }
     }
   }

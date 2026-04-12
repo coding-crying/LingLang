@@ -47,6 +47,7 @@ import { runProcessor } from './tools/supervisor-functions.js';
 import { ContextManager, PlaceholderGoals } from './lib/context.js';
 import { getLanguageConfig } from './config/languages.js';
 import { buildInstructions } from './config/prompts/base.js';
+import { PLANNER_SYSTEM_PROMPT, buildPlannerPrompt } from './config/prompts/supervisor.js';
 import { db } from './db/index.js';
 import { users } from './db/schema.js';
 import { eq } from 'drizzle-orm';
@@ -202,7 +203,6 @@ export default defineAgent({
       console.log(`[Tutor-ED] Creating new user: ${userId}`);
       await db.insert(users).values({
         id: userId,
-        createdAt: Date.now(),
         targetLanguage: process.env.DEFAULT_TARGET_LANGUAGE || 'ru',
         nativeLanguage: process.env.DEFAULT_NATIVE_LANGUAGE || 'en',
         proficiencyLevel: 'beginner',
@@ -236,6 +236,7 @@ export default defineAgent({
       targetRatio: langConfig.pedagogy.targetLanguageRatio,
       userLevel: user.proficiencyLevel || 'beginner',
       initialContext,
+      mode: 'voice',
     });
 
     // === DYNAMIC INSTRUCTIONS (Supervisor-driven teaching plan) ===
@@ -250,7 +251,6 @@ export default defineAgent({
     const pendingSignals: string[] = [];
 
     // Minimal runtime introspection for the dashboard.
-    let lastWatcherDecision: any = null;
     let lastProcessorRun: any = null;
     let lastPlannerRun: any = null;
     const subagentChats: any[] = [];
@@ -274,11 +274,10 @@ export default defineAgent({
             planStale,
             pendingSignals,
             supervisorPlan: supervisorPlanJson,
-            lastWatcherDecision,
             lastProcessorRun,
             lastPlannerRun,
             subagentChats,
-            updatedAt: Date.now(),
+            updatedAt: new Date(),
           };
           // Write atomically
           const tmp = runtimeStatePath + '.tmp';
@@ -346,6 +345,11 @@ Rules:
 
     const session = new voice.AgentSession(sessionConfig);
 
+    // === DIAGNOSTIC: Check RealtimeModel state ===
+    console.log(`[DIAG] session.llm type: ${sessionConfig.llm?.constructor?.name}`);
+    console.log(`[DIAG] session.llm capabilities: ${JSON.stringify((sessionConfig.llm as any)?.capabilities)}`);
+    console.log(`[DIAG] isGemini=${isGemini}, llmService type=${llmService?.constructor?.name}`);
+
     // === CONVERSATION TRACKING ===
     const history = new ConversationHistory();
 
@@ -356,94 +360,6 @@ Rules:
     };
 
     // === SUPERVISOR (background planner) ===
-    // A lightweight "watcher" model can decide whether we should regenerate the plan.
-    // This avoids regenerating every turn while still reacting quickly.
-
-    const shouldUpdatePlan = async (reasonHint: string) => {
-      // Hard refresh if plan is too old
-      const maxAgeMs = Number(process.env.PLAN_MAX_AGE_MS || 60_000);
-      const now = Date.now();
-      if (!lastPlanAt || now - lastPlanAt > maxAgeMs) {
-        return { should: true, reason: 'plan_too_old' };
-      }
-
-      // If we already flagged stale, update (but watcher still decides if the signal is weak)
-      // We treat staleness + accumulated signals as a reason hint.
-
-      const watcherUrl = process.env.WATCHER_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1';
-      const watcherModel = process.env.WATCHER_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma4-26b';
-      const watcherKey = process.env.WATCHER_LLM_KEY || process.env.LOCAL_LLM_KEY || 'ollama';
-
-      const recent = history.getContext();
-
-      const system = `You are a lightweight watcher for a language tutor.
-Decide if the Supervisor should regenerate the teaching plan now.
-Return JSON ONLY: {"should": true|false, "reason": "string"}.
-Say should=true when:
-- user asks to change learning style/pacing/corrections
-- user seems confused/stuck or asks "what should we do"
-- enough new learning signals happened that the plan might change
-Otherwise false.`;
-
-      const ageMs = now - lastPlanAt;
-      const signals = pendingSignals.slice(-10).join(', ') || 'none';
-
-      const user = `Reason hint: ${reasonHint}
-Plan age (ms): ${ageMs}
-Pending signals: ${signals}
-Last plan at: ${lastPlanAt}
-Plan summary: ${supervisorPlanText.substring(0, 400)}
-Recent conversation:\n${recent}`;
-
-      try {
-        const resp = await fetch(`${watcherUrl}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${watcherKey}`,
-          },
-          body: JSON.stringify({
-            model: watcherModel,
-            messages: [
-              { role: 'system', content: system },
-              { role: 'user', content: user },
-            ],
-            temperature: 0.1,
-            max_tokens: 120,
-          }),
-        });
-
-        const data = (await resp.json()) as any;
-        const content = data.choices?.[0]?.message?.content || '';
-        let jsonText = String(content).trim();
-        const block = jsonText.match(/```(?:json)?\s*([\s\S]*?)```/);
-        if (block?.[1]) jsonText = block[1].trim();
-        const parsed = JSON.parse(jsonText);
-        const decision = { should: !!parsed.should, reason: String(parsed.reason || 'watcher') };
-        lastWatcherDecision = { 
-          ...decision, 
-          at: Date.now(), 
-          reasonHint,
-          rawPrompt: system + '\n\n' + user,
-          rawResponse: content
-        };
-        addSubagentChat('Watcher', system + '\n\n' + user, content);
-        writeRuntimeStateSoon();
-        return decision;
-      } catch (e) {
-        // Watcher failure should not break the session; default to no.
-        const decision = { should: false, reason: 'watcher_error' };
-        lastWatcherDecision = { 
-          ...decision, 
-          at: Date.now(), 
-          reasonHint,
-          error: String(e)
-        };
-        addSubagentChat('Watcher', system + '\n\n' + user, 'Error: ' + String(e));
-        writeRuntimeStateSoon();
-        return decision;
-      }
-    };
 
     const updatePlanNow = async (reason: string) => {
       const now = Date.now();
@@ -461,36 +377,16 @@ Recent conversation:\n${recent}`;
       const plannerModel = process.env.SUPERVISOR_PLANNER_LLM_MODEL || process.env.SUPERVISOR_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma4-26b';
       const plannerKey = process.env.SUPERVISOR_PLANNER_LLM_KEY || process.env.SUPERVISOR_LLM_KEY || process.env.LOCAL_LLM_KEY || '';
 
-      const systemPrompt = `You are the Supervisor for a language-learning voice tutor.
+      const systemPrompt = PLANNER_SYSTEM_PROMPT;
 
-You will be given:
-- The previous teaching plan (your last output)
-- The recent conversation
-- A DB snapshot (SRS due items, new vocab candidates, active goal state)
-
-Your job: update the teaching plan *incrementally*.
-- Keep parts of the previous plan that are still valid.
-- Only change what needs changing.
-- If nothing should change, return the same plan with a note explaining why.
-
-Return JSON ONLY with:
-{
-  "preferences": {"style": "drills|conversation|mixed", "correction": "gentle|strict", "explanations": "minimal|normal|detailed", "pace": "slow|normal|fast"},
-  "teachingPlan": {"goal": "string", "targets": ["lexemeId"], "tactics": ["string"], "nextPrompt": "string", "targetLanguageRatio": 0.0},
-  "notes": ["string"]
-}
-Be concise. The plan should be executable immediately.`;
-
-      const prevPlan = supervisorPlanJson ? JSON.stringify(supervisorPlanJson) : 'null';
-      const ageMs = lastPlanAt ? (Date.now() - lastPlanAt) : -1;
-      const signals = pendingSignals.slice(-20).join(', ') || 'none';
-
-      const userPrompt = `Reason: ${reason}
-Plan age (ms): ${ageMs}
-Pending signals: ${signals}
-
-PREVIOUS_PLAN_JSON:\n${prevPlan}\n
-DB snapshot:\n${dbContext}\n\nActive goal note:\n${goalNote || 'None'}\n\nRecent conversation:\n${recentHistory}`;
+      const userPrompt = buildPlannerPrompt({
+        dbContext,
+        goalNote,
+        recentHistory,
+        previousPlan: supervisorPlanJson ? { ...supervisorPlanJson, _updatedAt: lastPlanAt } : null,
+        reason,
+        signals: pendingSignals,
+      });
 
       const resp = await fetch(`${plannerUrl}/chat/completions`, {
         method: 'POST',
@@ -535,12 +431,12 @@ DB snapshot:\n${dbContext}\n\nActive goal note:\n${goalNote || 'None'}\n\nRecent
       await refreshInstructions();
     };
 
-    // Timer: check at least every 30s, force refresh at least every 60s.
+    // Timer: replan at regular intervals or when signals accumulate
     const PLAN_TICK_MS = Number(process.env.PLAN_TICK_MS || 30_000);
     const planTimer = setInterval(() => {
-      shouldUpdatePlan('timer').then(({ should, reason }) => {
-        if (should) return updatePlanNow(reason);
-      }).catch(() => {});
+      if (pendingSignals.length > 0 || !lastPlanAt) {
+        updatePlanNow('timer').catch(() => {});
+      }
     }, PLAN_TICK_MS);
 
     // Generate an initial plan quickly once we have session context.
@@ -594,7 +490,7 @@ DB snapshot:\n${dbContext}\n\nActive goal note:\n${goalNote || 'None'}\n\nRecent
           console.warn('[Processor] Errors:', result.errors);
         }
 
-        // Any processor run is a potential supervisor trigger, but we gate by watcher/cooldowns.
+        // Any processor run is a potential supervisor trigger (signals accumulate for timer-based replanning).
         if ((result.analysis?.lexemes?.length || 0) > 0) {
           pendingSignals.push('processor_analysis');
         }
@@ -602,7 +498,7 @@ DB snapshot:\n${dbContext}\n\nActive goal note:\n${goalNote || 'None'}\n\nRecent
           pendingSignals.push('srs_updated');
         }
 
-        // Mark stale so watcher/supervisor considers a refresh ASAP.
+        // Mark stale so supervisor considers a refresh on the next timer tick.
         planStale = true;
         writeRuntimeStateSoon();
         refreshInstructions().catch(() => {});
@@ -647,17 +543,18 @@ DB snapshot:\n${dbContext}\n\nActive goal note:\n${goalNote || 'None'}\n\nRecent
     // === DIAGNOSTIC: Deep trace of _startImpl ===
     const sessProto = Object.getPrototypeOf(session);
     const origStartImpl = sessProto._startImpl;
+    console.log(`[DIAG] sessProto constructor: ${sessProto.constructor.name}`);
+    console.log(`[DIAG] sessProto._startImpl source: ${origStartImpl.toString().slice(0, 120)}...`);
     sessProto._startImpl = async function(this: any, opts: any) {
       console.log(`[DIAG] _startImpl called, this===session: ${this === session}, room=${!!opts.room}`);
-      console.log(`[DIAG] Pre-startImpl props: roomIO=${!!this.roomIO} _roomIO=${!!this._roomIO} input.audio=${!!this.input?.audio} output.audio=${!!this.output?.audio}`);
+      console.log(`[DIAG] Pre-startImpl props: roomIO=${!!this.roomIO} _roomIO=${!!this._roomIO} sessionHost=${!!this.sessionHost}`);
       try {
         await origStartImpl.call(this, opts);
       } catch (e) {
         console.error(`[DIAG] _startImpl threw:`, e);
         throw e;
       }
-      console.log(`[DIAG] _startImpl completed, roomIO=${!!this.roomIO} _roomIO=${!!this._roomIO}`);
-      console.log(`[DIAG] Post-startImpl: input.audio=${!!this.input?.audio} output.audio=${!!this.output?.audio}`);
+      console.log(`[DIAG] _startImpl completed, roomIO=${!!this.roomIO} _roomIO=${!!this._roomIO} sessionHost=${!!this.sessionHost}`);
     };
 
     // Also patch registerByteStreamHandler
@@ -679,9 +576,19 @@ DB snapshot:\n${dbContext}\n\nActive goal note:\n${goalNote || 'None'}\n\nRecent
       }
     });
 
-    console.log(`[DIAG] session.start() completed`);
-    console.log(`[DIAG] session.roomIO exists: ${!!(session as any).roomIO}`);
-    console.log(`[DIAG] session._roomIO exists: ${!!(session as any)._roomIO}`);
+    console.log(`[DIAG] session.start() completed, _roomIO=${!!(session as any)._roomIO}, sessionHost=${!!(session as any).sessionHost}`);
+    console.log(`[DIAG] session.activity: ${!!(session as any).activity}, type=${(session as any).activity?.constructor?.name}`);
+    const activity = (session as any).activity;
+    if (activity) {
+      console.log(`[DIAG] activity.llm type: ${activity.llm?.constructor?.name}, llm=${activity.llm?.constructor?.name}`);
+      console.log(`[DIAG] activity.realtimeSession: ${!!activity.realtimeSession}`);
+      console.log(`[DIAG] activity.llm instanceof RealtimeModel: ${activity.llm?.constructor?.name === 'RealtimeModel'}`);
+      // Check if the RealtimeModel is from the same module
+      const modelPkg = activity.llm?.constructor?.__module || 'unknown';
+      console.log(`[DIAG] activity.llm module: ${modelPkg}`);
+    } else {
+      console.log(`[DIAG] NO activity on session`);
+    }
 
     console.log('[Tutor-ED] Sending initial greeting...');
     // RealtimeModel doesn't support say() - AgentSession handles it internally

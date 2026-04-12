@@ -6,6 +6,8 @@ export interface PromptContext {
   targetRatio: number
   userLevel: string
   initialContext: string
+  /** 'voice' for LiveKit/TTS sessions, 'text' for CLI/web chat */
+  mode?: 'voice' | 'text'
 }
 
 export function buildInstructions(
@@ -18,4 +20,5 @@ export function buildInstructions(
     .replace(/{targetRatio}/g, String(Math.round(context.targetRatio * 100)))
     .replace(/{userLevel}/g, context.userLevel)
     .replace(/{initialContext}/g, context.initialContext)
+    .replace(/{mode}/g, context.mode || 'voice')
 }

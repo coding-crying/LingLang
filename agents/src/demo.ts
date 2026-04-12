@@ -208,6 +208,7 @@ Do not teach. Do not explain. Do not add anything else.`,
       targetRatio: langConfig.pedagogy.targetLanguageRatio,
       userLevel: isNew ? 'beginner' : 'intermediate',
       initialContext: `Language: ${langConfig.name}\nUser: ${userId}\n${levelNote}`,
+      mode: 'voice',
     });
 
     console.log(`[Demo] Starting tutor: ${langConfig.name} (${isNew ? 'beginner' : 'experienced'})`);
