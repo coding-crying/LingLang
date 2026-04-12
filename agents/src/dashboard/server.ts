@@ -12,7 +12,7 @@ import express from 'express';
 import fs from 'node:fs';
 import { db } from '../db/index.js';
 import { users, lexemes, userVocabulary, activeGoals, units, duolingoMetadata } from '../db/schema.js';
-import { eq, desc, sql, gte } from 'drizzle-orm';
+import { eq, desc, sql, gte, and } from 'drizzle-orm';
 import { execSync } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -410,6 +410,70 @@ app.get('/api/logs', (req, res) => {
   }, 500);
 
   req.on('close', () => clearInterval(interval));
+});
+
+// ============================================================================
+// PAGES
+// ============================================================================
+
+app.get('/', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.get('/dashboard', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
+});
+
+// ============================================================================
+// WAITLIST
+// ============================================================================
+
+app.post('/api/waitlist', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ error: 'Valid email required' });
+    }
+    const fsPromises = await import('node:fs/promises');
+    const waitlistPath = path.join(__dirname, '..', '..', 'data', 'waitlist.txt');
+    await fsPromises.mkdir(path.dirname(waitlistPath), { recursive: true });
+    await fsPromises.appendFile(waitlistPath, `${new Date().toISOString()},${email}\n`);
+    console.log(`[Waitlist] ${email}`);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ============================================================================
+// VOCABULARY BY LANGUAGE
+// ============================================================================
+
+app.get('/api/vocabulary/:language', async (req, res) => {
+  try {
+    const { language } = req.params;
+    const { userId = 'test-user', limit = '200' } = req.query;
+
+    const user = await db.query.users.findFirst({
+      where: eq(users.id, userId as string)
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const progress = await db.query.userVocabulary.findMany({
+      where: eq(userVocabulary.userId, userId as string),
+      with: { lexeme: true },
+      orderBy: [desc(userVocabulary.lastReview)],
+      limit: parseInt(limit as string),
+    });
+
+    const filtered = progress.filter(p => p.lexeme.language === language);
+    res.json(filtered);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
 });
 
 // ============================================================================

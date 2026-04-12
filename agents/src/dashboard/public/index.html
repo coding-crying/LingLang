@@ -3,1069 +3,332 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>LingLang Dashboard</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-
-    body {
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-      background: #0f1117;
-      color: #e0e0e0;
-    }
-
-    header {
-      background: linear-gradient(135deg, #1a1f35 0%, #252b45 100%);
-      padding: 20px 30px;
-      border-bottom: 1px solid #2d3456;
-      display: flex;
-      align-items: center;
-      gap: 20px;
-    }
-
-    header h1 { font-size: 1.5em; color: #a78bfa; }
-    header .subtitle { color: #6b7280; font-size: 0.9em; }
-
-    /* Tabs */
-    .tabs {
-      display: flex;
-      background: #161b2e;
-      border-bottom: 1px solid #2d3456;
-      padding: 0 20px;
-    }
-
-    .tab {
-      padding: 14px 22px;
-      cursor: pointer;
-      color: #6b7280;
-      font-size: 0.95em;
-      border-bottom: 2px solid transparent;
-      transition: all 0.15s;
-      user-select: none;
-    }
-
-    .tab:hover { color: #a78bfa; }
-    .tab.active { color: #a78bfa; border-bottom-color: #a78bfa; }
-
-    .tab-content { display: none; padding: 24px; }
-    .tab-content.active { display: block; }
-
-    /* Cards */
-    .card {
-      background: #1a1f35;
-      border: 1px solid #2d3456;
-      border-radius: 8px;
-      padding: 20px;
-      margin-bottom: 20px;
-    }
-
-    .card h2 { color: #a78bfa; font-size: 1em; margin-bottom: 16px; text-transform: uppercase; letter-spacing: 0.05em; }
-
-    /* Service status grid */
-    .services-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      gap: 16px;
-      margin-bottom: 20px;
-    }
-
-    .service-card {
-      background: #1a1f35;
-      border: 1px solid #2d3456;
-      border-radius: 8px;
-      padding: 18px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-
-    .service-card.up { border-left: 3px solid #22c55e; }
-    .service-card.down { border-left: 3px solid #ef4444; }
-
-    .service-header {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-
-    .dot {
-      width: 10px; height: 10px;
-      border-radius: 50%;
-      flex-shrink: 0;
-    }
-
-    .dot.up { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
-    .dot.down { background: #ef4444; box-shadow: 0 0 6px #ef4444; }
-
-    .service-name { font-weight: 600; color: #e0e0e0; }
-    .service-meta { font-size: 0.82em; color: #6b7280; }
-    .service-latency { font-size: 0.82em; color: #4ade80; }
-    .service-error { font-size: 0.82em; color: #f87171; }
-
-    /* GPU bar */
-    .gpu-card {
-      background: #1a1f35;
-      border: 1px solid #2d3456;
-      border-radius: 8px;
-      padding: 18px;
-      margin-bottom: 20px;
-    }
-
-    .gpu-card h2 { color: #a78bfa; font-size: 1em; margin-bottom: 14px; text-transform: uppercase; letter-spacing: 0.05em; }
-
-    .vram-bar-wrap {
-      background: #0f1117;
-      border-radius: 6px;
-      height: 24px;
-      overflow: hidden;
-      margin-bottom: 10px;
-      position: relative;
-    }
-
-    .vram-bar-fill {
-      height: 100%;
-      background: linear-gradient(90deg, #6d28d9, #a78bfa);
-      transition: width 0.4s ease;
-      display: flex;
-      align-items: center;
-      padding: 0 8px;
-      font-size: 0.8em;
-      font-weight: bold;
-      white-space: nowrap;
-    }
-
-    .vram-bar-label {
-      font-size: 0.82em;
-      color: #9ca3af;
-      margin-bottom: 12px;
-    }
-
-    .process-list { display: flex; flex-direction: column; gap: 6px; }
-
-    .process-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-size: 0.83em;
-      padding: 6px 10px;
-      background: #0f1117;
-      border-radius: 4px;
-    }
-
-    .process-name { color: #c4b5fd; font-family: monospace; }
-    .process-mem { color: #4ade80; font-weight: bold; }
-
-    /* Activity feed */
-    .activity-feed {
-      max-height: 500px;
-      overflow-y: auto;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .activity-item {
-      padding: 10px 14px;
-      background: #0f1117;
-      border-radius: 6px;
-      border-left: 3px solid #6d28d9;
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      gap: 10px;
-    }
-
-    .activity-item.goal { border-left-color: #f59e0b; }
-    .activity-item.goal-complete { border-left-color: #22c55e; }
-    .activity-item.goal-failed { border-left-color: #ef4444; }
-
-    .activity-word { font-weight: 600; color: #c4b5fd; }
-    .activity-detail { font-size: 0.82em; color: #9ca3af; margin-top: 2px; }
-    .activity-time { font-size: 0.78em; color: #4b5563; white-space: nowrap; }
-
-    .srs-badge {
-      display: inline-block;
-      padding: 2px 7px;
-      border-radius: 3px;
-      font-size: 0.75em;
-      font-weight: bold;
-    }
-
-    .srs-0 { background: #3f1515; color: #f87171; }
-    .srs-1 { background: #3f2a00; color: #fbbf24; }
-    .srs-2 { background: #1a3320; color: #4ade80; }
-    .srs-3 { background: #1a2e4a; color: #60a5fa; }
-    .srs-4 { background: #2e1a4a; color: #c084fc; }
-    .srs-5 { background: #0f2e2e; color: #2dd4bf; }
-
-    /* Log viewer */
-    .log-viewer {
-      background: #090b14;
-      border: 1px solid #2d3456;
-      border-radius: 8px;
-      padding: 16px;
-      font-family: 'Courier New', monospace;
-      font-size: 0.78em;
-      line-height: 1.5;
-      max-height: 600px;
-      overflow-y: auto;
-      color: #9ca3af;
-    }
-
-    .log-line { padding: 1px 0; }
-    .log-line.info { color: #60a5fa; }
-    .log-line.warn { color: #fbbf24; }
-    .log-line.error { color: #f87171; }
-    .log-line.tutor { color: #c4b5fd; }
-    .log-line.user { color: #4ade80; }
-    .log-line.supervisor { color: #fb923c; }
-
-    .log-controls {
-      display: flex;
-      gap: 10px;
-      align-items: center;
-      margin-bottom: 12px;
-    }
-
-    .log-filter {
-      background: #0f1117;
-      border: 1px solid #2d3456;
-      border-radius: 6px;
-      padding: 7px 12px;
-      color: #e0e0e0;
-      font-size: 0.85em;
-      flex: 1;
-    }
-
-    .log-filter:focus { outline: none; border-color: #6d28d9; }
-
-    /* Existing progress styles */
-    .stat-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-      gap: 12px;
-      margin-bottom: 20px;
-    }
-
-    .stat-box {
-      background: linear-gradient(135deg, #1e1b4b 0%, #312e81 100%);
-      color: white;
-      padding: 18px;
-      border-radius: 8px;
-      text-align: center;
-      border: 1px solid #3730a3;
-    }
-
-    .stat-number { font-size: 2.2em; font-weight: bold; }
-    .stat-label { opacity: 0.8; font-size: 0.9em; margin-top: 4px; }
-
-    .user-select {
-      width: 100%;
-      padding: 10px;
-      font-size: 0.95em;
-      background: #0f1117;
-      border: 1px solid #2d3456;
-      border-radius: 6px;
-      color: #e0e0e0;
-      margin-bottom: 16px;
-    }
-
-    .user-select:focus { outline: none; border-color: #6d28d9; }
-
-    .srs-grid {
-      display: grid;
-      grid-template-columns: repeat(6, 1fr);
-      gap: 8px;
-      margin-top: 12px;
-    }
-
-    .srs-box {
-      padding: 12px 8px;
-      border-radius: 6px;
-      text-align: center;
-    }
-
-    .srs-box.level-0 { background: #3f1515; }
-    .srs-box.level-1 { background: #3f2a00; }
-    .srs-box.level-2 { background: #1a3320; }
-    .srs-box.level-3 { background: #1a2e4a; }
-    .srs-box.level-4 { background: #2e1a4a; }
-    .srs-box.level-5 { background: #0f2e2e; }
-
-    .srs-count { font-size: 1.6em; font-weight: bold; }
-    .srs-label { font-size: 0.75em; color: #9ca3af; margin-top: 4px; }
-
-    .vocab-list { max-height: 400px; overflow-y: auto; }
-
-    .vocab-item {
-      padding: 10px 12px;
-      border-bottom: 1px solid #2d3456;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .vocab-word { font-weight: bold; color: #c4b5fd; }
-    .vocab-translation { color: #9ca3af; font-style: italic; font-size: 0.9em; }
-    .vocab-stats { font-size: 0.82em; color: #6b7280; }
-
-    .goal-item {
-      padding: 12px;
-      background: #0f1117;
-      border-left: 3px solid #6d28d9;
-      margin: 8px 0;
-      border-radius: 4px;
-    }
-
-    .goal-type { font-weight: bold; color: #c4b5fd; text-transform: uppercase; font-size: 0.85em; }
-    .goal-target { margin-top: 4px; color: #9ca3af; font-size: 0.9em; }
-
-    .badge {
-      display: inline-block;
-      padding: 2px 7px;
-      border-radius: 3px;
-      font-size: 0.78em;
-      font-weight: bold;
-      margin-left: 6px;
-    }
-
-    .badge-active { background: #14532d; color: #4ade80; }
-    .badge-completed { background: #1e3a5f; color: #60a5fa; }
-    .badge-failed { background: #4c1414; color: #f87171; }
-
-    .btn {
-      background: #6d28d9;
-      color: white;
-      padding: 10px 20px;
-      border: none;
-      border-radius: 6px;
-      font-size: 0.9em;
-      cursor: pointer;
-    }
-
-    .btn:hover { background: #7c3aed; }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-    .import-form { display: grid; gap: 12px; }
-    .form-group { display: flex; flex-direction: column; gap: 5px; }
-    .form-group label { font-size: 0.85em; color: #9ca3af; }
-
-    .form-group input, .form-group select {
-      padding: 9px;
-      background: #0f1117;
-      border: 1px solid #2d3456;
-      border-radius: 6px;
-      color: #e0e0e0;
-      font-size: 0.9em;
-    }
-
-    .success { background: #14532d; color: #4ade80; padding: 12px; border-radius: 6px; margin: 8px 0; font-size: 0.9em; }
-    .error { background: #4c1414; color: #f87171; padding: 12px; border-radius: 6px; margin: 8px 0; font-size: 0.9em; }
-    .loading { text-align: center; padding: 30px; color: #6b7280; }
-
-    .refresh-badge {
-      font-size: 0.75em;
-      color: #4b5563;
-      margin-left: auto;
-    }
-
-    .two-col {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 20px;
-    }
-
-    @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
-  </style>
+  <title>LingLang — The Language Tutor That Learns From Your Voice</title>
+  <meta name="description" content="Voice-first language learning with invisible spaced repetition, semantic knowledge graphs, and goal-seeking AI agents.">
+  <meta property="og:title" content="LingLang — The Language Tutor That Learns From Your Voice">
+  <meta property="og:description" content="No flashcards. No tapping. Just conversation. FSRS grades your voice. Semantic ripple reinforces connected words. Goal-seeking agents plan your next lesson.">
+  <meta property="og:type" content="website">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🗣</text></svg>">
+  <link rel="stylesheet" href="css/design-tokens.css">
+  <link rel="stylesheet" href="css/landing.css">
 </head>
 <body>
-  <header>
-    <div>
-      <h1>LingLang Dashboard</h1>
-      <div class="subtitle">Services · Agent Activity · Live Logs · Learning Progress</div>
-    </div>
-    <div class="refresh-badge" id="lastRefresh">—</div>
-  </header>
-
-  <div class="tabs">
-    <div class="tab active" onclick="switchTab('services')">Services</div>
-    <div class="tab" onclick="switchTab('activity')">Agent Activity</div>
-    <div class="tab" onclick="switchTab('thoughts')">Thoughts & Prompts</div>
-    <div class="tab" onclick="switchTab('logs')">Live Logs</div>
-    <div class="tab" onclick="switchTab('progress')">Learning Progress</div>
-    <div class="tab" onclick="switchTab('database')">Database Explorer</div>
-  </div>
-
-  <!-- ===== SERVICES TAB ===== -->
-  <div id="tab-services" class="tab-content active">
-    <div class="services-grid" id="servicesGrid">
-      <div class="loading">Checking services...</div>
-    </div>
-
-    <div class="gpu-card" id="gpuCard" style="display:none">
-      <h2>GPU Memory (VRAM)</h2>
-      <div class="vram-bar-wrap">
-        <div class="vram-bar-fill" id="vramBar" style="width:0%"></div>
-      </div>
-      <div class="vram-bar-label" id="vramLabel"></div>
-      <div class="process-list" id="processList"></div>
-    </div>
-
-    <div class="card" id="ollamaCard" style="display:none">
-      <h2>Ollama — Loaded Models</h2>
-      <div id="ollamaModels"></div>
-    </div>
-  </div>
-
-  <!-- ===== ACTIVITY TAB ===== -->
-  <div id="tab-activity" class="tab-content">
-    <div class="two-col">
-      <div class="card">
-        <h2>Supervisor — SRS Updates (last hour)</h2>
-        <div class="activity-feed" id="srsUpdates"><div class="loading">Loading...</div></div>
-      </div>
-      <div class="card">
-        <h2>Processor — Goal Events (last hour)</h2>
-        <div class="activity-feed" id="goalEvents"><div class="loading">Loading...</div></div>
+  <!-- Navigation -->
+  <nav class="landing-nav" id="nav">
+    <div class="nav-inner">
+      <a href="/" class="nav-logo font-display">LingLang</a>
+      <div class="nav-links" id="nav-links">
+        <a href="#how-it-works">How It Works</a>
+        <a href="#features">Features</a>
+        <a href="#languages">Languages</a>
+        <a href="/dashboard" class="btn-secondary nav-dashboard-btn">Dashboard</a>
       </div>
     </div>
+  </nav>
 
-    <div class="card">
-      <h2>Runtime (Supervisor Plan · Watcher · Processor)</h2>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-        <div>
-          <div style="color:#9ca3af;font-size:0.85em;margin-bottom:6px">Supervisor Plan (current)</div>
-          <pre id="supervisorPlan" style="background:#0f1117;border:1px solid #2d3456;border-radius:6px;padding:12px;max-height:420px;overflow:auto;white-space:pre-wrap"></pre>
+  <!-- Hero Section -->
+  <section class="hero" id="hero">
+    <canvas id="hero-canvas"></canvas>
+    <div class="hero-overlay"></div>
+    <div class="hero-content">
+      <div class="hero-badge font-mono">Voice-First AI Tutor</div>
+      <h1 class="hero-title font-display">
+        The language tutor<br>that <span class="text-secondary">learns</span> from your voice
+      </h1>
+      <p class="hero-subtitle">
+        Invisible spaced repetition. Semantic knowledge graphs. Goal-seeking agents.<br>
+        No flashcards. No tapping. Just conversation.
+      </p>
+      <div class="hero-cta-group" id="hero-cta">
+        <button class="btn-primary hero-cta" id="early-access-btn">Get Early Access</button>
+        <div class="hero-cta-note text-muted">6 languages · 100% local option · Privacy-first</div>
+      </div>
+      <div class="email-form" id="email-form">
+        <input type="email" id="email-input" placeholder="your@email.com" class="email-input" autocomplete="email">
+        <button class="btn-primary email-submit" id="email-submit">Join Waitlist</button>
+        <div class="email-status" id="email-status"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- How It Works -->
+  <section class="how-it-works reveal" id="how-it-works">
+    <div class="section-inner">
+      <div class="section-header">
+        <span class="section-tag font-mono">How It Works</span>
+        <h2 class="section-title font-display">Three steps. Zero buttons.</h2>
+      </div>
+      <div class="steps-grid">
+        <div class="step-card surface-card reveal">
+          <div class="step-number font-mono">01</div>
+          <div class="step-icon">🗣️</div>
+          <h3 class="step-title font-display">You speak</h3>
+          <p class="step-desc">Converse naturally with a personality tutor — a Moscow intellectual for Russian, a Madrid journalist for Spanish. Each language has its own character and cultural depth.</p>
         </div>
-        <div>
-          <div style="color:#9ca3af;font-size:0.85em;margin-bottom:6px">Watcher + Processor (latest)</div>
-          <pre id="runtimeMeta" style="background:#0f1117;border:1px solid #2d3456;border-radius:6px;padding:12px;max-height:420px;overflow:auto;white-space:pre-wrap"></pre>
+        <div class="step-card surface-card reveal">
+          <div class="step-number font-mono">02</div>
+          <div class="step-icon">🔍</div>
+          <h3 class="step-title font-display">It listens</h3>
+          <p class="step-desc">Every word you say is analyzed in real-time — morphology, grammar, pronunciation confidence, response latency. No buttons. The system grades you from your voice.</p>
         </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ===== THOUGHTS & PROMPTS TAB ===== -->
-  <div id="tab-thoughts" class="tab-content">
-    <div class="card">
-      <h2>Subagent Chat History (Watcher, Planner, Processor)</h2>
-      <div id="subagentChatHistory" style="background:#090b14; border:1px solid #2d3456; border-radius:8px; padding:16px; font-family:'Courier New', monospace; font-size:0.85em; line-height:1.4; max-height:500px; overflow-y:auto; color:#9ca3af; margin-bottom:20px;">
-        <div class="loading">Waiting for subagent chats...</div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Supervisor (Planner) - Latest Run</h2>
-      <div class="two-col">
-        <div>
-          <div style="color:#9ca3af;font-size:0.85em;margin-bottom:6px">LLM Prompt</div>
-          <pre id="plannerPrompt" style="background:#0f1117;border:1px solid #2d3456;border-radius:6px;padding:12px;max-height:420px;overflow:auto;white-space:pre-wrap;color:#c4b5fd"></pre>
-        </div>
-        <div>
-          <div style="color:#9ca3af;font-size:0.85em;margin-bottom:6px">LLM Response (Thoughts/JSON)</div>
-          <pre id="plannerResponse" style="background:#0f1117;border:1px solid #2d3456;border-radius:6px;padding:12px;max-height:420px;overflow:auto;white-space:pre-wrap;color:#4ade80"></pre>
+        <div class="step-card surface-card reveal">
+          <div class="step-number font-mono">03</div>
+          <div class="step-icon">🧠</div>
+          <h3 class="step-title font-display">It adapts</h3>
+          <p class="step-desc">The Supervisor picks your next goal — remediation for struggles, new vocabulary, or grammar practice. FSRS schedules reviews. Semantic ripple reinforces connected words.</p>
         </div>
       </div>
     </div>
+  </section>
 
-    <div class="card">
-      <h2>Watcher - Latest Decision</h2>
-      <div class="two-col">
-        <div>
-          <div style="color:#9ca3af;font-size:0.85em;margin-bottom:6px">LLM Prompt</div>
-          <pre id="watcherPrompt" style="background:#0f1117;border:1px solid #2d3456;border-radius:6px;padding:12px;max-height:300px;overflow:auto;white-space:pre-wrap;color:#c4b5fd"></pre>
-        </div>
-        <div>
-          <div style="color:#9ca3af;font-size:0.85em;margin-bottom:6px">LLM Response</div>
-          <pre id="watcherResponse" style="background:#0f1117;border:1px solid #2d3456;border-radius:6px;padding:12px;max-height:300px;overflow:auto;white-space:pre-wrap;color:#4ade80"></pre>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Processor - Latest Run</h2>
-      <div class="two-col">
-        <div>
-          <div style="color:#9ca3af;font-size:0.85em;margin-bottom:6px">LLM Prompt</div>
-          <pre id="processorPrompt" style="background:#0f1117;border:1px solid #2d3456;border-radius:6px;padding:12px;max-height:420px;overflow:auto;white-space:pre-wrap;color:#c4b5fd"></pre>
-        </div>
-        <div>
-          <div style="color:#9ca3af;font-size:0.85em;margin-bottom:6px">LLM Response</div>
-          <pre id="processorResponse" style="background:#0f1117;border:1px solid #2d3456;border-radius:6px;padding:12px;max-height:420px;overflow:auto;white-space:pre-wrap;color:#4ade80"></pre>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ===== LOGS TAB ===== -->
-  <div id="tab-logs" class="tab-content">
-    <div class="log-controls">
-      <input class="log-filter" id="logFilter" type="text" placeholder="Filter logs... (e.g. Supervisor, User, Error)">
-      <button class="btn" onclick="clearLog()">Clear</button>
-      <button class="btn" onclick="toggleAutoScroll()" id="scrollBtn">Auto-scroll ON</button>
-    </div>
-    <div class="log-viewer" id="logViewer"></div>
-  </div>
-
-  <!-- ===== PROGRESS TAB ===== -->
-  <div id="tab-progress" class="tab-content">
-    <div class="stat-grid">
-      <div class="stat-box">
-        <div class="stat-number" id="totalUsers">—</div>
-        <div class="stat-label">Users</div>
-      </div>
-      <div class="stat-box">
-        <div class="stat-number" id="totalLexemes">—</div>
-        <div class="stat-label">Vocabulary Items</div>
-      </div>
-      <div class="stat-box">
-        <div class="stat-number" id="totalProgress">—</div>
-        <div class="stat-label">Progress Entries</div>
-      </div>
-      <div class="stat-box">
-        <div class="stat-number" id="totalUnits">—</div>
-        <div class="stat-label">Curriculum Units</div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Select User</h2>
-      <select class="user-select" id="userSelect" onchange="loadUserData()">
-        <option value="">Loading users...</option>
-      </select>
-    </div>
-
-    <div id="userDetails" style="display:none">
-      <div class="two-col">
-        <div class="card">
-          <h2>User Info</h2>
-          <div id="userInfo"></div>
-        </div>
-        <div class="card">
-          <h2>SRS Distribution</h2>
-          <div class="srs-grid" id="srsDistribution"></div>
-        </div>
-      </div>
-
-      <div class="card">
-        <h2>Active Goals</h2>
-        <div id="activeGoals"></div>
-      </div>
-
-      <div class="card">
-        <h2>Recent Vocabulary</h2>
-        <div class="vocab-list" id="vocabularyList"></div>
-      </div>
-
-      <div class="card">
-        <h2>Import Duolingo Data</h2>
-        <div id="duolingoStatus"></div>
-        <form class="import-form" id="importForm" onsubmit="importDuolingo(event)">
-          <div class="form-group">
-            <label>Duolingo Username</label>
-            <input type="text" id="duoUsername" required>
+  <!-- Feature: FSRS -->
+  <section class="feature-section reveal" id="features">
+    <div class="section-inner feature-grid">
+      <div class="feature-visual">
+        <div class="fsrs-diagram" id="fsrs-diagram">
+          <div class="fsrs-states-row">
+            <div class="fsrs-state fsrs-new">
+              <span class="fsrs-state-label">New</span>
+              <span class="fsrs-state-sub">Never seen</span>
+            </div>
+            <div class="fsrs-arrow-right"></div>
+            <div class="fsrs-state fsrs-learning">
+              <span class="fsrs-state-label">Learning</span>
+              <span class="fsrs-state-sub">S &lt; 3 days</span>
+            </div>
+            <div class="fsrs-arrow-right"></div>
+            <div class="fsrs-state fsrs-review">
+              <span class="fsrs-state-label">Review</span>
+              <span class="fsrs-state-sub">S +3 days</span>
+            </div>
           </div>
-          <div class="form-group">
-            <label>Duolingo JWT Token</label>
-            <input type="password" id="duoJWT" required>
+          <div class="fsrs-states-row fsrs-lapse-row">
+            <div class="fsrs-state fsrs-relearning">
+              <span class="fsrs-state-label">Relearning</span>
+              <span class="fsrs-state-sub">Lapsed</span>
+            </div>
+            <div class="fsrs-arrow-up"></div>
           </div>
-          <div class="form-group">
-            <label>Learning Language</label>
-            <select id="duoLanguage" required>
-              <option value="ru">Russian</option>
-              <option value="es">Spanish</option>
-              <option value="fr">French</option>
-              <option value="pt">Portuguese</option>
-              <option value="ar">Arabic</option>
-            </select>
+          <div class="fsrs-grades">
+            <div class="grade-row">
+              <span class="grade-grade font-mono grade-again">1</span>
+              <span class="grade-name">Again</span>
+              <span class="grade-arrow">→</span>
+              <span class="grade-target">Relearning</span>
+            </div>
+            <div class="grade-row">
+              <span class="grade-grade font-mono grade-hard">2</span>
+              <span class="grade-name">Hard</span>
+              <span class="grade-arrow">→</span>
+              <span class="grade-target">Short interval</span>
+            </div>
+            <div class="grade-row">
+              <span class="grade-grade font-mono grade-good">3</span>
+              <span class="grade-name">Good</span>
+              <span class="grade-arrow">→</span>
+              <span class="grade-target">Review</span>
+            </div>
+            <div class="grade-row">
+              <span class="grade-grade font-mono grade-easy">4</span>
+              <span class="grade-name">Easy</span>
+              <span class="grade-arrow">→</span>
+              <span class="grade-target">Long interval</span>
+            </div>
           </div>
-          <button type="submit" class="btn">Import Duolingo Data</button>
-        </form>
-        <div id="importResult"></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ===== DATABASE EXPLORER TAB ===== -->
-  <div id="tab-database" class="tab-content">
-    <div class="card">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
-        <h2>Database Explorer (Top 100 rows)</h2>
-        <div style="display:flex; gap:10px;">
-          <select class="user-select" id="dbTableSelect" onchange="loadTableData()" style="width:200px; margin-bottom:0;">
-            <option value="users">Users</option>
-            <option value="lexemes">Lexemes</option>
-            <option value="progress">Learning Progress</option>
-            <option value="goals">Active Goals</option>
-            <option value="units">Units</option>
-          </select>
-          <button class="btn" onclick="loadTableData()">Refresh</button>
         </div>
       </div>
-      <div style="overflow-x:auto;">
-        <table id="dbTable" style="width:100%; border-collapse:collapse; font-size:0.9em; text-align:left;">
-          <thead id="dbTableHead" style="border-bottom:1px solid #2d3456;">
-          </thead>
-          <tbody id="dbTableBody">
-          </tbody>
-        </table>
+      <div class="feature-text">
+        <div class="feature-tag font-mono">FSRS Engine</div>
+        <h2 class="feature-title font-display">Spaced repetition that <span class="text-secondary">listens</span></h2>
+        <p class="feature-desc">Traditional SRS makes you tap "Hard, Good, Easy." LingLang grades you from your voice — pronunciation confidence, response latency, escalation level. The FSRS v5 algorithm maps these to stability and difficulty scores, scheduling reviews before you forget.</p>
+        <div class="feature-stats">
+          <div class="stat"><span class="stat-value font-mono text-secondary">4</span><span class="stat-label text-muted">Grade levels</span></div>
+          <div class="stat"><span class="stat-value font-mono text-secondary">90%</span><span class="stat-label text-muted">Target retention</span></div>
+          <div class="stat"><span class="stat-value font-mono text-secondary">0</span><span class="stat-label text-muted">Button taps</span></div>
+        </div>
       </div>
     </div>
-  </div>
+  </section>
 
-  <script>
-    // =========================================================================
-    // Tab switching
-    // =========================================================================
-    let activeTab = 'services';
+  <!-- Feature: Semantic Ripple -->
+  <section class="feature-section feature-alt reveal">
+    <div class="section-inner feature-grid feature-grid-reverse">
+      <div class="feature-visual">
+        <div class="ripple-visual" id="ripple-visual">
+          <canvas id="ripple-canvas" width="440" height="340"></canvas>
+        </div>
+      </div>
+      <div class="feature-text">
+        <div class="feature-tag font-mono">Semantic Ripple</div>
+        <h2 class="feature-title font-display">Learning one word <span class="text-tertiary">boosts</span> the next</h2>
+        <p class="feature-desc">Every word has a 1024-dimensional embedding. When you master "яблоко" (apple), the system finds its 5 nearest semantic neighbors via pgvector — "груша" (pear), "фрукт" (fruit) — and applies a micro-boost to their stability. When you struggle, the ripple penalizes related words. Your knowledge graph heals itself.</p>
+        <div class="feature-stats">
+          <div class="stat"><span class="stat-value font-mono text-tertiary">1024</span><span class="stat-label text-muted">Dimensions</span></div>
+          <div class="stat"><span class="stat-value font-mono text-tertiary">5</span><span class="stat-label text-muted">Neighbors</span></div>
+          <div class="stat"><span class="stat-value font-mono text-tertiary">HNSW</span><span class="stat-label text-muted">Index type</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
 
-    function switchTab(tab) {
-      document.querySelectorAll('.tab').forEach((t, i) => {
-        t.classList.toggle('active', ['services','activity','thoughts','logs','progress','database'][i] === tab);
-      });
-      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-      document.getElementById('tab-' + tab).classList.add('active');
-      activeTab = tab;
-      if (tab === 'logs' && !logSSE) startLogStream();
-      if (tab === 'activity' || tab === 'thoughts') loadActivity();
-      if (tab === 'database') loadTableData();
-    }
-
-    // =========================================================================
-    // Services
-    // =========================================================================
-    async function loadServices() {
-      try {
-        const res = await fetch('/api/services');
-        const d = await res.json();
-
-        const grid = document.getElementById('servicesGrid');
-        const services = [d.stt, d.tts, d.ollama];
-        grid.innerHTML = services.map(s => `
-          <div class="service-card ${s.status}">
-            <div class="service-header">
-              <div class="dot ${s.status}"></div>
-              <div class="service-name">${s.name}</div>
+  <!-- Feature: Goal-Seeking Agents -->
+  <section class="feature-section reveal">
+    <div class="section-inner feature-grid">
+      <div class="feature-visual">
+        <div class="agent-visual">
+          <div class="agent-flow">
+            <div class="agent-node agent-user">
+              <div class="agent-node-icon">👤</div>
+              <div class="agent-node-label font-display">You speak</div>
             </div>
-            ${s.status === 'up'
-              ? `<div class="service-latency">${s.latencyMs}ms</div>`
-              : `<div class="service-error">${s.error || 'unreachable'}</div>`
-            }
+            <div class="agent-arrow">→</div>
+            <div class="agent-node agent-processor">
+              <div class="agent-node-icon">⚡</div>
+              <div class="agent-node-label font-display">Processor</div>
+              <div class="agent-node-sub text-muted">Analyzes every word</div>
+            </div>
+            <div class="agent-arrow">→</div>
+            <div class="agent-node agent-supervisor">
+              <div class="agent-node-icon">🎯</div>
+              <div class="agent-node-label font-display">Supervisor</div>
+              <div class="agent-node-sub text-muted">Sets goals, adapts plan</div>
+            </div>
+            <div class="agent-arrow">→</div>
+            <div class="agent-node agent-tutor">
+              <div class="agent-node-icon">🗣️</div>
+              <div class="agent-node-label font-display">Tutor</div>
+              <div class="agent-node-sub text-muted">Converses naturally</div>
+            </div>
           </div>
-        `).join('');
-
-        // GPU
-        if (d.gpu) {
-          const gpu = d.gpu;
-          const pct = Math.round(gpu.usedMiB / gpu.totalMiB * 100);
-          document.getElementById('gpuCard').style.display = 'block';
-          document.getElementById('vramBar').style.width = pct + '%';
-          document.getElementById('vramBar').textContent = pct + '%';
-          document.getElementById('vramLabel').textContent =
-            `${gpu.usedMiB.toLocaleString()} / ${gpu.totalMiB.toLocaleString()} MiB used`;
-          document.getElementById('processList').innerHTML = gpu.processes.map(p => `
-            <div class="process-row">
-              <span class="process-name">${p.name} <span style="color:#4b5563">(pid ${p.pid})</span></span>
-              <span class="process-mem">${p.memoryMiB.toLocaleString()} MiB</span>
-            </div>
-          `).join('');
-        }
-
-        // Ollama loaded models
-        if (d.ollamaModels && d.ollamaModels.length > 0) {
-          document.getElementById('ollamaCard').style.display = 'block';
-          document.getElementById('ollamaModels').innerHTML = d.ollamaModels.map(m => `
-            <div class="process-row">
-              <span class="process-name">${m.name}</span>
-              <span class="process-mem">${m.sizeVramMiB.toLocaleString()} MiB</span>
-            </div>
-          `).join('');
-        } else {
-          document.getElementById('ollamaCard').style.display = 'block';
-          document.getElementById('ollamaModels').innerHTML =
-            '<div style="color:#6b7280;font-size:0.85em">No models loaded (idle)</div>';
-        }
-
-        document.getElementById('lastRefresh').textContent =
-          'Updated ' + new Date().toLocaleTimeString();
-      } catch (e) {
-        document.getElementById('servicesGrid').innerHTML =
-          '<div class="error">Failed to fetch service status</div>';
-      }
-    }
-
-    // =========================================================================
-    // Activity
-    // =========================================================================
-    async function loadActivity() {
-      try {
-        const res = await fetch('/api/activity');
-        const d = await res.json();
-
-        // Runtime state (Supervisor plan / watcher / processor)
-        loadRuntime();
-
-        const srsDiv = document.getElementById('srsUpdates');
-        if (!d.recentProgress.length) {
-          srsDiv.innerHTML = '<div style="color:#6b7280;padding:20px">No SRS updates in the last hour</div>';
-        } else {
-          srsDiv.innerHTML = d.recentProgress.map(p => {
-            const ago = timeAgo(p.lastReview);
-            const stateLabels = ['New', 'Learning', 'Review', 'Relearning'];
-            const stateLabel = stateLabels[p.state] || 'Unknown';
-            const successRate = p.reps > 0 ? Math.round(((p.reps - p.lapses) / p.reps) * 100) : 0;
-            return `
-              <div class="activity-item">
-                <div>
-                  <div class="activity-word">${p.lexeme.lemma}
-                    <span class="srs-badge srs-${p.state}">${stateLabel} (S=${p.stability?.toFixed(1) ?? '?'})</span>
-                  </div>
-                  <div class="activity-detail">
-                    ${p.lexeme.pos} · ${p.reps} reviews · ${successRate}% accuracy
-                    ${p.lexeme.translation ? ' · ' + p.lexeme.translation : ''}
-                  </div>
-                </div>
-                <div class="activity-time">${ago}</div>
-              </div>
-            `;
-          }).join('');
-        }
-
-        const goalsDiv = document.getElementById('goalEvents');
-        if (!d.recentGoals.length) {
-          goalsDiv.innerHTML = '<div style="color:#6b7280;padding:20px">No goal events in the last hour</div>';
-        } else {
-          goalsDiv.innerHTML = d.recentGoals.map(g => {
-            const cls = g.status === 'completed' ? 'goal-complete' : g.status === 'failed' ? 'goal-failed' : 'goal';
-            const ago = timeAgo(g.updatedAt);
-            return `
-              <div class="activity-item ${cls}">
-                <div>
-                  <div class="activity-word">${g.type.toUpperCase()}
-                    <span class="badge badge-${g.status}">${g.status}</span>
-                  </div>
-                  <div class="activity-detail">Target: ${g.targetId} · User: ${g.userId}</div>
-                </div>
-                <div class="activity-time">${ago}</div>
-              </div>
-            `;
-          }).join('');
-        }
-      } catch (e) {
-        document.getElementById('srsUpdates').innerHTML = '<div class="error">Failed to load activity</div>';
-      }
-    }
-
-    async function loadRuntime() {
-      try {
-        const res = await fetch('/api/runtime');
-        const d = await res.json();
-        if (!d.ok) {
-          document.getElementById('supervisorPlan').textContent = d.error || 'runtime not available';
-          document.getElementById('runtimeMeta').textContent = '';
-          return;
-        }
-        const s = d.state;
-
-        document.getElementById('supervisorPlan').textContent = s.supervisorPlan
-          ? JSON.stringify(s.supervisorPlan, null, 2)
-          : 'No plan yet.';
-
-        const meta = {
-          userId: s.userId,
-          targetLang: s.targetLang,
-          updatedAt: s.updatedAt,
-          lastPlanAt: s.lastPlanAt,
-          planStale: s.planStale,
-          pendingSignals: s.pendingSignals,
-          lastWatcherDecision: s.lastWatcherDecision,
-          lastProcessorRun: s.lastProcessorRun,
-        };
-        document.getElementById('runtimeMeta').textContent = JSON.stringify(meta, null, 2);
-
-        // Populate Thoughts & Prompts
-        const el = (id, text) => { const e = document.getElementById(id); if (e) e.textContent = text; };
-        
-        // Chat History
-        const chatContainer = document.getElementById('subagentChatHistory');
-        if (s.subagentChats && s.subagentChats.length > 0) {
-          // Check if we were scrolled to bottom before updating
-          const isScrolledToBottom = chatContainer.scrollHeight - chatContainer.clientHeight <= chatContainer.scrollTop + 10;
-          
-          chatContainer.innerHTML = s.subagentChats.map(c => `
-            <div style="margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid #1a1f35;">
-              <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
-                <strong style="color: #a78bfa;">${escapeHtml(c.role)}</strong>
-                <span style="color: #6b7280; font-size: 0.9em;">${new Date(c.timestamp).toLocaleTimeString()}</span>
-              </div>
-              <div style="display:flex; gap: 10px;">
-                <div style="flex:1; background:#0f1117; padding:8px; border-radius:4px; border-left:2px solid #6d28d9;">
-                  <div style="font-size:0.8em; color:#6b7280; margin-bottom:2px;">PROMPT</div>
-                  <div style="white-space:pre-wrap; color:#c4b5fd;">${escapeHtml(String(c.prompt || ''))}</div>
-                </div>
-                <div style="flex:1; background:#0f1117; padding:8px; border-radius:4px; border-left:2px solid #22c55e;">
-                  <div style="font-size:0.8em; color:#6b7280; margin-bottom:2px;">RESPONSE</div>
-                  <div style="white-space:pre-wrap; color:#4ade80;">${escapeHtml(String(c.response || ''))}</div>
-                </div>
-              </div>
-            </div>
-          `).join('');
-
-          if (isScrolledToBottom) {
-            chatContainer.scrollTop = chatContainer.scrollHeight;
-          }
-        } else {
-          chatContainer.innerHTML = '<div style="color:#6b7280;">No subagent chats available in runtime state.</div>';
-        }
-
-        el('plannerPrompt', s.lastPlannerRun?.rawPrompt || 'No planner run data yet.');
-        el('plannerResponse', s.lastPlannerRun?.rawResponse || 'No planner run data yet.');
-        el('watcherPrompt', s.lastWatcherDecision?.rawPrompt || 'No watcher decision data yet.');
-        el('watcherResponse', s.lastWatcherDecision?.rawResponse || 'No watcher decision data yet.');
-        el('processorPrompt', s.lastProcessorRun?.rawPrompt || 'No processor run data yet.');
-        el('processorResponse', s.lastProcessorRun?.rawResponse || 'No processor run data yet.');
-
-      } catch (e) {
-        document.getElementById('supervisorPlan').textContent = 'Failed to load runtime';
-        document.getElementById('runtimeMeta').textContent = '';
-      }
-    }
-
-    function timeAgo(ts) {
-      if (!ts) return '—';
-      const diff = Date.now() - ts;
-      if (diff < 60000) return Math.round(diff / 1000) + 's ago';
-      if (diff < 3600000) return Math.round(diff / 60000) + 'm ago';
-      return Math.round(diff / 3600000) + 'h ago';
-    }
-
-    // =========================================================================
-    // Live log stream
-    // =========================================================================
-    let logSSE = null;
-    let autoScroll = true;
-    let allLogLines = [];
-
-    function startLogStream() {
-      if (logSSE) return;
-      logSSE = new EventSource('/api/logs');
-      logSSE.onmessage = (e) => {
-        const line = JSON.parse(e.data);
-        allLogLines.push(line);
-        if (allLogLines.length > 2000) allLogLines.shift();
-        renderLog();
-      };
-      logSSE.onerror = () => {
-        appendLogLine('[dashboard] log stream disconnected — retrying...', 'warn');
-      };
-    }
-
-    function stripAnsi(str) {
-      return str.replace(/\u001b\[[0-9;]*m/g, '');
-    }
-
-    function classifyLine(line) {
-      if (/\[User\]/i.test(line)) return 'user';
-      if (/\[Supervisor\]/i.test(line) || /\[Processor\]/i.test(line)) return 'supervisor';
-      if (/\[Tutor\]/i.test(line) || /\[Session\]/i.test(line) || /\[MossTTS\]/i.test(line)) return 'tutor';
-      if (/ERROR/i.test(line)) return 'error';
-      if (/WARN/i.test(line)) return 'warn';
-      if (/INFO/i.test(line)) return 'info';
-      return '';
-    }
-
-    function renderLog() {
-      const filter = document.getElementById('logFilter').value.toLowerCase();
-      const viewer = document.getElementById('logViewer');
-      const lines = filter
-        ? allLogLines.filter(l => stripAnsi(l).toLowerCase().includes(filter))
-        : allLogLines;
-      viewer.innerHTML = lines.map(l => {
-        const clean = stripAnsi(l);
-        const cls = classifyLine(clean);
-        return `<div class="log-line ${cls}">${escapeHtml(clean)}</div>`;
-      }).join('');
-      if (autoScroll) viewer.scrollTop = viewer.scrollHeight;
-    }
-
-    function escapeHtml(s) {
-      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    }
-
-    function clearLog() {
-      allLogLines = [];
-      document.getElementById('logViewer').innerHTML = '';
-    }
-
-    function toggleAutoScroll() {
-      autoScroll = !autoScroll;
-      document.getElementById('scrollBtn').textContent = 'Auto-scroll ' + (autoScroll ? 'ON' : 'OFF');
-    }
-
-    document.getElementById('logFilter').addEventListener('input', renderLog);
-
-    // =========================================================================
-    // Learning Progress (existing)
-    // =========================================================================
-    let currentUserId = null;
-
-    async function loadStats() {
-      try {
-        const res = await fetch('/api/stats');
-        const data = await res.json();
-        document.getElementById('totalUsers').textContent = data.users;
-        document.getElementById('totalLexemes').textContent = data.lexemes;
-        document.getElementById('totalProgress').textContent = data.progressEntries;
-        document.getElementById('totalUnits').textContent = data.units;
-      } catch {}
-    }
-
-    async function loadUsers() {
-      try {
-        const res = await fetch('/api/users');
-        const users = await res.json();
-        const select = document.getElementById('userSelect');
-        select.innerHTML = '<option value="">-- Select a user --</option>';
-        for (const u of users) {
-          const o = document.createElement('option');
-          o.value = u.id;
-          o.textContent = `${u.id} (${u.targetLanguage})`;
-          select.appendChild(o);
-        }
-      } catch {}
-    }
-
-    async function loadUserData() {
-      const userId = document.getElementById('userSelect').value;
-      if (!userId) { document.getElementById('userDetails').style.display = 'none'; return; }
-      currentUserId = userId;
-      document.getElementById('userDetails').style.display = 'block';
-      try {
-        const res = await fetch(`/api/users/${userId}`);
-        const data = await res.json();
-
-        document.getElementById('userInfo').innerHTML = `
-          <p style="margin:6px 0"><strong>Target Language:</strong> ${data.user.targetLanguage}</p>
-          <p style="margin:6px 0"><strong>Native Language:</strong> ${data.user.nativeLanguage}</p>
-          <p style="margin:6px 0"><strong>Proficiency:</strong> ${data.user.proficiencyLevel}</p>
-          <p style="margin:6px 0"><strong>Vocabulary:</strong> ${data.stats.totalVocab} words</p>
-          <p style="margin:6px 0"><strong>Active Goals:</strong> ${data.stats.activeGoals}</p>
-          <p style="margin:6px 0"><strong>Completed Goals:</strong> ${data.stats.completedGoals}</p>
-        `;
-
-        const srsLabels = ['New','Learning','Review','Familiar','Known','Mastered'];
-        document.getElementById('srsDistribution').innerHTML = [0,1,2,3,4,5].map(i => `
-          <div class="srs-box level-${i}">
-            <div class="srs-count">${data.stats.srsDistribution['level'+i]}</div>
-            <div class="srs-label">${srsLabels[i]}</div>
+          <div class="agent-loop">
+            <span class="agent-loop-label font-mono text-muted">Every 3-5 turns → SRS update → Goal check → Plan refresh</span>
           </div>
-        `).join('');
+        </div>
+      </div>
+      <div class="feature-text">
+        <div class="feature-tag font-mono">Goal-Seeking Agents</div>
+        <h2 class="feature-title font-display">A tutor that <span class="text-primary">plans</span> for you</h2>
+        <p class="feature-desc">The Supervisor runs on a timer and signal accumulator. When you struggle, it sets a remediation goal. When you've mastered the current unit, it introduces the next vocabulary. The plan updates in real-time, injected into the tutor's context mid-conversation. You never choose what to study next.</p>
+        <div class="feature-stats">
+          <div class="stat"><span class="stat-value font-mono text-primary">3</span><span class="stat-label text-muted">Goal types</span></div>
+          <div class="stat"><span class="stat-value font-mono text-primary">Real-time</span><span class="stat-label text-muted">Plan updates</span></div>
+          <div class="stat"><span class="stat-value font-mono text-primary">0</span><span class="stat-label text-muted">Manual choices</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
 
-        document.getElementById('activeGoals').innerHTML = data.goals.length === 0
-          ? '<p style="color:#6b7280">No goals yet</p>'
-          : data.goals.map(g => `
-            <div class="goal-item">
-              <div class="goal-type">${g.type} <span class="badge badge-${g.status}">${g.status}</span></div>
-              <div class="goal-target">Target: ${g.targetId}</div>
-            </div>
-          `).join('');
+  <!-- Privacy -->
+  <section class="privacy-section reveal">
+    <div class="section-inner">
+      <div class="privacy-grid">
+        <div class="privacy-card surface-card">
+          <div class="privacy-icon">🔒</div>
+          <h3 class="privacy-title font-display">Privacy-first</h3>
+          <p class="privacy-desc">Run the entire stack locally — STT, LLM, TTS — or use cloud services. Your conversation data stays on your machine.</p>
+        </div>
+        <div class="privacy-card surface-card">
+          <div class="privacy-icon">🏠</div>
+          <h3 class="privacy-title font-display">Local AI stack</h3>
+          <p class="privacy-desc">Ollama for inference, Qwen3-ASR for speech-to-text, MossTTS for synthesis. All run on your GPU. No data leaves your network.</p>
+        </div>
+        <div class="privacy-card surface-card">
+          <div class="privacy-icon">🧬</div>
+          <h3 class="privacy-title font-display">pgvector knowledge</h3>
+          <p class="privacy-desc">Vocabulary and progress live in PostgreSQL with pgvector HNSW indexes. Semantic search, ripple effects, all in your database.</p>
+        </div>
+      </div>
+    </div>
+  </section>
 
-        document.getElementById('vocabularyList').innerHTML = data.progress.length === 0
-          ? '<p style="color:#6b7280">No vocabulary yet</p>'
-          : data.progress.slice(0, 20).map(p => `
-            <div class="vocab-item">
-              <div>
-                <span class="vocab-word">${p.lexeme.lemma}</span>
-                <span class="vocab-translation"> — ${p.lexeme.translation || '—'}</span>
-              </div>
-              <div class="vocab-stats">${['New','Learning','Review','Relearning'][p.state] || '?'} · S=${p.stability?.toFixed(1) ?? '?'} D=${p.difficulty?.toFixed(1) ?? '?'} · ${p.reps} reviews · ${p.lapses} lapses</div>
-            </div>
-          `).join('');
+  <!-- Languages -->
+  <section class="languages-section reveal" id="languages">
+    <div class="section-inner">
+      <div class="section-header">
+        <span class="section-tag font-mono">Languages</span>
+        <h2 class="section-title font-display">Six languages.<br>Six personalities.</h2>
+        <p class="section-subtitle text-muted">Each tutor is a character, not a chatbot. They have opinions, humor, and cultural depth.</p>
+      </div>
+      <div class="language-grid">
+        <div class="lang-card surface-card" data-lang="ru">
+          <span class="lang-flag">🇷🇺</span>
+          <h3 class="lang-name font-display">Russian</h3>
+          <p class="lang-persona">Маша — Moscow intellectual</p>
+          <p class="lang-greeting">"Ну вот, русский. Привет!"</p>
+          <span class="lang-ratio font-mono">80/20 immersive</span>
+        </div>
+        <div class="lang-card surface-card" data-lang="es">
+          <span class="lang-flag">🇪🇸</span>
+          <h3 class="lang-name font-display">Spanish</h3>
+          <p class="lang-persona">Marta — Madrid journalist</p>
+          <p class="lang-greeting">"¡Hola! ¿Qué tal?"</p>
+          <span class="lang-ratio font-mono">80/20 immersive</span>
+        </div>
+        <div class="lang-card surface-card" data-lang="fr">
+          <span class="lang-flag">🇫🇷</span>
+          <h3 class="lang-name font-display">French</h3>
+          <p class="lang-persona">Professeur cultivé</p>
+          <p class="lang-greeting">"Bonjour — on commence?"</p>
+          <span class="lang-ratio font-mono">75/25 immersive</span>
+        </div>
+        <div class="lang-card surface-card" data-lang="pt">
+          <span class="lang-flag">🇵🇹</span>
+          <h3 class="lang-name font-display">Portuguese</h3>
+          <p class="lang-persona">European Portuguese</p>
+          <p class="lang-greeting">"Olá — vamos lá!"</p>
+          <span class="lang-ratio font-mono">80/20 immersive</span>
+        </div>
+        <div class="lang-card surface-card" data-lang="ar">
+          <span class="lang-flag">🇸🇦</span>
+          <h3 class="lang-name font-display">Arabic</h3>
+          <p class="lang-persona">Patient guide</p>
+          <p class="lang-greeting">"أهلاً! Ready to learn?"</p>
+          <span class="lang-ratio font-mono">70/30 assisted</span>
+        </div>
+        <div class="lang-card surface-card" data-lang="en">
+          <span class="lang-flag">🇬🇧</span>
+          <h3 class="lang-name font-display">English</h3>
+          <p class="lang-persona">Power Vocabulary — advanced</p>
+          <p class="lang-greeting">"All right. Say one sentence."</p>
+          <span class="lang-ratio font-mono">100/0 immersive</span>
+        </div>
+      </div>
+    </div>
+  </section>
 
-        const duoDiv = document.getElementById('duolingoStatus');
-        duoDiv.innerHTML = data.duolingoData
-          ? `<div class="success">Connected: ${data.duolingoData.duolingoUsername} · ${data.duolingoData.learningLanguage} · Last sync: ${new Date(data.duolingoData.lastSyncTimestamp||0).toLocaleString()}</div>`
-          : '<p style="color:#6b7280;margin-bottom:12px">No Duolingo data connected</p>';
-      } catch (e) {
-        console.error(e);
-      }
-    }
+  <!-- CTA -->
+  <section class="cta-section reveal">
+    <div class="section-inner">
+      <h2 class="cta-title font-display">Ready to talk?</h2>
+      <p class="cta-subtitle text-muted">The most advanced language tutor on the planet is waiting.</p>
+      <button class="btn-primary cta-button" id="early-access-btn-footer">Get Early Access</button>
+      <div class="email-form" id="email-form-footer">
+        <input type="email" id="email-input-footer" placeholder="your@email.com" class="email-input" autocomplete="email">
+        <button class="btn-primary email-submit" id="email-submit-footer">Join Waitlist</button>
+        <div class="email-status" id="email-status-footer"></div>
+      </div>
+    </div>
+  </section>
 
-    async function importDuolingo(event) {
-      event.preventDefault();
-      if (!currentUserId) { alert('Select a user first'); return; }
-      const username = document.getElementById('duoUsername').value;
-      const jwt = document.getElementById('duoJWT').value;
-      const language = document.getElementById('duoLanguage').value;
-      const resultDiv = document.getElementById('importResult');
-      resultDiv.innerHTML = '<div class="loading">Importing...</div>';
-      try {
-        const res = await fetch(`/api/users/${currentUserId}/import-duolingo`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, jwt, language })
-        });
-        const data = await res.json();
-        resultDiv.innerHTML = res.ok
-          ? `<div class="success">Import successful!<br>${(data.output||[]).join('<br>')}</div>`
-          : `<div class="error">Import failed: ${data.error}</div>`;
-        if (res.ok) setTimeout(loadUserData, 2000);
-      } catch (e) {
-        resultDiv.innerHTML = `<div class="error">${e.message}</div>`;
-      }
-    }
+  <!-- Footer -->
+  <footer class="landing-footer">
+    <div class="section-inner">
+      <div class="footer-tech">
+        <span class="text-muted">Built with</span>
+        <span class="footer-tech-item">LiveKit</span>
+        <span class="footer-tech-item">PostgreSQL</span>
+        <span class="footer-tech-item">pgvector</span>
+        <span class="footer-tech-item">FSRS v5</span>
+        <span class="footer-tech-item">Ollama</span>
+      </div>
+      <div class="footer-bottom">
+        <span class="text-muted">© 2026 LingLang</span>
+        <a href="/dashboard" class="text-muted footer-link">Dashboard</a>
+      </div>
+    </div>
+  </footer>
 
-    // =========================================================================
-    // Database Explorer
-    // =========================================================================
-    async function loadTableData() {
-      const table = document.getElementById('dbTableSelect').value;
-      const head = document.getElementById('dbTableHead');
-      const body = document.getElementById('dbTableBody');
-      
-      head.innerHTML = '<tr><td style="padding:10px;">Loading...</td></tr>';
-      body.innerHTML = '';
-      
-      try {
-        const res = await fetch('/api/db/' + table);
-        const data = await res.json();
-        
-        if (!data || data.length === 0) {
-          head.innerHTML = '<tr><td style="padding:10px;color:#9ca3af;">No data found</td></tr>';
-          return;
-        }
-        
-        const cols = Object.keys(data[0]);
-        
-        head.innerHTML = '<tr>' + cols.map(c => `<th style="padding:10px;color:#c4b5fd;font-weight:600;">${c}</th>`).join('') + '</tr>';
-        
-        body.innerHTML = data.map(row => {
-          return '<tr style="border-bottom:1px solid #1a1f35;">' + cols.map(c => {
-            let val = row[c];
-            if (typeof val === 'object' && val !== null) val = JSON.stringify(val);
-            return `<td style="padding:10px;color:#e0e0e0;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(String(val))}">${escapeHtml(String(val))}</td>`;
-          }).join('') + '</tr>';
-        }).join('');
-        
-      } catch (e) {
-        head.innerHTML = '<tr><td style="padding:10px;color:#f87171;">Failed to load data</td></tr>';
-      }
-    }
-
-    // =========================================================================
-    // Init
-    // =========================================================================
-    loadServices();
-    loadStats();
-    loadUsers();
-
-    // Services auto-refresh every 5s
-    setInterval(loadServices, 5000);
-    // Stats every 30s
-    setInterval(loadStats, 30000);
-    // Activity every 10s if on that tab
-    setInterval(() => { if (activeTab === 'activity' || activeTab === 'thoughts') loadActivity(); }, 10000);
-    // Runtime state can refresh a bit faster while testing
-    setInterval(() => { if (activeTab === 'activity' || activeTab === 'thoughts') loadRuntime(); }, 2000);
-  </script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r170/three.min.js"></script>
+  <script src="js/landing.js"></script>
 </body>
 </html>
