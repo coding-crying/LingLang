@@ -182,7 +182,7 @@ export async function analyzeUtteranceWithLocalLLM(
           { role: 'user', content: userPrompt }
         ],
         temperature: 0.1, // Low temperature for consistent JSON
-        max_tokens: 500,  // Don't need long responses
+        max_tokens: 800,  // Enough for detailed analysis with grammarRule
       }),
     });
 
@@ -215,7 +215,11 @@ export async function analyzeUtteranceWithLocalLLM(
     let cleanJson = jsonMatch[0]
       .replace(/,(\s*[}\]])/g, '$1')  // Remove trailing commas
       .replace(/([{,]\s*)(\w+):/g, '$1"$2":')  // Quote unquoted keys
-      .replace(/:\s*'([^']*)'/g, ': "$1"');  // Replace single quotes with double
+      .replace(/:\s*'([^']*)'/g, ': "$1"')  // Replace single quotes with double
+      .replace(/\]\s*\{/g, '],{')  // Fix missing commas between array elements
+      .replace(/\}\s*\{/g, '},{')  // Fix missing commas between objects in arrays
+      .replace(/"\s*\n\s*"/g, '","')  // Fix missing commas between string values
+      .replace(/\\\n/g, '\\n');  // Fix escaped newlines in strings
 
     const analysis = JSON.parse(cleanJson) as UtteranceAnalysis;
     console.log(`[Supervisor] Extracted ${analysis.lexemes?.length || 0} lexemes`);
