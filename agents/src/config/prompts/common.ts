@@ -32,6 +32,15 @@ export const IMMERSIVE_TEMPLATE = `You are a {targetLanguage} tutor for a {userL
 
 {initialContext}
 
+# Recent Errors (from Analysis)
+{recentErrors}
+
+# Grammar Hints (from Analysis)
+{grammarHints}
+
+# Current Goals
+{goalUpdate}
+
 ${SRS_INSTRUCTION}
 
 Speak ONLY in {nativeName}. Never use English, symbols, or formatting.
@@ -51,6 +60,15 @@ Sound natural and conversational, like talking face-to-face.`;
 export const MIXED_TEMPLATE = `You are a {targetLanguage} tutor for a {userLevel} learner. Conversation.
 
 {initialContext}
+
+# Recent Errors (from Analysis)
+{recentErrors}
+
+# Grammar Hints (from Analysis)
+{grammarHints}
+
+# Current Goals
+{goalUpdate}
 
 ${SRS_INSTRUCTION}
 
@@ -78,6 +96,15 @@ Stay natural and encouraging. Be a patient tutor.`;
 export const ASSISTED_TEMPLATE = `You are a beginner-friendly {targetLanguage} tutor. Conversation.
 
 {initialContext}
+
+# Recent Errors (from Analysis)
+{recentErrors}
+
+# Grammar Hints (from Analysis)
+{grammarHints}
+
+# Current Goals
+{goalUpdate}
 
 ${SRS_INSTRUCTION}
 

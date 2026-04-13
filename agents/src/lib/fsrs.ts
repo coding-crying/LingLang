@@ -223,8 +223,8 @@ function constrainDifficulty(d: number): number {
 // ============================================================================
 
 export interface VoicePerformance {
-  /** How the user performed: correct_use, wrong_use, recall_fail */
-  performance: 'correct_use' | 'wrong_use' | 'recall_fail';
+  /** How the user performed: correct_use, wrong_use, recall_fail, scaffolded */
+  performance: 'correct_use' | 'wrong_use' | 'recall_fail' | 'scaffolded';
   /** Escalation level used (1=natural, 2=nudge, 3=direct correction) */
   escalationLevel?: number;
   /** Pronunciation confidence from ASR (0-1) */
@@ -249,6 +249,9 @@ export function voiceToGrade(perf: VoicePerformance): FSRSGrade {
     case 'wrong_use':
       if (perf.escalationLevel === 3) return 1; // Failed even with direct correction
       return 1;
+
+    case 'scaffolded':
+      return 2; // Correct but prompted — lower stability boost than independent use
 
     case 'correct_use':
     default:

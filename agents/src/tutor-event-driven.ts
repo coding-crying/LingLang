@@ -44,7 +44,7 @@ import { writeFile, rename } from 'node:fs/promises';
 import http from 'node:http';
 
 import { runProcessor } from './tools/supervisor-functions.js';
-import { ContextManager, PlaceholderGoals } from './lib/context.js';
+import { ContextManager } from './lib/context.js';
 import { getLanguageConfig } from './config/languages.js';
 import { buildInstructions } from './config/prompts/base.js';
 import { PLANNER_SYSTEM_PROMPT, buildPlannerPrompt } from './config/prompts/supervisor.js';
@@ -290,6 +290,12 @@ export default defineAgent({
 
     const buildDynamicInstructions = () => {
       const last = lastPlanAt ? new Date(lastPlanAt).toISOString() : 'never';
+      const errorContext = lastProcessorRun?.structuredErrors
+        ?.map((e: any) => `${e.lemma}: ${e.grammarRule?.rule || 'error'}`)
+        .join('; ') || 'None';
+
+      const hintContext = lastProcessorRun?.grammarHints?.join(' ') || 'None';
+
       return `${baseInstructions}
 
 # Supervisor (DO NOT ROLEPLAY THIS SECTION)
@@ -299,10 +305,14 @@ LAST_PLAN_AT: ${last}
 CURRENT_TEACHING_PLAN:
 ${supervisorPlanText}
 
+RECENT_ERRORS: ${errorContext}
+GRAMMAR_HINTS: ${hintContext}
+
 Rules:
 - You are the conversation tutor (you speak to the user).
 - The Supervisor updates CURRENT_TEACHING_PLAN automatically (timer + signals). You do not need to call tools.
 - Follow CURRENT_TEACHING_PLAN closely, but keep the conversation natural.
+- Use GRAMMAR_HINTS to correct the underlying pattern, not just the individual word.
 - If the user explicitly requests a different learning style, adapt immediately and the Supervisor will update the plan.
 `;
     };
@@ -370,7 +380,11 @@ Rules:
 
       const recentHistory = history.getContext();
       const dbContext = await ContextManager.getInitialContext(userId);
-      const goalNote = await ContextManager.getDynamicGoal(userId);
+      const goalNote = await ContextManager.updateGoals(userId,
+        lastProcessorRun?.structuredErrors
+          ? { errors: lastProcessorRun.structuredErrors, grammarHints: lastProcessorRun.grammarHints || [] }
+          : undefined
+      );
 
       // Use Step 3.5 Flash (via OpenRouter) by default for deeper planning.
       const plannerUrl = process.env.SUPERVISOR_PLANNER_LLM_URL || process.env.SUPERVISOR_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1';
@@ -446,7 +460,7 @@ Rules:
 
     // === PROCESSOR (DB population) ===
     // Batch ingestion: run the processor every N user turns and feed it the last N turns.
-    const PROCESSOR_TURN_INTERVAL = Number(process.env.PROCESSOR_TURN_INTERVAL || 3);
+    const PROCESSOR_TURN_INTERVAL = Number(process.env.PROCESSOR_TURN_INTERVAL || 1);
     const pendingUserTurns: string[] = [];
     let totalUserTurns = 0;
 
@@ -474,6 +488,7 @@ Rules:
         useGemini: false,
         llmUrl: process.env.PROCESSOR_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1',
         llmModel: process.env.PROCESSOR_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma4-26b',
+        recentHistory: history.getContext(),
       }).then((result) => {
         lastProcessorRun = {
           at: Date.now(),

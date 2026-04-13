@@ -108,7 +108,16 @@ async function generateTutorResponse(
   langConfig: any,
   goalUpdate: string | null,
   opts: Opts,
+  processorResult?: import('../tools/supervisor-functions.js').ProcessorResult,
 ): Promise<string> {
+  // Build error context from the latest analysis
+  const recentErrors = processorResult?.analysis?.lexemes
+    ?.filter(l => l.performance === 'wrong_use' || l.performance === 'recall_fail')
+    .map(l => `${l.lemma}: ${l.performance}${l.grammarRule ? ` (${l.grammarRule.rule})` : ''}`)
+    .join('; ') || 'None';
+
+  const grammarHints = processorResult?.analysis?.grammarHints?.join(' ') || 'None';
+
   const systemPrompt = buildInstructions(langConfig.prompts.instructionsTemplate, {
     targetLanguage: langConfig.name,
     nativeName: langConfig.nativeName,
@@ -116,6 +125,9 @@ async function generateTutorResponse(
     userLevel: 'beginner',
     initialContext: context,
     mode: 'text',
+    recentErrors,
+    grammarHints,
+    goalUpdate: goalUpdate || undefined,
   });
 
   const messages: { role: string; content: string }[] = [
@@ -349,10 +361,12 @@ async function main() {
     history.push({ role: 'user', content: input });
 
     // Run supervisor: analysis + FSRS + goal
+    const recentHistory = history.slice(-6).map(h => `${h.role === 'user' ? 'Learner' : 'Tutor'}: ${h.content}`).join('\n');
     const result = await runSupervisor(opts.userId, input, currentContext, {
       useGemini: false,
       llmUrl: opts.llmUrl,
       llmModel: opts.model,
+      recentHistory,
     });
 
     // Print analysis
@@ -393,12 +407,23 @@ async function main() {
     // Tutor response
     if (!opts.noTutor) {
       console.log(''); // blank line before tutor
+      // Construct a ProcessorResult-like object from the SupervisorResult for tutor context
+      const procLike: import('../tools/supervisor-functions.js').ProcessorResult = {
+        analysis: result.analysis,
+        srsUpdates: result.srsUpdates,
+        errors: result.errors,
+        structuredErrors: result.structuredErrors,
+        grammarHints: result.grammarHints,
+        rawPrompt: undefined,
+        rawResponse: undefined,
+      };
       const tutorResult = await generateTutorResponse(
         history,
         currentContext,
         langConfig,
         result.goalUpdate,
         opts,
+        procLike,
       );
       console.log(`Tutor> ${tutorResult}`);
       history.push({ role: 'assistant', content: tutorResult });

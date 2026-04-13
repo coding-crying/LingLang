@@ -25,6 +25,7 @@ import { runProcessor, runSupervisor } from '../tools/supervisor-functions.js';
 import { ContextManager } from '../lib/context.js';
 import { getLanguageConfig } from '../config/languages.js';
 import { buildInstructions } from '../config/prompts/base.js';
+import { PLANNER_SYSTEM_PROMPT, buildPlannerPrompt } from '../config/prompts/supervisor.js';
 import type { ProcessorResult } from '../tools/supervisor-functions.js';
 
 // ============================================================================
@@ -277,6 +278,8 @@ class LearnerSimulator {
         `Target error rate: ~${Math.round(this.config.targetErrorRate * 100)}% of content words should have errors.`
       : '\n\nDo NOT make any errors. Every word must be correct.';
 
+    const correctionAwareness = `\n\nIMPORTANT: If the tutor just corrected a word or construction, try to use the CORRECT form in your response. You're a learner who improves — don't repeat errors the tutor already corrected. However, you may still make OTHER errors.`;
+
     const evalInstruction = `\n\nCRITICAL: After your utterance, on a NEW LINE, output a JSON block wrapped in <!--EVAL--> markers like this:
 <!--EVAL-->
 {"target_words":["word1","word2"],"intended_errors":[{"word":"lemma","error_type":"conjugation","wrong_form":"form_used","correct_form":"correct_form"}],"intended_correct":["word3","word4"]}
@@ -287,7 +290,7 @@ The intended_errors list should contain ONLY the errors you INTENTIONALLY made. 
     const topicLine = topicCue ? `\n\nTry to use these words in your response: ${topicCue}` : '';
 
     const messages: { role: string; content: string }[] = [
-      { role: 'system', content: systemPrompt + errorInstruction + evalInstruction },
+      { role: 'system', content: systemPrompt + errorInstruction + correctionAwareness + evalInstruction },
       ...history.slice(-6), // Last 3 exchanges
       { role: 'user', content: `Respond in ${langName}.${topicLine}` },
     ];
@@ -314,7 +317,7 @@ The intended_errors list should contain ONLY the errors you INTENTIONALLY made. 
 
       // Parse utterance and ground truth
       const evalMatch = fullText.match(/<!--EVAL-->\s*([\s\S]*?)\s*<!--\/EVAL-->/);
-      const utterance = fullText.replace(/<!--EVAL-->[\s\S]*?<!--\/EVAL-->/, '').trim();
+      const utterance = fullText.replace(/<!--EVAL-->[\s\S]*?<!--\/EVAL-->/g, '').trim();
 
       if (evalMatch) {
         try {
@@ -390,27 +393,37 @@ class ConversationRunner {
 
       // 2. Process through the pipeline
       let context = await ContextManager.getInitialContext(this.userId);
+      const recentHistory = this.history.slice(-6).map(h => `${h.role === 'user' ? 'Learner' : 'Tutor'}: ${h.content}`).join('\n');
       const processorResult = await runProcessor(this.userId, utterance, context, {
         llmUrl: this.opts.llmUrl,
         llmModel: this.opts.model,
+        recentHistory,
       });
 
       if (processorResult.errors.length > 0) {
         console.log(`[EVAL] Processor errors: ${processorResult.errors.join(', ')}`);
       }
 
-      // 3. Get goal
+      // 3. Get goal (multi-goal system)
       let goalUpdate: string | null = null;
       try {
-        goalUpdate = await ContextManager.getDynamicGoal(this.userId);
+        goalUpdate = await ContextManager.updateGoals(this.userId,
+          processorResult.structuredErrors
+            ? { errors: processorResult.structuredErrors, grammarHints: processorResult.grammarHints || [] }
+            : undefined
+        );
       } catch (err: any) {
         console.log(`[EVAL] Goal error: ${err.message}`);
       }
 
+      // 3.5. Run planner for teaching strategy
+      const dbContext = await ContextManager.getInitialContext(this.userId);
+      goalUpdate = await this.runPlanner(processorResult, goalUpdate, dbContext);
+
       // 4. Optionally generate tutor response
       let tutorResponse: string | null = null;
       if (!this.opts.noTutor) {
-        tutorResponse = await this.generateTutorResponse(goalUpdate, context);
+        tutorResponse = await this.generateTutorResponse(goalUpdate, context, processorResult);
         if (tutorResponse) {
           console.log(`[EVAL] Tutor: "${tutorResponse.substring(0, 80)}..."`);
           this.history.push({ role: 'user', content: utterance });
@@ -454,9 +467,18 @@ class ConversationRunner {
   private async generateTutorResponse(
     goalUpdate: string | null,
     context: string,
+    processorResult?: ProcessorResult,
   ): Promise<string | null> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (this.opts.tutorApiKey) headers['Authorization'] = `Bearer ${this.opts.tutorApiKey}`;
+
+    // Build error context from the latest analysis
+    const recentErrors = processorResult?.analysis?.lexemes
+      ?.filter(l => l.performance === 'wrong_use' || l.performance === 'recall_fail')
+      .map(l => `${l.lemma}: ${l.performance}${l.grammarRule ? ` (${l.grammarRule.rule})` : ''}`)
+      .join('; ') || 'None';
+
+    const grammarHints = processorResult?.analysis?.grammarHints?.join(' ') || 'None';
 
     const systemPrompt = buildInstructions(this.langConfig.prompts.instructionsTemplate, {
       targetLanguage: this.langConfig.name,
@@ -465,6 +487,9 @@ class ConversationRunner {
       userLevel: this.scenario.proficiency,
       initialContext: context,
       mode: 'text',
+      recentErrors,
+      grammarHints,
+      goalUpdate: goalUpdate || undefined,
     });
 
     const messages: { role: string; content: string }[] = [
@@ -488,6 +513,63 @@ class ConversationRunner {
       return data.choices?.[0]?.message?.content || '(no response)';
     } catch (err: any) {
       return `(Tutor error: ${err.message})`;
+    }
+  }
+
+  private async runPlanner(
+    processorResult: ProcessorResult | null,
+    goalUpdate: string | null,
+    dbContext: string,
+  ): Promise<string | null> {
+    const plannerUrl = this.opts.llmUrl;
+    const plannerModel = this.opts.model;
+
+    const recentHistory = this.history.slice(-6)
+      .map(h => `${h.role === 'user' ? 'Learner' : 'Tutor'}: ${h.content}`)
+      .join('\n');
+
+    const userPrompt = buildPlannerPrompt({
+      dbContext,
+      goalNote: goalUpdate,
+      recentHistory,
+      previousPlan: null,
+      reason: 'eval_turn',
+      signals: processorResult?.srsUpdates?.length ? ['srs_updated'] : [],
+    });
+
+    try {
+      const response = await fetch(`${plannerUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: plannerModel,
+          messages: [
+            { role: 'system', content: PLANNER_SYSTEM_PROMPT },
+            { role: 'user', content: userPrompt },
+          ],
+          temperature: 0.2,
+          max_tokens: 700,
+        }),
+      });
+
+      if (!response.ok) return goalUpdate;  // Fall back to raw goal
+      const data = await response.json() as any;
+      const content = data.choices?.[0]?.message?.content || '';
+
+      // Try to parse JSON plan
+      let jsonText = content.trim();
+      const block = jsonText.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (block?.[1]) jsonText = block[1].trim();
+
+      try {
+        const plan = JSON.parse(jsonText);
+        // Feed the plan's teaching goal into the tutor instead of raw goal
+        return plan.teachingPlan?.nextPrompt || plan.teachingPlan?.goal || goalUpdate;
+      } catch {
+        return goalUpdate;  // Fall back to raw goal if parse fails
+      }
+    } catch {
+      return goalUpdate;
     }
   }
 

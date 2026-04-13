@@ -90,6 +90,7 @@ export const userVocabulary = pgTable('user_vocabulary', {
   scheduledDays: integer('scheduled_days').notNull().default(0),
   reps: integer('reps').notNull().default(0),              // Total times reviewed
   lapses: integer('lapses').notNull().default(0),         // Total times forgotten (Grade 1)
+  scaffoldedCount: integer('scaffolded_count').notNull().default(0),  // Times used correctly but scaffolded
 
   // Review meta
   lastReview: timestamp('last_review', { withTimezone: true }),
@@ -152,6 +153,9 @@ export const activeGoals = pgTable('active_goals', {
   type: text('type').notNull(), // 'vocab', 'grammar', 'remediation'
   targetId: text('target_id').notNull(), // lexemeId or ruleId
   status: text('status').notNull().default('active'), // 'active', 'completed', 'failed'
+  priority: integer('priority').notNull().default(5),    // 1=urgent(remediation), 5=normal(vocab), 9=low(suggestion)
+  grammarContext: text('grammar_context'),               // The grammar rule / hint from analysis
+  pattern: text('pattern'),                              // Error pattern: 'conjugation', 'case', 'copula_omission'
 
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),

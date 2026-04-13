@@ -29,7 +29,7 @@ export interface LexemeAnalysis {
   lemma: string;
   form: string;
   pos: string;
-  performance: 'not_assessed' | 'correct_use' | 'wrong_use' | 'recall_fail'; // not_assessed kept for backward compat if LLM outputs it
+  performance: 'not_assessed' | 'correct_use' | 'wrong_use' | 'recall_fail' | 'scaffolded'; // not_assessed kept for backward compat
   grammarRule?: { rule: string; example: string };
 }
 
@@ -44,6 +44,8 @@ export interface SupervisorResult {
   srsUpdates: { lexemeId: string; oldState: number; newState: number; grade: number }[];
   goalUpdate: string | null;
   errors: string[];
+  structuredErrors?: { lemma: string; grammarRule?: { rule: string; example: string } }[];
+  grammarHints?: string[];
 }
 
 // ============================================================================
@@ -65,6 +67,7 @@ performance:
 - correct_use: used correctly (default for common function words like articles, basic prepositions, pronouns, conjunctions)
 - wrong_use: error made (wrong form, wrong case, wrong agreement)
 - recall_fail: user couldn't remember the word
+- scaffolded: user used the word correctly BUT the tutor had just asked them to use this specific word, or they repeated the tutor's correction verbatim — this is prompted correctness, not independent mastery
 
 IMPORTANT: List ALL words including function words. Tag common function words (articles, basic prepositions, pronouns, conjunctions) as correct_use by default — they're trivially correct. Only tag a function word as wrong_use if the user clearly misused it (e.g. wrong case after a preposition). Do NOT tag any word as "introduced" — you cannot know if a word was introduced for the first time.
 
@@ -104,8 +107,9 @@ Return ONLY a JSON object with this structure:
 - "correct_use": User used the word correctly in context. This is the default for common function words (articles, basic prepositions, pronouns, conjunctions) — they're trivially correct, tag them as correct_use.
 - "wrong_use": User made an error with this word (wrong form, wrong meaning, wrong case, wrong gender agreement). Even function words can be wrong_use if misused (e.g. wrong case after a preposition).
 - "recall_fail": User couldn't remember or struggled with the word (long pause, incomplete attempt, gave up).
+- "scaffolded": User used the word correctly BUT the tutor had just asked them to use this specific word, or they repeated the tutor's correction verbatim. This is prompted correctness, not independent mastery.
 
-DO NOT use any performance label other than the three above. In particular, do NOT use "introduced" or "not_assessed" — you cannot determine whether a word was encountered for the first time, and every word the user produces should be evaluated.
+DO NOT use any performance label other than the four above. In particular, do NOT use "introduced" or "not_assessed" — you cannot determine whether a word was encountered for the first time, and every word the user produces should be evaluated.
 
 # Function Word Guidance
 List ALL words the user said, including function words. Tag common function words (articles, basic prepositions, pronouns, conjunctions) as correct_use by default — they are trivially correct and not worth nitpicking for errors. Only tag a function word as wrong_use if the user clearly misused it (e.g. "в магазине" when they meant direction "в магазин").
@@ -127,7 +131,13 @@ Output:
 Example 3 — Mixed correct and incorrect usage:
 Input: "Вчера я шёл в магазине"
 Output:
-{"language":"ru","lexemes":[{"lemma":"вчера","form":"вчера","pos":"ADV","performance":"correct_use"},{"lemma":"я","form":"я","pos":"PRON","performance":"correct_use"},{"lemma":"идти","form":"шёл","pos":"VERB","performance":"correct_use"},{"lemma":"в","form":"в","pos":"PREP","performance":"correct_use"},{"lemma":"магазин","form":"магазине","pos":"NOUN","performance":"wrong_use","grammarRule":{"rule":"в + accusative for direction (movement toward), not prepositional","example":"в магазин (to the store) vs. в магазине (at the store)"}}],"grammarHints":["в + accusative = direction of movement (в магазин), в + prepositional = location (в магазине)"]}`;
+{"language":"ru","lexemes":[{"lemma":"вчера","form":"вчера","pos":"ADV","performance":"correct_use"},{"lemma":"я","form":"я","pos":"PRON","performance":"correct_use"},{"lemma":"идти","form":"шёл","pos":"VERB","performance":"correct_use"},{"lemma":"в","form":"в","pos":"PREP","performance":"correct_use"},{"lemma":"магазин","form":"магазине","pos":"NOUN","performance":"wrong_use","grammarRule":{"rule":"в + accusative for direction (movement toward), not prepositional","example":"в магазин (to the store) vs. в магазине (at the store)"}}],"grammarHints":["в + accusative = direction of movement (в магазин), в + prepositional = location (в магазине)"]}
+
+Example 4 — Scaffolded correct use:
+Context: Tutor just said "Try saying: Я хочу кофе"
+Input: "Я хочу кофе"
+Output:
+{"language":"ru","lexemes":[{"lemma":"я","form":"я","pos":"PRON","performance":"correct_use"},{"lemma":"хотеть","form":"хочу","pos":"VERB","performance":"scaffolded","grammarRule":{"rule":"tutor prompted this exact construction","example":"tutor: 'Try saying: Я хочу кофе' → learner repeated it"}},{"lemma":"кофе","form":"кофе","pos":"NOUN","performance":"scaffolded"}],"grammarHints":[]}`;
 }
 
 /** Backward-compatible alias: the full prompt template with a default language. */
@@ -143,7 +153,8 @@ export async function analyzeUtteranceWithLocalLLM(
   context: string,
   llmUrl: string = 'http://localhost:8082/v1',
   llmModel?: string,
-  targetLanguage: string = 'Russian'
+  targetLanguage: string = 'Russian',
+  recentHistory?: string,
 ): Promise<UtteranceAnalysisResult> {
   const model = llmModel || process.env.LOCAL_LLM_MODEL || 'gemma4-26b';
 
@@ -151,7 +162,10 @@ export async function analyzeUtteranceWithLocalLLM(
   // Models with <4B params or explicit :4b quant tags use simple prompt
   const isSmallModel = model.includes(':4b') || model.includes(':1b') || model.includes(':0.5b') || model.includes('phi3:');
   const prompt = isSmallModel ? buildSimplePrompt(targetLanguage) : buildFullPrompt(targetLanguage);
-  const userPrompt = `Analyze: "${utterance}"`;
+  const historyLine = recentHistory
+    ? `\n\nRecent conversation (for scaffolded detection):\n${recentHistory}`
+    : '';
+  const userPrompt = `Analyze: "${utterance}"${historyLine}`;
 
   console.log(`[Supervisor] Analyzing with ${model} (${isSmallModel ? 'simple' : 'full'} prompt)`);
 
@@ -220,7 +234,8 @@ export async function analyzeUtteranceWithLocalLLM(
 export async function analyzeUtteranceWithGemini(
   utterance: string,
   context: string,
-  targetLanguage: string = 'Russian'
+  targetLanguage: string = 'Russian',
+  recentHistory?: string,
 ): Promise<UtteranceAnalysisResult> {
   const apiKey = process.env.GOOGLE_API_KEY;
   if (!apiKey) {
@@ -228,7 +243,11 @@ export async function analyzeUtteranceWithGemini(
     return { analysis: null };
   }
 
-  const promptText = `${buildFullPrompt(targetLanguage)}\n\nContext: ${context}\nUser said: "${utterance}"`;
+  const historyLine = recentHistory
+    ? `\n\nRecent conversation (for scaffolded detection):\n${recentHistory}`
+    : '';
+
+  const promptText = `${buildFullPrompt(targetLanguage)}\n\nContext: ${context}${historyLine}\nUser said: "${utterance}"`;
 
   try {
     console.log('[Supervisor] Analyzing with Gemini...');
@@ -421,6 +440,16 @@ export async function updateSRSFromAnalysis(
       vocabId = inserted[0]!.id;
     }
 
+    // Increment scaffoldedCount for scaffolded items (correct but prompted)
+    if (item.performance === 'scaffolded') {
+      await db.update(userVocabulary)
+        .set({ scaffoldedCount: sql`${userVocabulary.scaffoldedCount} + 1` })
+        .where(and(
+          eq(userVocabulary.userId, userId),
+          eq(userVocabulary.lexemeId, existingLexeme.id)
+        ));
+    }
+
     // Log the review
     await db.insert(reviewLogs).values({
       userVocabularyId: vocabId,
@@ -507,6 +536,8 @@ export interface ProcessorResult {
   rawResponse?: string;
   srsUpdates: { lexemeId: string; oldState: number; newState: number; grade: number }[];
   errors: string[];
+  structuredErrors?: { lemma: string; grammarRule?: { rule: string; example: string } }[];
+  grammarHints?: string[];
 }
 
 /**
@@ -525,6 +556,7 @@ export async function runProcessor(
     useGemini?: boolean;
     llmUrl?: string;
     llmModel?: string;
+    recentHistory?: string;
   } = {}
 ): Promise<ProcessorResult> {
   const result: ProcessorResult = {
@@ -555,7 +587,7 @@ export async function runProcessor(
   // 1) Analyze utterance
   let analysisResult: UtteranceAnalysisResult | null = null;
   if (options.useGemini !== false && process.env.GOOGLE_API_KEY) {
-    analysisResult = await analyzeUtteranceWithGemini(utterance, context, targetLanguage);
+    analysisResult = await analyzeUtteranceWithGemini(utterance, context, targetLanguage, options.recentHistory);
   }
 
   if (!analysisResult?.analysis) {
@@ -564,7 +596,8 @@ export async function runProcessor(
       context,
       options.llmUrl,
       options.llmModel,
-      targetLanguage
+      targetLanguage,
+      options.recentHistory,
     );
   }
 
@@ -579,6 +612,13 @@ export async function runProcessor(
     console.warn('[Processor] Analysis failed, skipping SRS update');
     return result;
   }
+
+  // 1.5) Extract structured errors and grammar hints for goal system / tutor
+  result.structuredErrors = result.analysis.lexemes
+    .filter(l => l.performance === 'wrong_use' || l.performance === 'recall_fail')
+    .map(l => ({ lemma: l.lemma, grammarRule: l.grammarRule }));
+
+  result.grammarHints = result.analysis.grammarHints || [];
 
   // 2) Update SRS levels
   try {
@@ -612,6 +652,7 @@ export async function runSupervisor(
     useGemini?: boolean;
     llmUrl?: string;
     llmModel?: string;
+    recentHistory?: string;
   } = {}
 ): Promise<SupervisorResult> {
   const result: SupervisorResult = {
@@ -628,10 +669,16 @@ export async function runSupervisor(
   result.analysis = proc.analysis;
   result.srsUpdates = proc.srsUpdates;
   result.errors.push(...proc.errors);
+  result.structuredErrors = proc.structuredErrors;
+  result.grammarHints = proc.grammarHints;
 
-  // 3. Check goals (always runs, even if analysis failed)
+  // 3. Update goals with structured errors from analysis
   try {
-    result.goalUpdate = await ContextManager.getDynamicGoal(userId);
+    result.goalUpdate = await ContextManager.updateGoals(userId,
+      proc.structuredErrors
+        ? { errors: proc.structuredErrors, grammarHints: proc.grammarHints || [] }
+        : undefined
+    );
   } catch (err) {
     result.errors.push(`Goal check failed: ${err}`);
   }

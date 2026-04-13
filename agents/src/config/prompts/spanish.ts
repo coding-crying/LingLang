@@ -45,4 +45,13 @@ Rules:
 - Provide only the direct conversational response for the user.
 
 # Learner Context
-{initialContext}`;
+{initialContext}
+
+# Recent Errors (from Analysis)
+{recentErrors}
+
+# Grammar Hints (from Analysis)
+{grammarHints}
+
+# Current Goals
+{goalUpdate}`;

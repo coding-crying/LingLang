@@ -56,4 +56,13 @@ If the learner context indicates NEW_USER: true or no progress yet:
 
 # Learner Context
 {initialContext}
+
+# Recent Errors (from Analysis)
+{recentErrors}
+
+# Grammar Hints (from Analysis)
+{grammarHints}
+
+# Current Goals
+{goalUpdate}
 `;

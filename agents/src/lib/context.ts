@@ -299,6 +299,144 @@ If the user seems comfortable, bridge into the next topic: ${nextUnit?.title || 
   }
 
   /**
+   * Multi-goal system: maintain up to 3 active goals with priorities.
+   * Never blocks — always returns ALL active goal messages for the tutor.
+   */
+  static async updateGoals(
+    userId: string,
+    recentAnalysis?: { errors: { lemma: string; grammarRule?: { rule: string; example: string } }[]; grammarHints: string[] },
+  ): Promise<string | null> {
+    const MAX_ACTIVE_GOALS = 3;
+    const now = new Date();
+
+    // 1. Complete any goals whose target word was used correctly (sustained — at least 2 reps)
+    const activeGoalsList = await db.query.activeGoals.findMany({
+      where: and(eq(activeGoals.userId, userId), eq(activeGoals.status, 'active')),
+      orderBy: [asc(activeGoals.priority)],
+    });
+
+    for (const goal of activeGoalsList) {
+      const progress = await db.query.userVocabulary.findFirst({
+        where: and(
+          eq(userVocabulary.userId, userId),
+          eq(userVocabulary.lexemeId, goal.targetId),
+        ),
+        with: { lexeme: true },
+      });
+
+      if (progress && progress.state >= 2 && progress.reps >= 2 && progress.lastReview && progress.lastReview > goal.createdAt) {
+        await db.update(activeGoals)
+          .set({ status: 'completed', updatedAt: now })
+          .where(eq(activeGoals.id, goal.id));
+      }
+    }
+
+    // 2. Add new remediation goals from recent analysis errors
+    if (recentAnalysis && recentAnalysis.errors.length > 0) {
+      const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
+      const targetLang = user?.targetLanguage || 'ru';
+
+      for (const error of recentAnalysis.errors) {
+        // Check if there's already an active goal for this word
+        const existing = await db.query.activeGoals.findFirst({
+          where: and(
+            eq(activeGoals.userId, userId),
+            eq(activeGoals.status, 'active'),
+            eq(activeGoals.targetId, error.lemma),
+          ),
+        });
+
+        if (!existing) {
+          // Find the lexeme ID for this error word
+          const lexeme = await db.query.lexemes.findFirst({
+            where: and(eq(lexemes.lemma, error.lemma), eq(lexemes.language, targetLang)),
+          });
+
+          if (lexeme) {
+            await db.insert(activeGoals).values({
+              userId,
+              type: 'remediation',
+              targetId: lexeme.id,
+              status: 'active',
+              priority: 1,
+              grammarContext: error.grammarRule ? JSON.stringify(error.grammarRule) : null,
+              pattern: error.grammarRule?.rule ? error.grammarRule.rule.split(' ').slice(0, 3).join('_') : null,
+              createdAt: now,
+              updatedAt: now,
+            }).onConflictDoNothing();
+          }
+        }
+      }
+    }
+
+    // 3. If we have fewer than MAX_ACTIVE_GOALS, fill with vocab goals
+    const currentActive = await db.query.activeGoals.findMany({
+      where: and(eq(activeGoals.userId, userId), eq(activeGoals.status, 'active')),
+      orderBy: [asc(activeGoals.priority)],
+    });
+
+    if (currentActive.length < MAX_ACTIVE_GOALS) {
+      const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
+      const targetLang = user?.targetLanguage || 'ru';
+
+      const startedLexemes = await db.query.userVocabulary.findMany({
+        where: eq(userVocabulary.userId, userId),
+        columns: { lexemeId: true },
+      });
+      const activeTargets = new Set(currentActive.map(g => g.targetId));
+      const startedIds = new Set(startedLexemes.map(p => p.lexemeId));
+
+      // Try to find an unstarted lexeme that's not already an active goal
+      const excludeIds = [...startedIds, ...activeTargets].slice(0, 999);
+
+      // Use a simpler approach: find any lexeme not in our exclude set
+      const allLexemes = await db.query.lexemes.findMany({
+        where: eq(lexemes.language, targetLang),
+        limit: 100,
+      });
+
+      const unstartedLexeme = allLexemes.find(l => !excludeIds.includes(l.id));
+
+      if (unstartedLexeme && currentActive.length < MAX_ACTIVE_GOALS) {
+        await db.insert(activeGoals).values({
+          userId,
+          type: 'vocab',
+          targetId: unstartedLexeme.id,
+          status: 'active',
+          priority: 5,
+          grammarContext: null,
+          pattern: null,
+          createdAt: now,
+          updatedAt: now,
+        }).onConflictDoNothing();
+      }
+    }
+
+    // 4. Build the goal message for the tutor — ALL active goals, not just one
+    const allActive = await db.query.activeGoals.findMany({
+      where: and(eq(activeGoals.userId, userId), eq(activeGoals.status, 'active')),
+      orderBy: [asc(activeGoals.priority)],
+    });
+
+    if (allActive.length === 0) return null;
+
+    const goalMessages: string[] = [];
+    for (const goal of allActive) {
+      const lexeme = await db.query.lexemes.findFirst({ where: eq(lexemes.id, goal.targetId) });
+      if (!lexeme) continue;
+
+      if (goal.type === 'remediation') {
+        const grammarStr = goal.grammarContext ? ` The grammar rule: ${goal.grammarContext}.` : '';
+        goalMessages.push(`STRUGGLING: "${lexeme.lemma}" (${lexeme.translation}) — the learner keeps making errors with this word.${grammarStr} Weave practice into the conversation naturally, don't drill it explicitly.`);
+      } else if (goal.type === 'vocab') {
+        goalMessages.push(`NEW WORD: "${lexeme.lemma}" (${lexeme.translation}) — introduce it when the conversation naturally touches on the topic. Don't force it.`);
+      }
+    }
+
+    return goalMessages.length > 0 ? goalMessages.join('\n') : null;
+  }
+
+  /**
    * Get semantic neighbors of a lexeme using pgvector HNSW index.
    */
   static async getSemanticNeighbors(lexemeId: string, limit: number = 5): Promise<{ id: string; lemma: string; distance: number }[]> {

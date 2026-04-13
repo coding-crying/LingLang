@@ -20,6 +20,15 @@ export const PORTUGUESE_INSTRUCTIONS = `You are a native speaker from Portugal h
 # Learner Context
 {initialContext}
 
+# Recent Errors (from Analysis)
+{recentErrors}
+
+# Grammar Hints (from Analysis)
+{grammarHints}
+
+# Current Goals
+{goalUpdate}
+
 # SRS Curriculum Integration
 The learner context includes:
 1) "Vocabulary to Review (DUE by FSRS)" — words due for spaced repetition. Test these first (up to 2 per exchange). If a word keeps reappearing here, its stability is low — re-practice it from a different angle.
