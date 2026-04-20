@@ -146,7 +146,7 @@ export class ServiceFactory {
     const url = process.env.CONVERSATION_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1';
     const model = process.env.CONVERSATION_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma4-26b';
     const key = process.env.CONVERSATION_LLM_KEY || process.env.LOCAL_LLM_KEY || 'ollama';
-    console.log(`[ServiceFactory] LLM: ${model}`);
+    console.log(`[ServiceFactory] LLM: ${model} @ ${url}`);
     return new openai.LLM({ baseURL: url, model, apiKey: key });
   }
 

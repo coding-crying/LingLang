@@ -254,6 +254,16 @@ export default defineAgent({
     let lastProcessorRun: any = null;
     let lastPlannerRun: any = null;
     const subagentChats: any[] = [];
+    const sessionTrace: Array<{ at: number; event: string; detail?: string }> = [];
+
+    const trace = (event: string, detail?: string) => {
+      const entry = { at: Date.now(), event, detail };
+      sessionTrace.push(entry);
+      if (sessionTrace.length > 200) sessionTrace.shift();
+      const suffix = detail ? ` ${detail}` : '';
+      console.log(`[Trace] ${event}${suffix}`);
+      writeRuntimeStateSoon();
+    };
 
     const addSubagentChat = (role: string, prompt: string, response: string) => {
       subagentChats.push({ role, timestamp: Date.now(), prompt, response });
@@ -277,6 +287,7 @@ export default defineAgent({
             lastProcessorRun,
             lastPlannerRun,
             subagentChats,
+            sessionTrace,
             updatedAt: new Date(),
           };
           // Write atomically
@@ -338,6 +349,19 @@ Rules:
     const ttsService = isGemini ? undefined : await serviceFactory.createTTS();
 
     console.log(`[Tutor-ED] Service mode: ${mode}`);
+    trace(
+      'services.created',
+      `mode=${mode} stt=${sttService?.constructor?.name || 'none'} llm=${llmService?.constructor?.name || 'none'} tts=${ttsService?.constructor?.name || 'none'}`,
+    );
+    if (sttService) {
+      trace('services.stt.capabilities', JSON.stringify((sttService as any).capabilities));
+    }
+    if (ttsService) {
+      trace('services.tts.capabilities', JSON.stringify((ttsService as any).capabilities));
+    }
+    if (llmService) {
+      trace('services.llm.capabilities', JSON.stringify((llmService as any).capabilities || {}));
+    }
 
     // === CREATE SESSION ===
     // RealtimeModel handles its own VAD, STT, and TTS internally
@@ -363,8 +387,61 @@ Rules:
     // === CONVERSATION TRACKING ===
     const history = new ConversationHistory();
 
+    const origGenerateReply = session.generateReply.bind(session);
+    session.generateReply = ((...args: any[]) => {
+      trace('session.generateReply', `args=${JSON.stringify(args)}`);
+      return origGenerateReply(...args);
+    }) as typeof session.generateReply;
+
+    const origLlmNode = agent.llmNode.bind(agent);
+    agent.llmNode = (async (...args: any[]) => {
+      const chatCtx = args[0];
+      const itemCount = chatCtx?.items?.length ?? 'unknown';
+      trace('agent.llmNode.start', `items=${itemCount}`);
+      try {
+        const stream = await origLlmNode(...args);
+        trace('agent.llmNode.ready', `hasStream=${stream !== null}`);
+        return stream;
+      } catch (error) {
+        trace('agent.llmNode.error', String(error));
+        throw error;
+      }
+    }) as typeof agent.llmNode;
+
+    const origTtsNode = agent.ttsNode.bind(agent);
+    agent.ttsNode = (async (...args: any[]) => {
+      trace('agent.ttsNode.start');
+      try {
+        const stream = await origTtsNode(...args);
+        trace('agent.ttsNode.ready', `hasStream=${stream !== null}`);
+        return stream;
+      } catch (error) {
+        trace('agent.ttsNode.error', String(error));
+        throw error;
+      }
+    }) as typeof agent.ttsNode;
+
+    const origSttNode = agent.sttNode.bind(agent);
+    agent.sttNode = (async (...args: any[]) => {
+      try {
+        const activity = (agent as any)._agentActivity;
+        const activityStt = activity?.stt as any;
+        trace(
+          'agent.sttNode.start',
+          `activityStt=${activityStt?.constructor?.name || 'none'} capabilities=${JSON.stringify(activityStt?.capabilities)}`,
+        );
+        const stream = await origSttNode(...args);
+        trace('agent.sttNode.ready', `hasStream=${stream !== null}`);
+        return stream;
+      } catch (error) {
+        trace('agent.sttNode.error', String(error));
+        throw error;
+      }
+    }) as typeof agent.sttNode;
+
     // === HELPERS: instruction refresh ===
     const refreshInstructions = async () => {
+      trace('instructions.refresh');
       (agent as any)._instructions = buildDynamicInstructions();
       await agent.updateChatCtx((agent as any)._chatCtx);
     };
@@ -372,9 +449,12 @@ Rules:
     // === SUPERVISOR (background planner) ===
 
     const updatePlanNow = async (reason: string) => {
+      try {
       const now = Date.now();
+      trace('planner.update.start', `reason=${reason}`);
       const cooldownMs = Number(process.env.PLAN_COOLDOWN_MS || 30_000);
       if (lastPlanAt && now - lastPlanAt < cooldownMs && reason !== 'user_request') {
+        trace('planner.update.skipped', `reason=${reason} cooldownMs=${cooldownMs}`);
         return;
       }
 
@@ -415,16 +495,30 @@ Rules:
             { role: 'user', content: userPrompt },
           ],
           temperature: 0.2,
-          max_tokens: 700,
+          max_tokens: 2048,
         }),
       });
 
       const data = (await resp.json()) as any;
-      const content = data.choices?.[0]?.message?.content || '';
+      const msg = data.choices?.[0]?.message;
+      const content = msg?.content || msg?.reasoning_content || '';
       let jsonText = String(content).trim();
       const block = jsonText.match(/```(?:json)?\s*([\s\S]*?)```/);
       if (block?.[1]) jsonText = block[1].trim();
-      const parsed = JSON.parse(jsonText);
+
+      let parsed: any;
+      try {
+        // Clean common LLM JSON issues before parsing
+        const cleaned = jsonText
+          .replace(/,(\s*[}\]])/g, '$1')         // Trailing commas
+          .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Unquoted keys
+          .replace(/\\\n/g, '\\n');               // Escaped newlines
+        parsed = JSON.parse(cleaned);
+      } catch (parseErr) {
+        console.warn(`[Planner] JSON parse failed: ${String(parseErr).substring(0, 80)}`);
+        console.warn(`[Planner] Raw: ${jsonText.substring(0, 200)}`);
+        return;
+      }
 
       supervisorPlanJson = parsed;
       supervisorPlanText = JSON.stringify(parsed, null, 2);
@@ -443,6 +537,11 @@ Rules:
       writeRuntimeStateSoon();
 
       await refreshInstructions();
+      trace('planner.update.done', `reason=${reason}`);
+      } catch (planErr) {
+        console.warn(`[Planner] updatePlanNow failed: ${String(planErr).substring(0, 120)}`);
+        trace('planner.update.error', String(planErr));
+      }
     };
 
     // Timer: replan at regular intervals or when signals accumulate
@@ -463,12 +562,26 @@ Rules:
     const PROCESSOR_TURN_INTERVAL = Number(process.env.PROCESSOR_TURN_INTERVAL || 1);
     const pendingUserTurns: string[] = [];
     let totalUserTurns = 0;
+    let lastProcessedTranscript = '';  // Deduplicate: STT may emit FINAL_TRANSCRIPT after VAD EOU
 
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, async (ev: any) => {
+      trace(
+        'session.user_input_transcribed',
+        `final=${!!ev.isFinal} transcript=${JSON.stringify((ev.transcript || ev.text || '').slice(0, 160))}`,
+      );
       if (!ev.isFinal) return;
 
       const transcription = ev.transcript || ev.text || '';
       if (!transcription) return;
+
+      // Deduplicate: the VAD EOU and STT FINAL_TRANSCRIPT can both trigger this
+      // with the same text within ~500ms. Skip if we already processed this exact text.
+      if (transcription === lastProcessedTranscript) {
+        console.log(`[User] Duplicate transcript skipped: "${transcription.substring(0, 50)}"`);
+        trace('session.user_input_duplicate', transcription.substring(0, 80));
+        return;
+      }
+      lastProcessedTranscript = transcription;
 
       console.log(`[User] ${transcription}`);
       history.addUserTurn(transcription);
@@ -488,6 +601,7 @@ Rules:
         useGemini: false,
         llmUrl: process.env.PROCESSOR_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1',
         llmModel: process.env.PROCESSOR_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma4-26b',
+        llmKey: process.env.PROCESSOR_LLM_KEY || process.env.LOCAL_LLM_KEY || '',
         recentHistory: history.getContext(),
       }).then((result) => {
         lastProcessorRun = {
@@ -519,6 +633,7 @@ Rules:
         refreshInstructions().catch(() => {});
       }).catch((err) => {
         console.error('[Processor] Failed:', err);
+        trace('processor.error', String(err));
       });
     });
 
@@ -528,19 +643,28 @@ Rules:
     });
 
     session.on(voice.AgentSessionEventTypes.Error, (ev: any) => {
-      console.error('[Session] Error:', ev.error);
+      console.error('[Session] Error:', ev.error || ev);
+      trace('session.error', String(ev.error || ev));
     });
 
     session.on(voice.AgentSessionEventTypes.SpeechCreated, (ev: any) => {
       console.log(`[Session] SpeechCreated (source: ${ev.source})`);
+      trace('session.speech_created', `source=${ev.source}`);
     });
 
     session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev: any) => {
       console.log(`[Session] AgentStateChanged: ${ev.newState}`);
+      trace('session.agent_state_changed', String(ev.newState));
+    });
+
+    session.on(voice.AgentSessionEventTypes.MetricsCollected, (ev: any) => {
+      console.log(`[Session] MetricsCollected:`, JSON.stringify(ev.metrics || ev).substring(0, 300));
+      trace('session.metrics_collected');
     });
 
     session.on(voice.AgentSessionEventTypes.FunctionToolsExecuted, (ev: any) => {
       console.log(`[Session] FunctionToolsExecuted:`, ev);
+      trace('session.function_tools_executed');
     });
 
     // Additional debug events for RealtimeModel
@@ -581,6 +705,7 @@ Rules:
     };
 
     console.log(`[DIAG] About to call session.start(), room connected: ${ctx.room.isConnected}`);
+    trace('session.start.begin', `roomConnected=${ctx.room.isConnected}`);
 
     // === START SESSION ===
     await session.start({
@@ -592,6 +717,10 @@ Rules:
     });
 
     console.log(`[DIAG] session.start() completed, _roomIO=${!!(session as any)._roomIO}, sessionHost=${!!(session as any).sessionHost}`);
+    trace(
+      'session.start.done',
+      `_roomIO=${!!(session as any)._roomIO} sessionHost=${!!(session as any).sessionHost}`,
+    );
     console.log(`[DIAG] session.activity: ${!!(session as any).activity}, type=${(session as any).activity?.constructor?.name}`);
     const activity = (session as any).activity;
     if (activity) {
@@ -601,14 +730,110 @@ Rules:
       // Check if the RealtimeModel is from the same module
       const modelPkg = activity.llm?.constructor?.__module || 'unknown';
       console.log(`[DIAG] activity.llm module: ${modelPkg}`);
+      trace(
+        'session.activity.ready',
+        `stt=${activity.stt?.constructor?.name || 'none'} tts=${activity.tts?.constructor?.name || 'none'} llm=${activity.llm?.constructor?.name || 'none'}`,
+      );
+
+      if (typeof activity.scheduleSpeech === 'function') {
+        const origScheduleSpeech = activity.scheduleSpeech.bind(activity);
+        activity.scheduleSpeech = ((speechHandle: any, priority: any) => {
+          trace(
+            'activity.scheduleSpeech',
+            `speechId=${speechHandle?.id || 'unknown'} priority=${String(priority)} interrupted=${!!speechHandle?.interrupted}`,
+          );
+          return origScheduleSpeech(speechHandle, priority);
+        }) as typeof activity.scheduleSpeech;
+      }
+
+      if (typeof activity.pipelineReplyTask === 'function') {
+        const origPipelineReplyTask = activity.pipelineReplyTask.bind(activity);
+        activity.pipelineReplyTask = (async (...args: any[]) => {
+          const speechHandle = args[0];
+          trace(
+            'activity.pipelineReplyTask.start',
+            `speechId=${speechHandle?.id || 'unknown'} interrupted=${!!speechHandle?.interrupted} scheduled=${!!speechHandle?.scheduled}`,
+          );
+          try {
+            const result = await origPipelineReplyTask(...args);
+            trace(
+              'activity.pipelineReplyTask.done',
+              `speechId=${speechHandle?.id || 'unknown'} scheduled=${!!speechHandle?.scheduled} interrupted=${!!speechHandle?.interrupted}`,
+            );
+            return result;
+          } catch (error) {
+            trace('activity.pipelineReplyTask.error', String(error));
+            throw error;
+          }
+        }) as typeof activity.pipelineReplyTask;
+      }
+
+      if (typeof activity._pipelineReplyTaskImpl === 'function') {
+        const origPipelineReplyTaskImpl = activity._pipelineReplyTaskImpl.bind(activity);
+        activity._pipelineReplyTaskImpl = (async (opts: any) => {
+          trace(
+            'activity._pipelineReplyTaskImpl.start',
+            `speechId=${opts?.speechHandle?.id || 'unknown'} newMessage=${JSON.stringify(opts?.newMessage?.textContent || '')}`,
+          );
+          try {
+            const result = await origPipelineReplyTaskImpl(opts);
+            trace(
+              'activity._pipelineReplyTaskImpl.done',
+              `speechId=${opts?.speechHandle?.id || 'unknown'} scheduled=${!!opts?.speechHandle?.scheduled} interrupted=${!!opts?.speechHandle?.interrupted}`,
+            );
+            return result;
+          } catch (error) {
+            trace('activity._pipelineReplyTaskImpl.error', String(error));
+            throw error;
+          }
+        }) as typeof activity._pipelineReplyTaskImpl;
+      }
+
+      const speechHandleProto = activity._currentSpeech
+        ? Object.getPrototypeOf(activity._currentSpeech)
+        : null;
+      if (speechHandleProto) {
+        if (typeof speechHandleProto._waitForScheduled === 'function' && !speechHandleProto.__traceWaitForScheduledPatched) {
+          const origWaitForScheduled = speechHandleProto._waitForScheduled;
+          speechHandleProto._waitForScheduled = function(this: any, ...args: any[]) {
+            trace('speechHandle._waitForScheduled', `speechId=${this?.id || 'unknown'} scheduled=${!!this?.scheduled}`);
+            return origWaitForScheduled.apply(this, args);
+          };
+          speechHandleProto.__traceWaitForScheduledPatched = true;
+        }
+        if (typeof speechHandleProto._waitForAuthorization === 'function' && !speechHandleProto.__traceWaitForAuthorizationPatched) {
+          const origWaitForAuthorization = speechHandleProto._waitForAuthorization;
+          speechHandleProto._waitForAuthorization = function(this: any, ...args: any[]) {
+            trace(
+              'speechHandle._waitForAuthorization',
+              `speechId=${this?.id || 'unknown'} interrupted=${!!this?.interrupted} authorized=${!!this?._authorized}`,
+            );
+            return origWaitForAuthorization.apply(this, args);
+          };
+          speechHandleProto.__traceWaitForAuthorizationPatched = true;
+        }
+        if (typeof speechHandleProto._authorizeGeneration === 'function' && !speechHandleProto.__traceAuthorizeGenerationPatched) {
+          const origAuthorizeGeneration = speechHandleProto._authorizeGeneration;
+          speechHandleProto._authorizeGeneration = function(this: any, ...args: any[]) {
+            trace(
+              'speechHandle._authorizeGeneration',
+              `speechId=${this?.id || 'unknown'} interrupted=${!!this?.interrupted} scheduled=${!!this?.scheduled}`,
+            );
+            return origAuthorizeGeneration.apply(this, args);
+          };
+          speechHandleProto.__traceAuthorizeGenerationPatched = true;
+        }
+      }
     } else {
       console.log(`[DIAG] NO activity on session`);
+      trace('session.activity.missing');
     }
 
     console.log('[Tutor-ED] Sending initial greeting...');
     // RealtimeModel doesn't support say() - AgentSession handles it internally
     // The agent instructions already contain the greeting context
     if (!isGemini) {
+      trace('session.say.initial_greeting');
       session.say(langConfig.prompts.greeting);
     }
     // For gemini, let AgentSession handle the initial response naturally

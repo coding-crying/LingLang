@@ -6,8 +6,9 @@
  * Docs: https://elevenlabs.io/docs/api-reference/speech-to-text/v-1-speech-to-text-realtime
  */
 
-import { log } from '../log.js';
-import * as stt from './stt.js';
+import { log, stt } from '@livekit/agents';
+import type { APIConnectOptions, AudioBuffer } from '@livekit/agents';
+import type { LanguageCode } from '@livekit/agents';
 import type { AudioFrame } from '@livekit/rtc-node';
 import WebSocket from 'ws';
 
@@ -47,18 +48,24 @@ export class ElevenLabsRealtimeSTT extends stt.STT {
     this.#opts = { ...defaultOptions, ...opts };
     this.#opts.apiKey ??= process.env.ELEVENLABS_API_KEY || process.env.ELEVEN_API_KEY;
     if (!this.#opts.apiKey) throw new Error('ElevenLabs API key is required');
+    this.#logger.info(
+      `[ElevenLabs STT] Created realtime STT (model=${this.#opts.model}, language=${this.#opts.language || 'auto'})`,
+    );
   }
 
-  protected async _recognize(_frame: AudioBuffer): Promise<stt.SpeechEvent> {
+  protected async _recognize(_frame: AudioBuffer, _abortSignal?: AbortSignal): Promise<stt.SpeechEvent> {
     // Not used — streaming only
     return {
       type: SpeechEventType.FINAL_TRANSCRIPT,
-      alternatives: [{ text: '', language: 'en', startTime: 0, endTime: 0, confidence: 0 }],
+      alternatives: [{ text: '', language: 'en' as LanguageCode, startTime: 0, endTime: 0, confidence: 0 }],
     };
   }
 
-  stream(): stt.SpeechStream {
-    return new ElevenLabsRealtimeSpeechStream(this, this.#opts);
+  stream(options?: { connOptions?: APIConnectOptions }): stt.SpeechStream {
+    this.#logger.debug(
+      `[ElevenLabs STT] stream() called (capabilities=${JSON.stringify(this.capabilities)}, hasConnOptions=${!!options?.connOptions})`,
+    );
+    return new ElevenLabsRealtimeSpeechStream(this, this.#opts, options?.connOptions);
   }
 }
 
@@ -69,10 +76,17 @@ class ElevenLabsRealtimeSpeechStream extends stt.SpeechStream {
   #connected = false;
   #sessionStarted = false;
   #frameBuffer: AudioFrame[] = [];
+  #framesSent = 0;
+  #lastCommittedText = '';   // Dedup: prevent emitting duplicate committed_transcript
+  #lastCommittedTime = 0;    // Timestamp of last committed_transcript
   label = 'elevenlabs-realtime.SpeechStream';
 
-  constructor(sttInstance: ElevenLabsRealtimeSTT, opts: ElevenLabsRealtimeSTTOptions) {
-    super(sttInstance);
+  constructor(
+    sttInstance: ElevenLabsRealtimeSTT,
+    opts: ElevenLabsRealtimeSTTOptions,
+    connOptions?: APIConnectOptions,
+  ) {
+    super(sttInstance, opts.sampleRate, connOptions);
     this.#opts = opts;
     this.#connect();
   }
@@ -134,30 +148,72 @@ class ElevenLabsRealtimeSpeechStream extends stt.SpeechStream {
     try {
       const msg = JSON.parse(data.toString());
 
+      // Log all messages for debugging turn-detection timing
+      if (msg.message_type === 'committed_transcript' || msg.message_type === 'committed_transcript_with_timestamps') {
+        this.#logger.info(`[ElevenLabs STT] COMMITTED: "${msg.text}" (language: ${msg.language || 'auto'})`);
+      } else if (msg.message_type === 'partial_transcript') {
+        this.#logger.debug(`[ElevenLabs STT] PARTIAL: "${msg.text?.substring(0, 50)}"`);
+      } else {
+        this.#logger.debug(`[ElevenLabs STT] MSG: ${msg.message_type}`);
+      }
+
       switch (msg.message_type) {
         case 'session_started':
           this.#sessionStarted = true;
           this.#logger.info('[ElevenLabs STT] Session started');
+          void this.#flushBufferedFrames().catch((err) => {
+            this.#logger.error({ err }, '[ElevenLabs STT] Failed to flush buffered frames after session start');
+          });
           break;
 
         case 'partial_transcript':
           if (msg.text?.trim()) {
             this.queue.put({
               type: SpeechEventType.INTERIM_TRANSCRIPT,
-              alternatives: [{ text: msg.text, language: msg.language || 'auto', startTime: 0, endTime: 0, confidence: 0.9 }],
+              alternatives: [{
+                text: msg.text,
+                language: (msg.language || 'en') as LanguageCode,
+                startTime: 0,
+                endTime: 0,
+                confidence: 0.9,
+              }],
             });
           }
           break;
 
         case 'committed_transcript':
-        case 'committed_transcript_with_timestamps':
-          if (msg.text?.trim()) {
-            this.queue.put({
-              type: SpeechEventType.FINAL_TRANSCRIPT,
-              alternatives: [{ text: msg.text, language: msg.language || 'auto', startTime: 0, endTime: 0, confidence: 1.0 }],
-            });
+        case 'committed_transcript_with_timestamps': {
+          const text = msg.text ?? '';
+          const trimmed = text.trim();
+
+          // Skip empty transcripts (often emitted after silence or greeting playback)
+          if (!trimmed) {
+            this.#logger.debug('[ElevenLabs STT] Skipping empty committed transcript');
+            break;
           }
+
+          // Deduplicate: ElevenLabs sometimes sends the same transcript twice within ms.
+          // If same text arrives within 2 seconds, skip it.
+          const now = Date.now();
+          if (trimmed === this.#lastCommittedText && (now - this.#lastCommittedTime) < 2000) {
+            this.#logger.debug(`[ElevenLabs STT] Skipping duplicate committed transcript: "${trimmed.substring(0, 40)}"`);
+            break;
+          }
+          this.#lastCommittedText = trimmed;
+          this.#lastCommittedTime = now;
+
+          this.queue.put({
+            type: SpeechEventType.FINAL_TRANSCRIPT,
+            alternatives: [{
+              text: trimmed,
+              language: (msg.language || 'en') as LanguageCode,
+              startTime: 0,
+              endTime: 0,
+              confidence: 1.0,
+            }],
+          });
           break;
+        }
 
         case 'input_error':
         case 'auth_error':
@@ -177,6 +233,12 @@ class ElevenLabsRealtimeSpeechStream extends stt.SpeechStream {
   async #sendFrame(frame: AudioFrame): Promise<void> {
     if (!this.#ws || !this.#connected) return;
     const audio = Buffer.from(frame.data.buffer);
+    this.#framesSent++;
+    if (this.#framesSent <= 5 || this.#framesSent % 50 === 0) {
+      this.#logger.debug(
+        `[ElevenLabs STT] Sending audio frame #${this.#framesSent} (${frame.samplesPerChannel} samples @ ${frame.sampleRate}Hz)`,
+      );
+    }
     this.#ws.send(JSON.stringify({
       message_type: 'input_audio_chunk',
       audio_base_64: audio.toString('base64'),
@@ -185,26 +247,36 @@ class ElevenLabsRealtimeSpeechStream extends stt.SpeechStream {
   }
 
   protected async run(): Promise<void> {
+    this.#logger.info('[ElevenLabs STT] Speech stream run() started');
     for await (const frame of this.input) {
       if (frame === stt.SpeechStream.FLUSH_SENTINEL) {
+        this.#logger.debug('[ElevenLabs STT] Received FLUSH_SENTINEL');
         await this.#flush();
       } else {
         const audioFrame = frame as AudioFrame;
         if (!this.#connected || !this.#sessionStarted) {
           this.#frameBuffer.push(audioFrame);
+          if (this.#frameBuffer.length <= 5 || this.#frameBuffer.length % 50 === 0) {
+            this.#logger.debug(
+              `[ElevenLabs STT] Buffering frame (connected=${this.#connected}, sessionStarted=${this.#sessionStarted}, buffered=${this.#frameBuffer.length})`,
+            );
+          }
         } else {
           await this.#sendFrame(audioFrame);
         }
       }
     }
+    this.#logger.info('[ElevenLabs STT] Speech stream run() completed');
   }
 
   async #flush(): Promise<void> {
     if (!this.#ws || !this.#connected) return;
+    this.#logger.info('[ElevenLabs STT] Committing buffered audio chunk');
     this.#ws.send(JSON.stringify({ message_type: 'input_audio_chunk', audio_base_64: '', commit: true }));
   }
 
   async close(): Promise<void> {
+    this.#logger.info('[ElevenLabs STT] Closing speech stream');
     this.#ws?.close();
     this.#ws = undefined;
     this.#connected = false;

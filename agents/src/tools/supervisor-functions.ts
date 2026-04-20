@@ -144,9 +144,71 @@ Output:
 export const ANALYSIS_PROMPT_FULL = buildFullPrompt('Russian');
 
 /**
+ * Attempt to clean and parse JSON from an LLM response.
+ * Handles common formatting issues from smaller/quantized models.
+ * Returns parsed object or null if unparseable.
+ */
+function cleanAndParseJSON(raw: string): UtteranceAnalysis | null {
+  // Extract JSON from markdown code blocks
+  let jsonStr = raw;
+  if (raw.includes('```')) {
+    const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+    jsonStr = match?.[1] ?? raw;
+  }
+
+  const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return null;
+
+  let cleanJson = jsonMatch[0]
+    .replace(/,(\s*[}\]])/g, '$1')           // Remove trailing commas
+    .replace(/([{,]\s*)(\w+):/g, '$1"$2":')  // Quote unquoted keys
+    .replace(/:\s*'([^']*)'/g, ': "$1"')     // Replace single quotes with double
+    .replace(/\}\s*\{/g, '},{')             // Missing commas between objects in arrays
+    .replace(/\]\s*\{/g, '],{')             // Missing commas between array elements (obj after array)
+    .replace(/\}\s*\]/g, '}]')              // Missing commas before closing array
+    .replace(/"\s*\n\s*"/g, '","')           // Missing commas between string values
+    .replace(/\\\n/g, '\\n')                // Fix escaped newlines in strings
+    // Fix missing commas between consecutive string array elements: "word1" "word2"
+    .replace(/"\s+"(?=[\wА-яЁё])/g, '","')
+    // Fix missing commas between consecutive object array elements: }{ or } {
+    .replace(/\}\s+,?\s*\{/g, '},{')
+    // Remove single-line comments (// ...) inside JSON
+    .replace(/\/\/[^\n"]*/g, '');
+
+  // Attempt balanced brace matching — sometimes the LLM generates extra closing braces
+  // Find the shortest valid JSON object by counting brace depth
+  let depth = 0;
+  let endIdx = -1;
+  for (let i = 0; i < cleanJson.length; i++) {
+    if (cleanJson[i] === '{') depth++;
+    else if (cleanJson[i] === '}') {
+      depth--;
+      if (depth === 0) { endIdx = i; break; }
+    }
+  }
+  if (endIdx >= 0) {
+    cleanJson = cleanJson.substring(0, endIdx + 1);
+  }
+
+  try {
+    return JSON.parse(cleanJson) as UtteranceAnalysis;
+  } catch {
+    // Last resort: try to fix unescaped quotes inside strings by using JSON5-like approach
+    // Replace any inner double quotes that break parsing (rare but happens with examples)
+    try {
+      // Try progressively: remove grammarRule objects that might contain problematic quotes
+      const simplified = cleanJson.replace(/"grammarRule"\s*:\s*\{[^}]*\}/g, '"grammarRule":null');
+      return JSON.parse(simplified) as UtteranceAnalysis;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
  * Analyze an utterance using the local LLM (llama-swap)
  * Uses simplified prompt for small models like gemma3:4b
- * Falls back gracefully if analysis fails
+ * Retries with simplified prompt on JSON parse failure
  */
 export async function analyzeUtteranceWithLocalLLM(
   utterance: string,
@@ -155,6 +217,7 @@ export async function analyzeUtteranceWithLocalLLM(
   llmModel?: string,
   targetLanguage: string = 'Russian',
   recentHistory?: string,
+  llmKey?: string,
 ): Promise<UtteranceAnalysisResult> {
   const model = llmModel || process.env.LOCAL_LLM_MODEL || 'gemma4-26b';
 
@@ -169,67 +232,69 @@ export async function analyzeUtteranceWithLocalLLM(
 
   console.log(`[Supervisor] Analyzing with ${model} (${isSmallModel ? 'simple' : 'full'} prompt)`);
 
-  try {
-    const startTime = Date.now();
+  // Try with full prompt first, then retry with simplified prompt if parse fails
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const useSimple = attempt > 0;
+    const sysPrompt = useSimple ? buildSimplePrompt(targetLanguage) : prompt;
 
-    const response = await fetch(`${llmUrl}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: prompt },
-          { role: 'user', content: userPrompt }
-        ],
-        temperature: 0.1, // Low temperature for consistent JSON
-        max_tokens: 800,  // Enough for detailed analysis with grammarRule
-      }),
-    });
+    try {
+      const startTime = Date.now();
 
-    const elapsed = Date.now() - startTime;
+      const apiKey = llmKey || process.env.PROCESSOR_LLM_KEY || process.env.LOCAL_LLM_KEY || '';
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
-    if (!response.ok) {
-      console.error(`[Supervisor] LLM request failed: ${response.status}`);
-      return { analysis: null, rawPrompt: prompt + '\n' + userPrompt };
+      const response = await fetch(`${llmUrl}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: sysPrompt },
+            { role: 'user', content: userPrompt }
+          ],
+          temperature: 0.1,
+          max_tokens: useSimple ? 400 : 800,
+        }),
+      });
+
+      const elapsed = Date.now() - startTime;
+
+      if (!response.ok) {
+        console.error(`[Supervisor] LLM request failed: ${response.status}`);
+        return { analysis: null, rawPrompt: sysPrompt + '\n' + userPrompt };
+      }
+
+      const data = await response.json() as any;
+      const content = data.choices?.[0]?.message?.content || '';
+
+      console.log(`[Supervisor] LLM responded in ${elapsed}ms (attempt ${attempt + 1})`);
+
+      const analysis = cleanAndParseJSON(content);
+      if (analysis) {
+        console.log(`[Supervisor] Extracted ${analysis.lexemes?.length || 0} lexemes`);
+        return { analysis, rawPrompt: sysPrompt + '\n' + userPrompt, rawResponse: content };
+      }
+
+      // Parse failed — log and retry with simpler prompt
+      if (attempt === 0) {
+        console.warn(`[Supervisor] JSON parse failed, retrying with simplified prompt. Raw: ${content.substring(0, 150)}`);
+      } else {
+        console.error(`[Supervisor] JSON parse failed on retry too. Raw: ${content.substring(0, 150)}`);
+        return { analysis: null, rawPrompt: sysPrompt + '\n' + userPrompt, rawResponse: content };
+      }
+
+    } catch (err) {
+      if (attempt === 0) {
+        console.warn(`[Supervisor] Analysis error (will retry): ${String(err).substring(0, 120)}`);
+      } else {
+        console.error('[Supervisor] Analysis error (retry also failed):', err);
+        return { analysis: null, rawPrompt: sysPrompt + '\n' + userPrompt };
+      }
     }
-
-    const data = await response.json() as any;
-    const content = data.choices?.[0]?.message?.content || '';
-
-    console.log(`[Supervisor] LLM responded in ${elapsed}ms`);
-
-    // Parse JSON from response (handle markdown code blocks)
-    let jsonStr = content;
-    if (content.includes('```')) {
-      const match = content.match(/```(?:json)?\s*([\s\S]*?)```/);
-      jsonStr = match ? match[1] : content;
-    }
-
-    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      console.error('[Supervisor] No JSON in response:', content.substring(0, 100));
-      return { analysis: null, rawPrompt: prompt + '\n' + userPrompt, rawResponse: content };
-    }
-
-    // Clean up common JSON formatting issues from LLMs
-    let cleanJson = jsonMatch[0]
-      .replace(/,(\s*[}\]])/g, '$1')  // Remove trailing commas
-      .replace(/([{,]\s*)(\w+):/g, '$1"$2":')  // Quote unquoted keys
-      .replace(/:\s*'([^']*)'/g, ': "$1"')  // Replace single quotes with double
-      .replace(/\]\s*\{/g, '],{')  // Fix missing commas between array elements
-      .replace(/\}\s*\{/g, '},{')  // Fix missing commas between objects in arrays
-      .replace(/"\s*\n\s*"/g, '","')  // Fix missing commas between string values
-      .replace(/\\\n/g, '\\n');  // Fix escaped newlines in strings
-
-    const analysis = JSON.parse(cleanJson) as UtteranceAnalysis;
-    console.log(`[Supervisor] Extracted ${analysis.lexemes?.length || 0} lexemes`);
-
-    return { analysis, rawPrompt: prompt + '\n' + userPrompt, rawResponse: content };
-
-  } catch (err) {
-    console.error('[Supervisor] Analysis error:', err);
-    return { analysis: null, rawPrompt: prompt + '\n' + userPrompt };
   }
+
+  return { analysis: null };
 }
 
 /**
@@ -273,12 +338,15 @@ export async function analyzeUtteranceWithGemini(
     console.log(`[Supervisor] Gemini responded in ${elapsed}ms`);
 
     const responseText = result.text || '';
-    const cleanedText = responseText.replace(/^```json\s*/, '').replace(/```$/, '').trim();
 
-    const analysis = JSON.parse(cleanedText) as UtteranceAnalysis;
-    console.log(`[Supervisor] Extracted ${analysis.lexemes?.length || 0} lexemes`);
+    const analysis = cleanAndParseJSON(responseText);
+    if (analysis) {
+      console.log(`[Supervisor] Extracted ${analysis.lexemes?.length || 0} lexemes`);
+      return { analysis, rawPrompt: promptText, rawResponse: responseText };
+    }
 
-    return { analysis, rawPrompt: promptText, rawResponse: responseText };
+    console.warn('[Supervisor] Gemini JSON parse failed');
+    return { analysis: null, rawPrompt: promptText, rawResponse: responseText };
 
   } catch (err: any) {
     const msg = err?.message || String(err);
@@ -560,6 +628,7 @@ export async function runProcessor(
     useGemini?: boolean;
     llmUrl?: string;
     llmModel?: string;
+    llmKey?: string;
     recentHistory?: string;
   } = {}
 ): Promise<ProcessorResult> {
@@ -602,6 +671,7 @@ export async function runProcessor(
       options.llmModel,
       targetLanguage,
       options.recentHistory,
+      options.llmKey,
     );
   }
 
@@ -656,6 +726,7 @@ export async function runSupervisor(
     useGemini?: boolean;
     llmUrl?: string;
     llmModel?: string;
+    llmKey?: string;
     recentHistory?: string;
   } = {}
 ): Promise<SupervisorResult> {
