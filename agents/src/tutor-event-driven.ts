@@ -1,27 +1,27 @@
 /**
  * Event-Driven Tutor Agent (Optimized)
  *
- * This version separates Processor and Supervisor with smart triggers:
- * - PROCESSOR: Analyzes utterance + updates SRS (runs every 5 turns to reduce latency)
- * - SUPERVISOR: Checks goal status (runs only when dirty flag is set)
+ * This version separates Processor and Planner with smart triggers:
+ * - PROCESSOR: Analyzes utterance + updates SRS (runs every turn by default)
+ * - PLANNER: Produces teaching nudges (runs on timer + signal accumulation)
  *
  * Architecture:
  *   User speaks → STT → UserInputTranscribed event
  *                              ↓
  *              ┌───────────────┴───────────────┐
  *              ↓                               ↓
- *        LLM responds                   Processor (every 5 turns)
+ *        LLM responds                   Processor (every turn)
  *        (immediate)                    └─> Analyze + Update SRS
  *              ↓                               ↓
- *        TTS speaks                     Supervisor (when dirty)
- *                                       └─> Check/Update Goals
+ *        TTS speaks                     signals accumulate
+ *                                       └─> Planner (timer)
  *                                              ↓
- *                                    [Inject praise/new goal if changed]
+ *                                    [nudge injected into instructions]
  *
- * Dirty Flag Triggers:
- * - Session start (get initial goal)
- * - After SRS updates (goal might be completed)
- * - After goal completion (get next goal)
+ * Planner Triggers:
+ * - Session start (skip if no vocab)
+ * - Timer tick (30s) when signals pending
+ * - After processor SRS updates
  */
 
 import * as dotenv from 'dotenv';
@@ -44,13 +44,15 @@ import { writeFile, rename } from 'node:fs/promises';
 import http from 'node:http';
 
 import { runProcessor } from './tools/supervisor-functions.js';
+import { dbTools } from './tools/db-tools.js';
 import { ContextManager } from './lib/context.js';
-import { getLanguageConfig } from './config/languages.js';
+import { getLanguageConfig, nativeLanguageName } from './config/languages.js';
 import { buildInstructions } from './config/prompts/base.js';
 import { PLANNER_SYSTEM_PROMPT, buildPlannerPrompt } from './config/prompts/supervisor.js';
 import { db } from './db/index.js';
 import { users } from './db/schema.js';
 import { eq } from 'drizzle-orm';
+import { emitEvent, setSessionId } from './lib/trace.js';
 
 // ============================================================================
 // CONVERSATION HISTORY (for context)
@@ -64,7 +66,7 @@ interface ConversationTurn {
 
 class ConversationHistory {
   private turns: ConversationTurn[] = [];
-  private maxTurns = 10;
+  private maxTurns = 5; // Planner maintains a running summary for older context
 
   addUserTurn(content: string) {
     this.turns.push({ role: 'user', content, timestamp: Date.now() });
@@ -117,56 +119,101 @@ function httpGet(url: string, timeoutMs = 2000): Promise<boolean> {
 
 async function ensureLocalServices(): Promise<void> {
   const mode = process.env.SERVICE_MODE || 'local';
-  if (mode !== 'local') return;
 
-  const ttsMode = process.env.TTS_MODE || mode;
-  const checks = [
-    { name: 'STT',  url: 'http://localhost:8000/docs' },
-    ...(ttsMode === 'local' ? [{ name: 'TTS',  url: 'http://localhost:50000/docs' }] : []),
-    { name: 'LLM',  url: 'http://localhost:11434' },
-  ];
+  // Build the set of health checks based on the active mode.
+  // In local-gemma-audio and gemini modes the vLLM/STT backend on 8093 is still required.
+  const ttsMode = process.env.TTS_MODE || 'local';
+  const checks: Array<{ name: string; url: string }> = [];
 
-  const results = await Promise.all(checks.map(async (c) => ({ ...c, ok: await httpGet(c.url) })));
-  const down = results.filter(r => !r.ok);
+  if (ttsMode === 'local') {
+    checks.push({ name: 'TTS', url: 'http://localhost:8882/v1/audio/speech' });
+  }
+
+  if (mode === 'local' || mode === 'local-gemma-audio') {
+    checks.push({ name: 'LLM', url: 'http://localhost:8093/v1/models' });
+  }
+
+  if (checks.length === 0) {
+    return; // nothing local to check (e.g. gemini / cloud-only)
+  }
+
+  const t0 = Date.now();
+  const results = await Promise.all(
+    checks.map(async (c) => {
+      const tStart = Date.now();
+      const ok = await httpGet(c.url);
+      return { ...c, ok, latencyMs: Date.now() - tStart };
+    }),
+  );
+  const down = results.filter((r) => !r.ok);
+
+  // Emit per-service health event so a dead backend is visible at session start
+  // (not buried in agent_output.log).
+  for (const r of results) {
+    try {
+      emitEvent('services.health', {
+        name: r.name,
+        url: r.url,
+        healthy: r.ok,
+        latencyMs: r.latencyMs,
+      });
+    } catch { /* trace not initialized in prewarm — harmless */ }
+  }
 
   if (down.length === 0) {
-    console.log('[LocalServices] All services healthy');
+    console.log(`[LocalServices] All ${results.length} services healthy (${Date.now() - t0}ms)`);
     return;
   }
 
-  console.log(`[LocalServices] Down: ${down.map(d => d.name).join(', ')} — launching start_local_services.py`);
-
-  // Resolve path relative to project root (one dir up from agents/src/)
-  const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-  const script = resolve(projectRoot, 'start_local_services.py');
-
-  const child = spawn('python3', ['-u', script], {
-    cwd: projectRoot,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: true,
-  });
-
-  child.stdout?.on('data', (d: Buffer) => process.stdout.write(`[LocalServices] ${d}`));
-  child.stderr?.on('data', (d: Buffer) => process.stderr.write(`[LocalServices] ${d}`));
-  child.unref(); // Don't keep the agent alive just for this
-
-  // Poll until all needed services are up (max 120s)
-  const needed = down.map(d => d.url);
-  const deadline = Date.now() + 120_000;
-  while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 2000));
-    const still = await Promise.all(needed.map(url => httpGet(url).then(ok => ok ? null : url)));
-    const remaining = still.filter(Boolean);
-    if (remaining.length === 0) {
-      console.log('[LocalServices] All services ready');
-      return;
-    }
-  }
-  console.warn('[LocalServices] Timed out waiting for services — continuing anyway');
+  console.warn(
+    `[LocalServices] Down: ${down.map((d) => `${d.name}@${d.url}`).join(', ')} — agent will rely on fallbacks or fail. Start with systemd or check service health.`,
+  );
 }
 
 // ============================================================================
 // AGENT DEFINITION
+// ============================================================================
+// SESSION SUMMARY — persisted from planner's running summary, no extra LLM call
+// ============================================================================
+
+function persistSessionSummary(
+  userId: string,
+  startedAt: Date,
+  runningSummary: string,
+  stats: { totalSrsUpdates: number; allErrors: Array<{ lemma: string; rule?: string }>; allHints: string[] },
+): void {
+  const endedAt = new Date();
+  const durationMinutes = Math.round((endedAt.getTime() - startedAt.getTime()) / 60_000);
+
+  if (durationMinutes < 1) return; // too short to summarize
+
+  // De-duplicate errors by lemma, keep last rule seen
+  const errorMap = new Map<string, string>();
+  for (const e of stats.allErrors) {
+    errorMap.set(e.lemma, e.rule || 'error');
+  }
+  const errorsPattern = [...errorMap.entries()].map(([lemma, rule]) => `${lemma}: ${rule}`).join('; ') || null;
+  const nextHint = stats.allHints.length > 0 ? [...new Set(stats.allHints)].slice(-3).join('; ') : null;
+
+  // The planner has been maintaining a running summary all session — use it directly.
+  const summary = runningSummary || `Session lasted ${durationMinutes}min with ${stats.totalSrsUpdates} word reviews.`;
+
+  ContextManager.writeSessionSummary(userId, {
+    startedAt,
+    endedAt,
+    durationMinutes,
+    topicsCovered: null, // planner's summary already captures this
+    wordsWorked: null,
+    errorsPattern,
+    summary,
+    nextSessionHint: nextHint,
+  }).then(() => {
+    console.log(`[Tutor-ED] Session summary written (${durationMinutes}min)`);
+  }).catch((err) => {
+    console.warn('[Tutor-ED] Failed to write session summary:', String(err).substring(0, 100));
+  });
+}
+
 // ============================================================================
 
 export default defineAgent({
@@ -193,6 +240,7 @@ export default defineAgent({
     const participant = await ctx.waitForParticipant();
     const userId = participant.identity || 'test-user';
     console.log(`[Tutor-ED] Starting session for user: ${userId}`);
+    setSessionId(`room-${ctx.room.name}-${userId}`);
 
     // === USER SETUP ===
     let user = await db.query.users.findFirst({
@@ -218,6 +266,7 @@ export default defineAgent({
     const targetLang = user.targetLanguage;
     const langConfig = getLanguageConfig(targetLang);
     console.log(`[Tutor-ED] Language: ${langConfig.name}`);
+    emitEvent('session.start', { userId, language: langConfig.name, mode: process.env.SERVICE_MODE || 'local' });
 
     // === INITIAL CONTEXT ===
     let initialContext = '';
@@ -230,22 +279,36 @@ export default defineAgent({
       initialContext = `Learning: ${langConfig.name}\nProficiency: ${user.proficiencyLevel}`;
     }
 
-    const instructions = buildInstructions(langConfig.prompts.instructionsTemplate, {
+    const usersNativeLanguage = nativeLanguageName(user.nativeLanguage || 'en');
+
+    const instructions = buildInstructions({
       targetLanguage: langConfig.name,
       nativeName: langConfig.nativeName,
+      nativeLanguage: usersNativeLanguage,
       targetRatio: langConfig.pedagogy.targetLanguageRatio,
       userLevel: user.proficiencyLevel || 'beginner',
+      persona: langConfig.persona,
       initialContext,
       mode: 'voice',
+      recentErrors: 'None',
+      grammarHints: 'None',
+      goalUpdate: '',
     });
 
     // === DYNAMIC INSTRUCTIONS (Supervisor-driven teaching plan) ===
     const baseInstructions = instructions;
 
-    let supervisorPlanText = 'None yet.';
-    let supervisorPlanJson: any = null;
-    let planStale = true;
+    let supervisorNudge = '';
+    let runningSummary = '';
     let lastPlanAt = 0;
+    const sessionStartedAt = new Date();
+
+    // Cumulative session data for summary on disconnect
+    const sessionStats = {
+      totalSrsUpdates: 0,
+      allErrors: [] as Array<{ lemma: string; rule?: string }>,
+      allHints: [] as string[],
+    };
 
     // Signals accumulate between supervisor refreshes.
     const pendingSignals: string[] = [];
@@ -260,14 +323,20 @@ export default defineAgent({
       const entry = { at: Date.now(), event, detail };
       sessionTrace.push(entry);
       if (sessionTrace.length > 200) sessionTrace.shift();
-      const suffix = detail ? ` ${detail}` : '';
-      console.log(`[Trace] ${event}${suffix}`);
       writeRuntimeStateSoon();
+      // emitEvent handles both console.log and JSONL write
+      emitEvent(event as any, { detail: detail || '' });
     };
 
+    const MAX_SUBAGENT_PREVIEW = 500;
     const addSubagentChat = (role: string, prompt: string, response: string) => {
-      subagentChats.push({ role, timestamp: Date.now(), prompt, response });
-      if (subagentChats.length > 50) subagentChats.shift();
+      subagentChats.push({
+        role,
+        timestamp: Date.now(),
+        prompt: prompt.substring(0, MAX_SUBAGENT_PREVIEW),
+        response: response.substring(0, MAX_SUBAGENT_PREVIEW),
+      });
+      if (subagentChats.length > 20) subagentChats.shift();
     };
 
     const runtimeStatePath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'runtime_state.json');
@@ -281,9 +350,8 @@ export default defineAgent({
             userId,
             targetLang,
             lastPlanAt,
-            planStale,
             pendingSignals,
-            supervisorPlan: supervisorPlanJson,
+            supervisorNudge,
             lastProcessorRun,
             lastPlannerRun,
             subagentChats,
@@ -300,37 +368,37 @@ export default defineAgent({
     };
 
     const buildDynamicInstructions = () => {
-      const last = lastPlanAt ? new Date(lastPlanAt).toISOString() : 'never';
       const errorContext = lastProcessorRun?.structuredErrors
         ?.map((e: any) => `${e.lemma}: ${e.grammarRule?.rule || 'error'}`)
         .join('; ') || 'None';
 
       const hintContext = lastProcessorRun?.grammarHints?.join(' ') || 'None';
 
-      return `${baseInstructions}
+      // Rebuild base instructions with current errors/hints (fills placeholders)
+      const updatedBase = buildInstructions({
+        targetLanguage: langConfig.name,
+        nativeName: langConfig.nativeName,
+        nativeLanguage: usersNativeLanguage,
+        targetRatio: langConfig.pedagogy.targetLanguageRatio,
+        userLevel: user.proficiencyLevel || 'beginner',
+        persona: langConfig.persona,
+        initialContext,
+        mode: 'voice',
+        recentErrors: errorContext,
+        grammarHints: hintContext,
+        goalUpdate: supervisorNudge || 'Get them talking. Find out what they know, then build from there.',
+      });
 
-# Supervisor (DO NOT ROLEPLAY THIS SECTION)
-PLAN_STALE: ${planStale}
-LAST_PLAN_AT: ${last}
+      return `${updatedBase}
 
-CURRENT_TEACHING_PLAN:
-${supervisorPlanText}
-
-RECENT_ERRORS: ${errorContext}
-GRAMMAR_HINTS: ${hintContext}
-
-Rules:
-- You are the conversation tutor (you speak to the user).
-- The Supervisor updates CURRENT_TEACHING_PLAN automatically (timer + signals). You do not need to call tools.
-- Follow CURRENT_TEACHING_PLAN closely, but keep the conversation natural.
-- Use GRAMMAR_HINTS to correct the underlying pattern, not just the individual word.
-- If the user explicitly requests a different learning style, adapt immediately and the Supervisor will update the plan.
-`;
+You have tools to look up words and check the learner's progress. Use them when you need to — not every turn.
+Correct the underlying pattern, not just the individual word.`;
     };
 
     // === CREATE AGENT ===
     const agent = new voice.Agent({
       instructions: buildDynamicInstructions(),
+      tools: dbTools as any,
     });
 
     // === CREATE SERVICES (LOCAL, CLOUD, OR GEMINI) ===
@@ -349,6 +417,42 @@ Rules:
     const ttsService = isGemini ? undefined : await serviceFactory.createTTS();
 
     console.log(`[Tutor-ED] Service mode: ${mode}`);
+
+    // === WARM UP LOCAL LLM ===
+    // llama-swap unloads models after idle TTL; first request after load takes 30s+.
+    // Fire a tiny request to wake the model and populate the KV cache before the user speaks.
+    if (!isGemini && (llmService as any).model) {
+      const warmUrl = process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1';
+      const warmModel = (llmService as any).model;
+      console.log(`[Warmup] Warming local LLM: ${warmModel}`);
+      fetch(`${warmUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: warmModel,
+          messages: [{ role: 'user', content: 'ready' }],
+          max_tokens: 1,
+        }),
+      }).then(() => console.log(`[Warmup] Local LLM ready`))
+        .catch((e: any) => console.log(`[Warmup] Failed (non-fatal): ${e.message}`));
+    }
+    // Also warm the supervisor/processor model (think variant) in parallel
+    {
+      const supModel = process.env.SUPERVISOR_LLM_MODEL || process.env.LOCAL_LLM_MODEL;
+      const supUrl = process.env.SUPERVISOR_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1';
+      if (supModel && supModel !== ((llmService as any).model)) {
+        fetch(`${supUrl}/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: supModel,
+            messages: [{ role: 'user', content: 'ready' }],
+            max_tokens: 1,
+          }),
+        }).then(() => console.log(`[Warmup] Supervisor model ready`))
+          .catch(() => {});
+      }
+    }
     trace(
       'services.created',
       `mode=${mode} stt=${sttService?.constructor?.name || 'none'} llm=${llmService?.constructor?.name || 'none'} tts=${ttsService?.constructor?.name || 'none'}`,
@@ -368,6 +472,8 @@ Rules:
     const sessionConfig: any = {
       agent,
       llm: llmService,
+      userData: { userId },
+      userAwayTimeout: 120, // 2 min — default 15s is too aggressive for language tutoring
     };
 
     // Only add VAD/STT/TTS for non-RealtimeModel modes
@@ -378,11 +484,6 @@ Rules:
     }
 
     const session = new voice.AgentSession(sessionConfig);
-
-    // === DIAGNOSTIC: Check RealtimeModel state ===
-    console.log(`[DIAG] session.llm type: ${sessionConfig.llm?.constructor?.name}`);
-    console.log(`[DIAG] session.llm capabilities: ${JSON.stringify((sessionConfig.llm as any)?.capabilities)}`);
-    console.log(`[DIAG] isGemini=${isGemini}, llmService type=${llmService?.constructor?.name}`);
 
     // === CONVERSATION TRACKING ===
     const history = new ConversationHistory();
@@ -448,6 +549,28 @@ Rules:
 
     // === SUPERVISOR (background planner) ===
 
+    // Cache DB context between planner cycles — SRS state doesn't shift much in 30s.
+    // Refresh on session start and after processor runs (when SRS actually updates).
+    let cachedDbContext = '';
+    let cachedNotes = '';
+    let cachedSessions = '';
+    let dbContextAt = 0;
+
+    const refreshDbContext = async () => {
+      const [dbContext, notes, sessions] = await Promise.all([
+        ContextManager.getInitialContext(userId),
+        ContextManager.getNotesContext(userId),
+        ContextManager.getSummariesContext(userId),
+      ]);
+      cachedDbContext = dbContext;
+      cachedNotes = notes;
+      cachedSessions = sessions;
+      dbContextAt = Date.now();
+    };
+
+    // Warm the cache at session start
+    refreshDbContext().catch(() => {});
+
     const updatePlanNow = async (reason: string) => {
       try {
       const now = Date.now();
@@ -458,13 +581,31 @@ Rules:
         return;
       }
 
+      // Refresh DB cache if stale (older than 60s) or on session start
+      if (!cachedDbContext || reason === 'session_start' || now - dbContextAt > 60_000) {
+        await refreshDbContext();
+      }
+
       const recentHistory = history.getContext();
-      const dbContext = await ContextManager.getInitialContext(userId);
+      const dbContext = cachedDbContext;
+
+      // Skip LLM call on session_start if there's no vocab to plan from.
+      if (reason === 'session_start' && !dbContext.trim()) {
+        supervisorNudge = 'Start simple. Find out what they know, then build from there.';
+        lastPlanAt = now;
+        trace('planner.update.skipped', 'reason=no_vocab');
+        await refreshInstructions();
+        return;
+      }
+
       const goalNote = await ContextManager.updateGoals(userId,
         lastProcessorRun?.structuredErrors
           ? { errors: lastProcessorRun.structuredErrors, grammarHints: lastProcessorRun.grammarHints || [] }
           : undefined
       );
+
+      const notes = cachedNotes;
+      const recentSessions = cachedSessions;
 
       // Use Step 3.5 Flash (via OpenRouter) by default for deeper planning.
       const plannerUrl = process.env.SUPERVISOR_PLANNER_LLM_URL || process.env.SUPERVISOR_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1';
@@ -477,16 +618,19 @@ Rules:
         dbContext,
         goalNote,
         recentHistory,
-        previousPlan: supervisorPlanJson ? { ...supervisorPlanJson, _updatedAt: lastPlanAt } : null,
+        previousNudge: supervisorNudge || null,
+        runningSummary,
         reason,
         signals: pendingSignals,
+        notes,
+        recentSessions,
       });
 
       const resp = await fetch(`${plannerUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${plannerKey}`,
+          ...(plannerKey ? { Authorization: `Bearer ${plannerKey}` } : {}),
         },
         body: JSON.stringify({
           model: plannerModel,
@@ -495,33 +639,86 @@ Rules:
             { role: 'user', content: userPrompt },
           ],
           temperature: 0.2,
-          max_tokens: 2048,
+          max_tokens: 4096,
         }),
       });
 
       const data = (await resp.json()) as any;
       const msg = data.choices?.[0]?.message;
-      const content = msg?.content || msg?.reasoning_content || '';
-      let jsonText = String(content).trim();
-      const block = jsonText.match(/```(?:json)?\s*([\s\S]*?)```/);
-      if (block?.[1]) jsonText = block[1].trim();
+      // Think models: content may be empty if reasoning consumed the budget.
+      // Fall back to reasoning_content, or extract JSON from it.
+      let content = msg?.content || '';
 
-      let parsed: any;
-      try {
-        // Clean common LLM JSON issues before parsing
-        const cleaned = jsonText
-          .replace(/,(\s*[}\]])/g, '$1')         // Trailing commas
-          .replace(/([{,]\s*)(\w+):/g, '$1"$2":') // Unquoted keys
-          .replace(/\\\n/g, '\\n');               // Escaped newlines
-        parsed = JSON.parse(cleaned);
-      } catch (parseErr) {
-        console.warn(`[Planner] JSON parse failed: ${String(parseErr).substring(0, 80)}`);
-        console.warn(`[Planner] Raw: ${jsonText.substring(0, 200)}`);
+      if (!content && msg?.reasoning_content) {
+        content = String(msg.reasoning_content).trim();
+      }
+
+      if (!content) {
+        console.warn('[Planner] Empty response — skipping');
         return;
       }
 
-      supervisorPlanJson = parsed;
-      supervisorPlanText = JSON.stringify(parsed, null, 2);
+      // Parse structured output from the planner — strict line-by-line:
+      // NUDGE: <text>        — the teaching nudge (required)
+      // SUMMARY: <text>      — updated running summary (required)
+      // NOTE[category]: <text> — optional durable learner insight
+      //
+      // Multi-line values: if NUDGE or SUMMARY needs to span multiple lines,
+      // subsequent lines must be indented. Blank lines reset to new field.
+      // Only parse NOTE from the actual content, not reasoning_content.
+      const noteContent = msg?.content || '';
+      let parsedNudge = '';
+      let parsedSummary = '';
+      const noteRegex = /^NOTE\[([a-z]+)\]:\s*(.+)$/;
+
+      if (noteContent) {
+        for (const line of noteContent.split('\n')) {
+          const m = line.match(noteRegex);
+          if (m) {
+            const [, category, noteText] = m;
+            await ContextManager.writeNote(userId, category, noteText, 'observed');
+            trace('planner.note.written', `${category}: ${noteText.substring(0, 60)}`);
+          }
+        }
+      }
+
+      // Extract NUDGE and SUMMARY — collect lines until next structured header or blank line
+      const lines = content.split('\n');
+      let currentField: 'nudge' | 'summary' | 'other' | null = null;
+      const nudgeLines: string[] = [];
+      const summaryLines: string[] = [];
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('NUDGE:')) {
+          currentField = 'nudge';
+          nudgeLines.push(trimmed.slice(6).trim());
+          continue;
+        }
+        if (trimmed.startsWith('SUMMARY:')) {
+          currentField = 'summary';
+          summaryLines.push(trimmed.slice(8).trim());
+          continue;
+        }
+        if (noteRegex.test(trimmed)) {
+          currentField = 'other'; // NOTE lines are parsed above
+          continue;
+        }
+        // Continuation line (indented or mid-paragraph under current field)
+        if (currentField === 'nudge' && trimmed) {
+          nudgeLines.push(trimmed);
+        } else if (currentField === 'summary' && trimmed) {
+          summaryLines.push(trimmed);
+        } else if (!trimmed) {
+          currentField = null; // blank line resets
+        }
+      }
+
+      parsedNudge = nudgeLines.join(' ').trim();
+      parsedSummary = summaryLines.join(' ').trim();
+
+      supervisorNudge = parsedNudge || supervisorNudge || 'Continue the conversation naturally.';
+      runningSummary = parsedSummary || runningSummary;
 
       lastPlannerRun = {
         at: now,
@@ -532,9 +729,15 @@ Rules:
       addSubagentChat('Planner (Supervisor)', systemPrompt + '\n\n' + userPrompt, content);
 
       lastPlanAt = now;
-      planStale = false;
       pendingSignals.length = 0;
       writeRuntimeStateSoon();
+
+      // Emit structured planner events for dashboard
+      emitEvent('planner.nudge', { reason, nudge: supervisorNudge });
+      emitEvent('planner.raw', {
+        prompt: (systemPrompt + '\n\n' + userPrompt).substring(0, 4000),
+        response: content.substring(0, 4000),
+      });
 
       await refreshInstructions();
       trace('planner.update.done', `reason=${reason}`);
@@ -585,6 +788,7 @@ Rules:
 
       console.log(`[User] ${transcription}`);
       history.addUserTurn(transcription);
+      emitEvent('user.transcript', { text: transcription, isFinal: true });
 
       totalUserTurns++;
       pendingUserTurns.push(transcription);
@@ -613,8 +817,34 @@ Rules:
           rawPrompt: result.rawPrompt,
           rawResponse: result.rawResponse,
         };
+
+        // Accumulate for session summary
+        sessionStats.totalSrsUpdates += result.srsUpdates?.length || 0;
+        if (result.structuredErrors) {
+          for (const e of result.structuredErrors) {
+            sessionStats.allErrors.push({ lemma: e.lemma, rule: e.grammarRule?.rule });
+          }
+        }
+        if (result.grammarHints) {
+          sessionStats.allHints.push(...result.grammarHints);
+        }
         addSubagentChat('Processor', result.rawPrompt || 'No prompt', result.rawResponse || 'No response');
         writeRuntimeStateSoon();
+
+        // Emit structured processor events for dashboard
+        emitEvent('processor.analysis', {
+          utterance: batchUtterance,
+          lexemeCount: result.analysis?.lexemes?.length || 0,
+          srsUpdateCount: result.srsUpdates?.length || 0,
+          errors: result.errors,
+          structuredErrors: result.structuredErrors || [],
+          grammarHints: result.grammarHints || [],
+        });
+        emitEvent('processor.raw', {
+          prompt: (result.rawPrompt || '').substring(0, 4000),
+          response: (result.rawResponse || '').substring(0, 4000),
+        });
+
         if (result.errors.length) {
           console.warn('[Processor] Errors:', result.errors);
         }
@@ -627,8 +857,11 @@ Rules:
           pendingSignals.push('srs_updated');
         }
 
-        // Mark stale so supervisor considers a refresh on the next timer tick.
-        planStale = true;
+        // Mark so supervisor considers a refresh on the next timer tick.
+        // Also refresh DB cache since SRS state has changed.
+        if ((result.srsUpdates?.length || 0) > 0) {
+          refreshDbContext();
+        }
         writeRuntimeStateSoon();
         refreshInstructions().catch(() => {});
       }).catch((err) => {
@@ -637,8 +870,8 @@ Rules:
       });
     });
 
-    // Cleanup timer
-    ctx.room.on('disconnected', () => {
+    // Cleanup timer on disconnect
+    ctx.room.once('disconnected', () => {
       clearInterval(planTimer);
     });
 
@@ -648,63 +881,38 @@ Rules:
     });
 
     session.on(voice.AgentSessionEventTypes.SpeechCreated, (ev: any) => {
-      console.log(`[Session] SpeechCreated (source: ${ev.source})`);
       trace('session.speech_created', `source=${ev.source}`);
     });
 
     session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev: any) => {
-      console.log(`[Session] AgentStateChanged: ${ev.newState}`);
       trace('session.agent_state_changed', String(ev.newState));
+      emitEvent('agent.state_change', { from: ev.oldState || 'unknown', to: String(ev.newState) });
+    });
+
+    // Capture agent replies (LLM responses) for live chat view
+    session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev: any) => {
+      const item = ev.item;
+      if (item?.role === 'assistant' && item?.textContent) {
+        emitEvent('agent.reply', { text: item.textContent, source: item.source || 'unknown' });
+        history.addAssistantTurn(item.textContent);
+      }
     });
 
     session.on(voice.AgentSessionEventTypes.MetricsCollected, (ev: any) => {
-      console.log(`[Session] MetricsCollected:`, JSON.stringify(ev.metrics || ev).substring(0, 300));
-      trace('session.metrics_collected');
+      trace('session.metrics_collected', JSON.stringify(ev.metrics || ev).substring(0, 200));
     });
 
     session.on(voice.AgentSessionEventTypes.FunctionToolsExecuted, (ev: any) => {
-      console.log(`[Session] FunctionToolsExecuted:`, ev);
       trace('session.function_tools_executed');
     });
 
     // Additional debug events for RealtimeModel
-    session.on('UserInputTranscribed' as any, (ev: any) => {
-      console.log(`[Session] UserInputTranscribed:`, ev.transcript, `final=${ev.isFinal}`);
-    });
-
     if (isGemini) {
-      console.log('[Tutor-ED] Gemini mode: enabling additional event logging');
       session.on('UserStateChanged' as any, (ev: any) => {
-        console.log(`[Session] UserStateChanged: ${ev.newState}`);
+        trace('session.user_state_changed', String(ev.newState));
       });
     }
 
-    // === DIAGNOSTIC: Deep trace of _startImpl ===
-    const sessProto = Object.getPrototypeOf(session);
-    const origStartImpl = sessProto._startImpl;
-    console.log(`[DIAG] sessProto constructor: ${sessProto.constructor.name}`);
-    console.log(`[DIAG] sessProto._startImpl source: ${origStartImpl.toString().slice(0, 120)}...`);
-    sessProto._startImpl = async function(this: any, opts: any) {
-      console.log(`[DIAG] _startImpl called, this===session: ${this === session}, room=${!!opts.room}`);
-      console.log(`[DIAG] Pre-startImpl props: roomIO=${!!this.roomIO} _roomIO=${!!this._roomIO} sessionHost=${!!this.sessionHost}`);
-      try {
-        await origStartImpl.call(this, opts);
-      } catch (e) {
-        console.error(`[DIAG] _startImpl threw:`, e);
-        throw e;
-      }
-      console.log(`[DIAG] _startImpl completed, roomIO=${!!this.roomIO} _roomIO=${!!this._roomIO} sessionHost=${!!this.sessionHost}`);
-    };
-
-    // Also patch registerByteStreamHandler
-    const origRegister = ctx.room.registerByteStreamHandler.bind(ctx.room);
-    (ctx.room as any).registerByteStreamHandler = (topic: string, cb: any) => {
-      console.log(`[DIAG] registerByteStreamHandler called for topic: ${topic}`);
-      origRegister(topic, cb);
-      console.log(`[DIAG] registerByteStreamHandler done for topic: ${topic}`);
-    };
-
-    console.log(`[DIAG] About to call session.start(), room connected: ${ctx.room.isConnected}`);
     trace('session.start.begin', `roomConnected=${ctx.room.isConnected}`);
 
     // === START SESSION ===
@@ -716,20 +924,9 @@ Rules:
       }
     });
 
-    console.log(`[DIAG] session.start() completed, _roomIO=${!!(session as any)._roomIO}, sessionHost=${!!(session as any).sessionHost}`);
-    trace(
-      'session.start.done',
-      `_roomIO=${!!(session as any)._roomIO} sessionHost=${!!(session as any).sessionHost}`,
-    );
-    console.log(`[DIAG] session.activity: ${!!(session as any).activity}, type=${(session as any).activity?.constructor?.name}`);
+    trace('session.start.done');
     const activity = (session as any).activity;
     if (activity) {
-      console.log(`[DIAG] activity.llm type: ${activity.llm?.constructor?.name}, llm=${activity.llm?.constructor?.name}`);
-      console.log(`[DIAG] activity.realtimeSession: ${!!activity.realtimeSession}`);
-      console.log(`[DIAG] activity.llm instanceof RealtimeModel: ${activity.llm?.constructor?.name === 'RealtimeModel'}`);
-      // Check if the RealtimeModel is from the same module
-      const modelPkg = activity.llm?.constructor?.__module || 'unknown';
-      console.log(`[DIAG] activity.llm module: ${modelPkg}`);
       trace(
         'session.activity.ready',
         `stt=${activity.stt?.constructor?.name || 'none'} tts=${activity.tts?.constructor?.name || 'none'} llm=${activity.llm?.constructor?.name || 'none'}`,
@@ -825,7 +1022,6 @@ Rules:
         }
       }
     } else {
-      console.log(`[DIAG] NO activity on session`);
       trace('session.activity.missing');
     }
 
@@ -838,9 +1034,11 @@ Rules:
     }
     // For gemini, let AgentSession handle the initial response naturally
 
-    // Cleanup on disconnect
+    // Persist session summary on disconnect — uses planner's running summary, no extra LLM call
     ctx.room.on('disconnected', () => {
       console.log('[Tutor-ED] Session ended');
+      clearInterval(planTimer);
+      persistSessionSummary(userId, sessionStartedAt, runningSummary, sessionStats);
     });
   },
 });
