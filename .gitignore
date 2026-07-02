@@ -207,6 +207,18 @@ agents/src/verification/test_*.ts
 !CONTRIBUTING.md
 !.CODE_OF_CONDUCT.md
 
+# LingLang project docs — these must survive in git history, unlike the
+# vendored-SDK md files above. (2026-07-02: found these had never been
+# tracked because of the blanket *.md rule above — PROJECT_STATE.md from
+# the prior session had zero git history as a result.)
+!/PROJECT_STATE.md
+!/ARCHITECTURE.md
+!/BACKLOG.md
+!/MEMORY.md
+!/IMPLEMENTATION_STATUS.md
+!/AGENTS.md
+!/docs/**/*.md
+
 # OpenTelemetry trace test output
 .traces/
 *.traces.json
