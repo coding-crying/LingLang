@@ -59,10 +59,12 @@ returns everything prompt builders need in one typed result:
 
 - due words + new-word candidates (live, not session-start)
 - frontier inputs: `dueBacklog`, `recentSuccess` (see §2)
-- resolved style (see §4)
-- persona row
-- latest pronunciation notes from the most recent processor run (§6)
-- curriculum spine position (§9)
+- persona row, including the planner-maintained style profile (see §4)
+- next uncovered curriculum item at the user's position (§9)
+
+(Per-turn processor output — errors, hints, pronunciation — is *not* in
+this view; it rides on the session-local `lastProcessorRun` result, the
+one legitimate piece of session state, same as today.)
 
 One short TTL (~10 s) inside this function only, purely to bound query
 cost against per-turn rebuild frequency. All six ad-hoc caches in
@@ -111,21 +113,36 @@ conversation prompt core (§7).
   - LiveKit disconnect countdown / participant-leaving event
 - The `turnCount > 20` rule is deleted. Long sessions stay in `flow`.
 
-### 4. Style arbitration → one resolver, persona is the ceiling
+### 4. Adaptive style → one free-text profile, one writer
 
-New `resolveStyle(personaRow, styleEma)` in `src/lib/persona.ts` — the
-single place tone/register/roast are decided:
+The enum taxonomy (humor/pacing/register/profanity/preamble/bsCallouts
+EMAs, roast tolerance, register lines) is deleted, not repaired. Asking a
+model to emit six style enums on every turn is the "infer many things at
+once" failure mode; the roast/register/pushback prompt lines were its
+downstream symptom.
 
-- Persona `tone` sets the **maximum** roast level; the `humor` EMA
-  modulates within that ceiling. `computeRoastLine` takes the resolved
-  value (its currently-ignored `basePersona` param goes away).
-- `bsCallouts` → renamed `pushback`, rewired to an epistemic prompt line:
-  "they check your claims — admit uncertainty rather than bluff." It no
-  longer influences roast.
-- Processor `styleSignals` keys aligned exactly to what is consumed:
-  `humor`, `pacing`, `register` (enum now includes `profane` — the dead
-  branch becomes reachable), `pushback`. `profanity` and `preamble` are
-  removed from the interface (captured-never-consumed).
+**Division of labor:**
+
+- **Code measures what code can measure.** Turn lengths, pacing, error
+  density — deterministic, free, already computed. These keep driving the
+  mechanical prompt lines (length, error treatment).
+- **The LLM infers style only as free text, in one place.** The planner —
+  the only agent with whole-conversation context and time to reflect —
+  maintains a 1–2 sentence **style profile** through its existing
+  `PERSONA:` mechanism (`extraInstructions` / `personaOverride`). E.g.
+  "Terse and sarcastic; likes being teased back; skip pleasantries; they
+  fact-check you — admit uncertainty rather than bluff." Evidence-gated
+  as today, editable by the user from the dashboard.
+
+The profile renders inside the persona block in the stable prompt core.
+"Fun and engaging" is a standing line of the base persona — a floor, not
+a parameter. Persona-as-ceiling arbitration disappears as a problem:
+persona and style are now the same object with one writer.
+
+**Deletions:** `styleSignals` from the processor schema, `user_style` EMA
+writes, `roastTolerance`/`register` from `AdaptiveContext`,
+`computeRoastLine`, `computeRegisterLine`, `resolveStyle` (from the
+earlier draft of this design).
 
 ### 5. Planner prompt — teeth and lifecycle
 
@@ -139,6 +156,11 @@ single place tone/register/roast are decided:
   …" (replaces the rhetorical "did the agent follow this?"). The session
   expires a nudge after 8 turns so planner failures can't leave a stale
   angle pinned.
+- **Style duty:** the planner is the sole style writer (§4). Its prompt
+  gains one instruction: maintain the learner's style profile as 1–2
+  sentences via the existing `PERSONA:` line when the conversation gives
+  clear evidence — replacing the per-turn enum tagging the processor used
+  to do.
 - Cadence unchanged: 30 s tick gated on `pendingSignals`, immediate
   dispatch on triggers. That part of the architecture is sound.
 - Deletions: `buildPlannerMessages`, `AudioTurn` (dead since the
@@ -158,8 +180,8 @@ stop capturing it — but surfacing costs one line, so surface it.
 Same content, reordered for SGLang prefix caching:
 
 - **Core** (byte-stable across turns; changes only on persona patch or
-  level change): persona block, learner identity line, register/epistemic
-  lines, standing rules (tools note, "correct the pattern not the word",
+  level change): persona block (incl. style profile), learner identity
+  line, standing rules (tools note, "correct the pattern not the word",
   topic agency: "follow the learner's topic; the word lists tell you which
   vocabulary to reach for, not what to talk about").
 - **Tail** (rebuilt per turn): frontier directive + word lists, error
@@ -169,24 +191,104 @@ Same content, reordered for SGLang prefix caching:
 the guarantee that the core substring is byte-identical between calls
 unless its inputs changed. Latency win falls out of layout; no infra work.
 
-### 8. Processor → schema-constrained decoding
+**Prompt budget (hard rule):** the volatile tail carries at most ~8 short
+lines — one frontier directive, the word lists, one error-treatment line,
+one nudge, at most one "Teach next" item, one length line. Anything that
+wants a new tail line must replace an existing one or be rejected. A 12B
+model follows a handful of instructions well and a rulebook badly; every
+signal in this design earns one line or stays in the DB.
+
+### 8. Processor → the listening specialist (thinking allowed)
+
+The processor is the only agent that hears the user *and* is off the
+critical path — its output feeds the next turn's prompt, not the current
+reply, so it has seconds of slack per turn. That latency budget is spent
+on **native-audio depth, not output breadth**: the processor may run as a
+thinking model (bounded reasoning budget so results land within a turn),
+while its output schema stays lean and fully constrained.
+
+**What listening buys us (the same lean schema, better filled):**
+
+- **Recall confidence → real FSRS grades.** Audio distinguishes what text
+  can't: instant confident production vs. hesitation, self-correction,
+  stutters, false starts, long pauses before a word. Each lexeme gains a
+  `confidence: instant | hesitant | struggled` field; `voiceToGrade`
+  maps performance × confidence onto the full Again/Hard/Good/Easy scale
+  instead of the effectively binary grading text transcripts allow. This
+  directly improves the scheduler *and* the frontier budget's
+  `recentSuccess` signal — struggle shows up before errors do.
+- **Pronunciation**, as already specified (§6): per-lexeme stress flags +
+  one sentence-level note, surfaced to the conversation agent as one
+  prompt line.
+- **Struggle as a trigger:** sustained hesitation/disfluency across a
+  turn fires the existing `difficulty_adjustment` trigger — no new
+  machinery, just a better-informed sender.
+
+**What the processor stops doing:** style inference (`styleSignals`
+removed — see §4). One job: listen, tag, grade. Fewer simultaneous
+inferences, better ones.
+
+**Mechanics:**
 
 - SGLang `response_format`/JSON-schema constrained output derived from
-  `UtteranceAnalysis`.
+  `UtteranceAnalysis` (now with `confidence`, without `styleSignals`).
+- Runs async per user turn as today (`PROCESSOR_TURN_INTERVAL`); a turn
+  whose analysis arrives late simply lands in the following prompt build
+  — the loop already tolerates this.
 - Deletions: `cleanAndParseJSON` (all regex repair), the retry loop that
   re-sends an identical prompt, `buildSimplePrompt`, `isSmallModel`
   branch, `ANALYSIS_PROMPT_FULL` alias.
-- Every parse failure today silently drops FSRS grades; this makes the
-  grading pipeline parse-deterministic.
+- Every parse failure today silently drops FSRS grades; constrained
+  decoding makes the grading pipeline parse-deterministic.
 - `NUM` removed from `FUNCTION_WORD_POS` — numerals are core learnable
   vocabulary at pre-A1/A1 and are currently discarded.
+- Text-only fallback (no audio capability, or text-mode sessions):
+  `confidence` defaults to `instant`-neutral grading as today; the
+  feature degrades to current behavior, never blocks.
 
 ### 9. Curriculum spines — user-set, Pimsleur-seeded default
 
-A curriculum is an ordered word/phrase introduction sequence the frontier
-draws from. It controls *word selection only* — never conversation topic
-(§2 topic agency rule). Users choose their curriculum; the default one is
-seeded from Pimsleur structure.
+A curriculum is an ordered sequence of **typed teaching items**, not a
+word list. Textbooks and Pimsleur lessons teach concepts: phrase patterns
+with substitutable slots, grammar rules, script/alphabet, and vocabulary.
+The curriculum carries the *introduction order of concepts*; the FSRS
+word scheduler stays scoped to what it's good at — long-term retention of
+discrete recall items. It controls *material selection only* — never
+conversation topic (§2 topic agency rule). Users choose their curriculum;
+the default one is seeded from Pimsleur structure.
+
+**Item types:**
+
+- `lexeme` — word or fixed phrase. Enters `lexemes` and, once introduced,
+  the FSRS retention loop as today.
+- `pattern` — a productive frame with slots ("Eu quero ___", "___, por
+  favor"). This is Pimsleur's core move: teach the frame, then drill by
+  swapping known words into the slot. Stored as frame text only — the
+  `teachingHint` says how to drill it; no slot-category spec (the LLM
+  picks fitting known words itself).
+- `grammar` — a rule/concept, written to the existing `grammar_rules`
+  table (currently empty with no producer — this resolves `BACKLOG.md`
+  #8: curriculum ingestion becomes its populator).
+- `script` — alphabet/orthography/reading items, flagged
+  `voiceTeachable: false`. The voice tutor skips these; they surface as
+  dashboard exercises in the frontend pass.
+
+**Complexity rule — types route, they don't prompt.** Item types exist in
+the DB only so the system knows where things go (lexemes → FSRS, script →
+dashboard, everything else → conversation). The conversation prompt never
+sees the taxonomy: it gets at most **one** "Teach next:" line per turn,
+whose wording was authored once at ingestion time (`teachingHint`), not
+composed from per-type prompt logic at runtime. The LLM reads one
+instruction, not a rulebook.
+
+**Progression model:** one bit per item per user: covered or not.
+An item is marked covered when the processor observes the user use it
+successfully — or after it has been the teaching item for ~3 turns
+(don't pin the spine on perfection; the planner can steer back to shaky
+items later). Lexemes additionally enter FSRS: coverage is "did we teach it,"
+FSRS is "do they still know it." Revisiting shaky concepts is the
+planner's job (strategy), not a scheduler's — the processor's existing
+`grammarRule` error tags already give it the evidence.
 
 **Data model:**
 
@@ -195,27 +297,43 @@ seeded from Pimsleur structure.
   `ownerUserId` (null = shared/default curriculum).
 - `units`: gains `curriculumId`; one row per lesson/chapter/segment with a
   `sequence` number. (Table exists and is empty.)
-- `lexemes`: gains `unitId`-scoped `introOrder` and optional
-  `drillPattern` tag (`anticipation | backward_buildup | recall_prompt`).
+- `unit_items`: unitId, `itemType` (`lexeme | pattern | grammar |
+  script`), `introOrder`, `voiceTeachable`, payload reference (lexemeId /
+  grammarRuleId / inline frame text), and `teachingHint` — one authored
+  sentence on how to teach it (e.g. "Introduce 'Eu quero ___' and have
+  them swap in words they already know").
+- `user_item_coverage`: userId, unitItemId, coveredAt.
 - `user_curriculum`: userId, curriculumId, `position` (unit sequence
   reached), `isActive`. "I'm up to chapter 8 and want to keep going" is
-  just `position = 8` at enrollment time.
+  just `position = 8` at enrollment time. Items before `position` are
+  *implicitly* covered — no bulk coverage rows written; coverage rows
+  exist only for items actually taught. (The placement probe from the
+  onboarding plan can spot-check the claim.)
 
 **Ingestion — one pipeline, pluggable extractors (offline scripts now;
 upload UI belongs to the frontend pass):**
 
-1. Extractor produces raw text segments per unit:
+1. Extractor produces raw text segments per unit. **Phase 1: Pimsleur +
+   PDF only** — they prove the pipeline; media extractors follow once it
+   works:
    - Pimsleur transcript files → lessons (Will has the files)
    - PDF textbook → chapters (absorbs `BACKLOG.md` #6)
-   - YouTube video → caption track, chunked
-   - Movie → OpenSubtitles transcript, chunked by scene/time
-2. Common structuring step: local SGLang extracts introduced/salient
-   vocabulary per unit with order and (where the source shows it) drill
-   patterns → writes `units` + `lexemes`.
+   - Later: YouTube caption track / OpenSubtitles movie transcript,
+     chunked by time — same pipeline, new extractor only
+2. Common structuring step: local SGLang extracts **typed items** per
+   unit — vocabulary, phrase patterns, grammar rules, script items — each
+   with introduction order and a one-sentence `teachingHint` capturing how
+   the source teaches it (this is where Pimsleur's drill mechanics live:
+   the hint says "build it back from the last syllable" or "drill by
+   swapping the slot", so no drill logic exists at runtime) → writes
+   `units` + `unit_items` (+ `lexemes`, `grammar_rules`). Pimsleur
+   transcripts are pattern-rich; textbooks are grammar/script-rich; the
+   extractor emits whatever the source teaches.
 3. For media sources (youtube/movie) the goal is "understand this
-   content": vocabulary is ordered by frequency-in-source × general
-   frequency, and unit `sequence` follows the content's own timeline so
-   position = "how far into the movie/series you can follow."
+   content": items are mostly lexemes ordered by frequency-in-source ×
+   general frequency (plus recurring constructions as patterns), and unit
+   `sequence` follows the content's own timeline so position = "how far
+   into the movie/series you can follow."
 
 **Legal boundary (all sources):** store only lexeme/phrase-level structure
 — introduction order, drill mechanics, frequency, unit boundaries. Never
@@ -224,16 +342,18 @@ generates its own sentences around the spine.
 
 **Runtime touchpoints (two, both small):**
 
-1. New-word selection: when the frontier directive is `expand` or
-   `balance`, candidates come in spine order from the user's *active*
-   curriculum at their position. No active curriculum, spine exhausted, or
-   learner past ~A2 on the default spine → fall back to current
-   frequency/semantic selection. Zero behavior change where there's no
-   data.
-2. Prompt moves: `expand`/`balance` directives gain Pimsleur mechanics in
-   the tutor's own words — backward buildup for new multi-syllable
-   phrases, anticipation prompts ("how would you say…?") for recent
-   introductions.
+1. Next-item selection: when the frontier directive is `expand` or
+   `balance`, the new material is the next uncovered *voice-teachable*
+   item(s) from the user's active curriculum at their position — which may
+   be a pattern or grammar concept, not just words. The frontier budget
+   governs the *pace* of introduction regardless of item type. No active
+   curriculum, spine exhausted, or learner past ~A2 on the default spine →
+   fall back to current frequency/semantic word selection. Zero behavior
+   change where there's no data.
+2. Prompt: one line in the volatile tail — `Teach next: <item> —
+   <teachingHint>` — and nothing else. No per-type prompt logic; the hint
+   was authored at ingestion. When there's no uncovered item in budget,
+   the line is absent.
 
 **Growth loop (deferred to frontend pass):** curriculum picker, upload UI,
 and "Lesson N of M" / "you can now follow 60% of this movie" progress on
@@ -246,6 +366,54 @@ shape as today's inline block). Structured by construction; no TTS leak
 surface; the inline ```` ```onboarding_verdict ```` parsing is deleted.
 The processor's `onboarding_signal` trigger remains as supplementary
 field-filling only — the tool call is the sole writer of the level anchor.
+
+### 11. Ensemble readiness — roles can shrink independently, later
+
+**Today: the 12B fills every role slot**, and vLLM concurrency handles the
+three roles hitting it — no change to the running setup. This section
+exists so that the *future* step down (e4b for roles that qualify; e2b for
+the edge product in `linglangedge/`) is a config change plus an eval run,
+not a rearchitecture. No new runtime logic — config, capability flags,
+and evals only.
+
+**Role→model contract.** One config object replaces the env-var fallback
+chains (`LOCAL_LLM_MODEL` / `SUPERVISOR_LLM_MODEL` /
+`SUPERVISOR_PLANNER_LLM_MODEL` × url/model/key):
+
+```
+roles:
+  conversation: { model, requires: [audio, streaming] }
+  processor:    { model, requires: [json_schema], wants: [audio, thinking] }
+  planner:      { model, requires: [] }          # text-only by design
+  ingestion:    { model, requires: [long_context] }  # offline; use the biggest available
+```
+
+**Degradation rules, per role.** If the processor's model lacks audio, it
+runs transcript-only and the pronunciation feature (§6) disables cleanly —
+nothing else changes. The planner is text-only already. Only the
+conversation role hard-requires audio; it keeps the big slot.
+
+**Shrink order (when the time comes):** processor first — a
+schema-constrained tagging task, e4b-class, and it runs every turn;
+planner second — reads pre-aggregated text, emits three lines;
+conversation last — audio + fluent generation keeps the big slot longest.
+The edge product (e2b) reuses the same role contract with tighter
+capability flags.
+
+**Per-role eval fixtures — the qualification gate.** A model may take a
+role only if it passes that role's fixture set:
+
+- processor: ~50 utterances (incl. mixed-language, the two few-shot
+  cases, trigger cases) with gold lexeme tags; score = tag accuracy +
+  trigger precision/recall.
+- planner: a handful of DB-state snapshots with acceptance criteria per
+  nudge (mentions the right focus, ≤3 sentences, no data-regurgitation).
+- conversation: harder to score mechanically; smoke suite = level-ratio
+  adherence and length-line compliance over scripted exchanges.
+
+Fixtures live in-repo (`agents/eval/` — the existing `eval-*.json`
+artifacts show precedent) and run as a script against any candidate
+endpoint. "Can a 4B do this role?" becomes a command, not a vibe.
 
 ## Out of scope / explicitly deferred
 
@@ -262,25 +430,32 @@ field-filling only — the tool call is the sole writer of the level anchor.
 
 Removals exceed additions: six ad-hoc caches, the JSON repair kit, the
 dead planner audio path, dead `PromptContext` fields
-(`initialContext`, `mode`, `styleDirective`, `nativeName`), dead style
-keys, the inline verdict parser. Additions: `readLearnerView`,
-`resolveStyle`, the frontier budget function, the curriculum data model
-(two new tables, three new columns), one ingestion pipeline with pluggable
-extractors, and the `submit_onboarding_verdict` tool.
+(`initialContext`, `mode`, `styleDirective`, `nativeName`), the entire
+style-enum taxonomy (`styleSignals`, `user_style` EMA writes,
+`computeRoastLine`/`computeRegisterLine`), the inline verdict parser. Additions: `readLearnerView`,
+the frontier budget function, the curriculum data model
+(four new tables: `curricula`, `unit_items`, `user_curriculum`,
+`user_item_coverage`), one ingestion pipeline with pluggable
+extractors, the `submit_onboarding_verdict` tool, the role→model config
+(replacing three env-var fallback chains), and per-role eval fixtures.
 
 ## Testing
 
-- Unit: frontier budget function (threshold table), `resolveStyle`
-  (persona ceiling vs EMA cases), phase transitions (goodbye trigger,
-  no wrapup at turn 21+), nudge TTL expiry.
+- Unit: frontier budget function (threshold table), confidence→grade
+  mapping in `voiceToGrade` (instant/hesitant/struggled × performance),
+  phase transitions (goodbye trigger, no wrapup at turn 21+), nudge TTL
+  expiry.
 - Prompt snapshot tests: core byte-stability across consecutive builds
   with unchanged persona/level; tail reflects live DB changes.
 - Processor: constrained-decoding round-trip against the live SGLang
   endpoint with the two existing few-shot examples as fixtures.
 - Ingestion: run the Pimsleur extractor on one language and the PDF
   extractor on one textbook; assert unit count, monotonic `introOrder`,
-  and zero stored sentence text longer than a single lexeme/phrase entry.
+  typed items present (patterns with frame text + hint, grammar rows
+  landing in `grammar_rules`), and zero stored sentence text beyond a
+  single lexeme/phrase/frame entry.
 - Curriculum runtime: enroll a user at `position = 8` of a textbook
-  curriculum and assert new-word candidates come from chapter 9 onward.
+  curriculum and assert next-item candidates come from chapter 9 onward
+  and skip `voiceTeachable: false` items.
 - Live verification (per `BACKLOG.md` #1–2 discipline): one real voice
   session confirming mid-session frontier movement and no wrapup lock.
