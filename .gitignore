@@ -215,6 +215,7 @@ agents/src/verification/test_*.ts
 !/ARCHITECTURE.md
 !/BACKLOG.md
 !/MEMORY.md
+!/.md old/**
 !/IMPLEMENTATION_STATUS.md
 !/AGENTS.md
 !/docs/**/*.md
