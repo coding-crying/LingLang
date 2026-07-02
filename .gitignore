@@ -218,6 +218,11 @@ agents/src/verification/test_*.ts
 !/.md old/**
 !/IMPLEMENTATION_STATUS.md
 !/AGENTS.md
+# Re-include the project /docs tree (the bare `docs` rule above is for the
+# vendored SDK's typedoc output; git won't descend into an ignored dir, so
+# the directories themselves must be un-ignored before files inside can be)
+!/docs/
+!/docs/**/
 !/docs/**/*.md
 
 # OpenTelemetry trace test output
