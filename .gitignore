@@ -1,3 +1,9 @@
+# LingLang-specific: dev/eval run artifacts, backups, PII, test tool output
+agents/eval-*.json
+agents/dist-*-backup.tar.gz
+agents/data/
+.playwright-mcp/
+
 # Based on https://raw.githubusercontent.com/github/gitignore/main/Node.gitignore
 
 # Logs

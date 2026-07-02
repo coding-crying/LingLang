@@ -37,6 +37,17 @@ export class OmniVoiceTTS extends tts.TTS {
     this.#opts = { ...defaultOptions, ...opts };
   }
 
+  /** Update voice/language mid-session (e.g. after language switch). */
+  updateVoice(voice: string, language?: string): void {
+    this.#opts.voice = voice;
+    if (language) this.#opts.language = language;
+    log().info(`[OmniVoice] Voice updated: ${voice}, lang: ${language || this.#opts.language}`);
+  }
+
+  /** Get current voice — used by the session to check if a swap is needed. */
+  get voice(): string { return this.#opts.voice || 'auto'; }
+  get language(): string | undefined { return this.#opts.language; }
+
   synthesize(
     text: string,
     connOptions?: APIConnectOptions,
@@ -77,7 +88,9 @@ class OmniVoiceChunkedStream extends tts.ChunkedStream {
     let cancelled = false;
 
     try {
-      this.#logger.info(`[OmniVoice] Synthesizing: "${this.#text.substring(0, 50)}..."`);
+      this.#logger.info(
+        `[OmniVoice] Synthesizing: voice="${this.#opts.voice}" lang="${this.#opts.language ?? '-'}" text="${this.#text.substring(0, 50)}..."`,
+      );
 
       const body: Record<string, unknown> = {
         model: 'omnivoice',

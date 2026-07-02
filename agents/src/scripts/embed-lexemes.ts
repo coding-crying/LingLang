@@ -1,44 +1,26 @@
 /**
- * One-shot script: Embed all lexemes using BGE-M3 via llama-swap on localhost:8091.
+ * Embed all lexemes that don't have vectors yet.
+ *
+ * Uses the shared embedding utility (lib/embedding.ts) which supports
+ * both local (BGE-M3 via llama-swap) and cloud endpoints.
  *
  * Usage:
- *   DATABASE_URL="postgresql://linglang:linglang_dev@localhost:5433/linglang" \
- *   npx tsx src/scripts/embed-lexemes.ts
+ *   EMBED_URL=http://localhost:8091/v1/embeddings npx tsx src/scripts/embed-lexemes.ts
  */
+
+import * as dotenv from 'dotenv';
+dotenv.config({ path: '.env.local' });
 
 import { db } from '../db/index.js';
 import * as schema from '../db/schema.js';
-import { isNull, sql as sqlExpr } from 'drizzle-orm';
+import { eq, isNull } from 'drizzle-orm';
+import { embedBatch, lexemeEmbedText } from '../lib/embedding.js';
 
-const EMBED_URL = 'http://localhost:8091/v1/embeddings';
-const EMBED_MODEL = 'bge-m3';
 const BATCH_SIZE = 50;
-
-async function embedTexts(texts: string[]): Promise<number[][]> {
-  const response = await fetch(EMBED_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: EMBED_MODEL,
-      input: texts,
-    }),
-  });
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Embedding API error ${response.status}: ${body}`);
-  }
-
-  const data = await response.json() as any;
-  // Sort by index to guarantee order matches input
-  const embeddings = data.data.sort((a: any, b: any) => a.index - b.index);
-  return embeddings.map((d: any) => d.embedding);
-}
 
 async function main() {
   console.log('[Embed] Fetching lexemes without embeddings...');
 
-  // Get all lexemes that don't have embeddings yet
   const lexemesWithoutEmbeddings = await db.select({
     id: schema.lexemes.id,
     lemma: schema.lexemes.lemma,
@@ -59,16 +41,18 @@ async function main() {
 
   for (let i = 0; i < lexemesWithoutEmbeddings.length; i += BATCH_SIZE) {
     const batch = lexemesWithoutEmbeddings.slice(i, i + BATCH_SIZE);
-    // Embed lemma + translation for richer semantic representation
-    const texts = batch.map(l => `${l.lemma} (${l.language}): ${l.translation}`);
+    const texts = batch.map(l => lexemeEmbedText(l.lemma, l.language, l.translation || l.lemma));
 
     try {
-      const embeddings = await embedTexts(texts);
+      const embeddings = await embedBatch(texts);
 
       for (let j = 0; j < batch.length; j++) {
-        await db.update(schema.lexemes)
-          .set({ embedding: embeddings[j] })
-          .where(sqlExpr`${schema.lexemes.id} = ${batch[j].id}`);
+        const emb = embeddings[j];
+        if (emb && emb.length > 0) {
+          await db.update(schema.lexemes)
+            .set({ embedding: emb })
+            .where(eq(schema.lexemes.id, batch[j].id));
+        }
       }
 
       processed += batch.length;

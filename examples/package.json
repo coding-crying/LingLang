@@ -23,7 +23,7 @@
     "zod": "^4.1.12"
   },
   "dependencies": {
-    "@livekit/agents": "workspace:*",
+    "@livekit/agents": "^1.2.3",
     "@livekit/agents-plugin-anam": "workspace:*",
     "@livekit/agents-plugin-baseten": "workspace:*",
     "@livekit/agents-plugin-bey": "workspace:*",

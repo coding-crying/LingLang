@@ -1,33 +1,175 @@
 {
-  "userId": "identity-ZKqJ",
+  "userId": "will",
   "targetLang": "pt",
-  "lastPlanAt": 0,
-  "planStale": true,
+  "lastPlanAt": 1782943120106,
   "pendingSignals": [],
-  "supervisorPlan": null,
-  "lastWatcherDecision": null,
-  "lastProcessorRun": {
-    "at": 1775605722568,
-    "batch": [
-      "Eu já sei que você é preservativo.",
-      "Olá",
-      "Olá"
-    ],
-    "analysisLexemeCount": 0,
-    "srsUpdateCount": 0,
-    "errors": [
-      "Failed to analyze utterance"
-    ],
-    "rawPrompt": "Extract words from the user's utterance and auto-detect the language. Return JSON only.\n\nFormat:\n{\"language\":\"ISO-639-1 code\",\"lexemes\":[{\"lemma\":\"word\",\"pos\":\"NOUN\",\"performance\":\"correct_use\"}]}\n\npos: NOUN, VERB, ADJ, ADV, PRON, PREP, CONJ, NUM\nperformance: correct_use (used correctly), wrong_use (error made)\n\nIMPORTANT: Detect which language is being used (ru, es, fr, pt, ar, etc.) and return its ISO code in the \"language\" field.\n\nExample:\nInput: \"Я хочу воду\"\nOutput: {\"language\":\"ru\",\"lexemes\":[{\"lemma\":\"я\",\"pos\":\"PRON\",\"performance\":\"correct_use\"},{\"lemma\":\"хотеть\",\"pos\":\"VERB\",\"performance\":\"correct_use\"},{\"lemma\":\"вода\",\"pos\":\"NOUN\",\"performance\":\"correct_use\"}]}\nAnalyze: \"Eu já sei que você é preservativo.\nEu já sei que você é preservativo.\nOlá\""
+  "supervisorNudge": "Continue the conversation naturally.",
+  "lastProcessorRun": null,
+  "lastPlannerRun": {
+    "at": 1782943120106,
+    "reason": "session_start",
+    "rawPrompt": "You are a language tutor planner. Read the learner's state and produce two things:\n\n1. A short teaching nudge for the conversation agent (1-3 sentences)\n2. An updated running summary of what's happened in this session\n\nYour nudge adds STRATEGY, not data. The agent already knows what errors just happened and what grammar hints to give. Your job is to decide: what matters most right now, and how to approach it. Suggest context, angle, or tone — not just \"review this word.\"\n\nThe running summary is your memory of the session so far. Update it each cycle to reflect what happened. Keep it 2-3 sentences. It should capture: topics covered, what the learner struggled with, what they got comfortable with, and any patterns you noticed. This summary gets passed back to you next cycle so you remember what already happened.\n\nSession gap: if the learner's last session was recent (minutes ago), pick up where they left off. If it was hours ago, do a light review of what they learned. If it was days ago or longer, start with a warm-up review of struggling words before introducing new material.\n\nMatch the learner's level:\n- Beginner (A1-A2): teach basic words, give lots of support\n- Intermediate (B1-B2): focus on nuance, idioms, natural phrasing — they already know function words\n- Advanced (C1-C2): challenge them with register, style, subtlety\n\nDo NOT create remediation goals for basic function words (pronouns, conjunctions, prepositions, articles). Those are acquired through exposure, not drilling.\n\nBalance:\n- Learning: review due/struggling words, introduce new ones when ready\n- Enjoyment: variety, natural flow, no repetitive drilling\n\nFSRS states:\n  New (0) = never seen, Learning (1) = struggling, Review (2) = stable, Relearning (3) = forgot\n\nIf a word keeps showing up as Learning or Relearning, try a different angle — don't just quiz the same way.\n\nOutput format — exactly two lines:\nNUDGE: your 1-3 sentence teaching nudge\nSUMMARY: your updated 2-3 sentence session summary\n\nLEARNER NOTES:\nIf you discover something durable about this learner that you'd want to remember tomorrow, append a NOTE line. Only write a note when you've learned something genuinely new — most cycles should NOT produce a note. Categories: preference, level, frustration, goal, engagement. Max 1 note per cycle. Format:\n\nNOTE[category]: one sentence\n\nExample: NOTE[preference]: Engages more with role-play scenarios than vocabulary drills.\nDo NOT repeat or restate notes that are already in the Learner Notes section below.\n\nPERSONA UPDATES:\nIf you observe that the current teaching style is clearly wrong for this learner (e.g. they're frustrated by the roasting, or they explicitly asked for something different), you may patch the persona. Only do this when you have clear evidence — not on a whim. Format:\n\nPERSONA: field=value[, field=value...]\n\nValid fields: tone (roast|warm|neutral|formal|drill-sergeant), correctionStyle (immediate|gentle|ignore|end-of-turn), teachingMode (conversational|drill|roleplay|storytelling), personaOverride (free text), extraInstructions (free text)\n\nExample: PERSONA: tone=warm, correctionStyle=gentle\nExample: PERSONA: extraInstructions=pretend we are at a café in Lisbon\nDo NOT emit PERSONA unless you have clear evidence the current style is wrong.\n\nReason: session_start\nSignals: none\n\nNo previous nudge — this is the first one.\n\nDB state:\nUser ID: will\nTarget Language: pt\nNative Language: en\nNEW_USER: false\n\nVocabulary to Review (DUE by FSRS): None\nNew Vocabulary to Introduce (by frequency): fã ()\n\nNote: This snapshot was taken at session start. Use your tools to check current vocab state during the session.\n\nGoals:\nNEW WORD: \"вы\" (you (formal/plural)) — introduce it when the conversation naturally touches on the topic. Don't force it.\nNEW WORD: \"кто\" (who) — introduce it when the conversation naturally touches on the topic. Don't force it.\nNEW WORD: \"всё\" (everything; all) — introduce it when the conversation naturally touches on the topic. Don't force it.\nLearner Notes:\n- [level] Learner shows high-beginner/intermediate potential with complex sentence attempts, but lacks grammatical accuracy in word order and pronoun use.\n- [engagement] Uses a playful, challenging tone to interact with the tutor.\nRecent Sessions (last was 6 days ago):\n- Jun 25 (1min): Session lasted 1min with 23 word reviews. Next: 'Bom dia' is the standard greeting for 'Good morning'.\n- May 31 (3min): This is the start of the session. No vocabulary has been reviewed or introduced yet. Next: Use 'привет' or 'здравствуйте' instead of 'hello'\n- May 31 (4min): The session began with playful, erratic outbursts in both English and Russian. No formal instruction has occurred yet as the learner is testing the boundaries of the interaction. Next: Use 'спасибо' instead of 'thank you'; The user is communicating entirely in English, suggesting they have not switched to the target language (Russian) for this utterance.; The user is speaking English instead of Russian.\nRunning Summary: (first cycle — no summary yet)\n\nRecent conversation:\n",
+    "rawResponse": "<|channel>thought\n<channel|>NUDGE: Since it's been 6 days, start with a warm, low-pressure greeting in Portuguese to re-establish the connection. Keep it light and see if they can respond with a basic greeting before diving into any content.\n\nSUMMARY: The session is just beginning after a 6-day gap. No content has been covered yet; the goal is to re-establish rapport and transition into Portuguese."
   },
-  "lastPlannerRun": null,
   "subagentChats": [
     {
-      "role": "Processor",
-      "timestamp": 1775605722568,
-      "prompt": "Extract words from the user's utterance and auto-detect the language. Return JSON only.\n\nFormat:\n{\"language\":\"ISO-639-1 code\",\"lexemes\":[{\"lemma\":\"word\",\"pos\":\"NOUN\",\"performance\":\"correct_use\"}]}\n\npos: NOUN, VERB, ADJ, ADV, PRON, PREP, CONJ, NUM\nperformance: correct_use (used correctly), wrong_use (error made)\n\nIMPORTANT: Detect which language is being used (ru, es, fr, pt, ar, etc.) and return its ISO code in the \"language\" field.\n\nExample:\nInput: \"Я хочу воду\"\nOutput: {\"language\":\"ru\",\"lexemes\":[{\"lemma\":\"я\",\"pos\":\"PRON\",\"performance\":\"correct_use\"},{\"lemma\":\"хотеть\",\"pos\":\"VERB\",\"performance\":\"correct_use\"},{\"lemma\":\"вода\",\"pos\":\"NOUN\",\"performance\":\"correct_use\"}]}\nAnalyze: \"Eu já sei que você é preservativo.\nEu já sei que você é preservativo.\nOlá\"",
-      "response": "No response"
+      "role": "Planner (Supervisor)",
+      "timestamp": 1782943121852,
+      "prompt": "You are a language tutor planner. Read the learner's state and produce two things:\n\n1. A short teaching nudge for the conversation agent (1-3 sentences)\n2. An updated running summary of what's happened in this session\n\nYour nudge adds STRATEGY, not data. The agent already knows what errors just happened and what grammar hints to give. Your job is to decide: what matters most right now, and how to approach it. Suggest context, angle, or tone — not just \"review this word.\"\n\nThe running summary is ",
+      "response": "<|channel>thought\n<channel|>NUDGE: Since it's been 6 days, start with a warm, low-pressure greeting in Portuguese to re-establish the connection. Keep it light and see if they can respond with a basic greeting before diving into any content.\n\nSUMMARY: The session is just beginning after a 6-day gap. No content has been covered yet; the goal is to re-establish rapport and transition into Portuguese."
     }
   ],
-  "updatedAt": 1775605722818
+  "sessionTrace": [
+    {
+      "at": 1782943120061,
+      "event": "services.created",
+      "detail": "mode=local-gemma-audio stt=GemmaAudioSTT llm=GemmaAudioLLM tts=OmniVoiceTTS"
+    },
+    {
+      "at": 1782943120061,
+      "event": "services.stt.capabilities",
+      "detail": "{\"streaming\":false,\"interimResults\":false}"
+    },
+    {
+      "at": 1782943120061,
+      "event": "services.tts.capabilities",
+      "detail": "{\"streaming\":true}"
+    },
+    {
+      "at": 1782943120061,
+      "event": "services.llm.capabilities",
+      "detail": "{}"
+    },
+    {
+      "at": 1782943120106,
+      "event": "planner.update.start",
+      "detail": "reason=session_start"
+    },
+    {
+      "at": 1782943120106,
+      "event": "instructions.refresh"
+    },
+    {
+      "at": 1782943120107,
+      "event": "session.start.begin",
+      "detail": "roomConnected=true"
+    },
+    {
+      "at": 1782943120125,
+      "event": "agent.sttNode.start",
+      "detail": "activityStt=GemmaAudioSTT capabilities={\"streaming\":false,\"interimResults\":false}"
+    },
+    {
+      "at": 1782943120133,
+      "event": "agent.sttNode.ready",
+      "detail": "hasStream=true"
+    },
+    {
+      "at": 1782943120135,
+      "event": "session.agent_state_changed",
+      "detail": "listening"
+    },
+    {
+      "at": 1782943120137,
+      "event": "session.start.done"
+    },
+    {
+      "at": 1782943120137,
+      "event": "session.activity.ready",
+      "detail": "stt=GemmaAudioSTT tts=OmniVoiceTTS llm=GemmaAudioLLM"
+    },
+    {
+      "at": 1782943120137,
+      "event": "session.generateReply.opening"
+    },
+    {
+      "at": 1782943120137,
+      "event": "session.generateReply",
+      "detail": "args=[{\"userInput\":\"[system: the user has just connected — greet them and pick up where you left off]\"}]"
+    },
+    {
+      "at": 1782943120138,
+      "event": "session.speech_created",
+      "detail": "source=generate_reply"
+    },
+    {
+      "at": 1782943120139,
+      "event": "activity.pipelineReplyTask.start",
+      "detail": "speechId=speech_2aea6608-2fa interrupted=false scheduled=false"
+    },
+    {
+      "at": 1782943120139,
+      "event": "activity._pipelineReplyTaskImpl.start",
+      "detail": "speechId=speech_2aea6608-2fa newMessage=\"[system: the user has just connected — greet them and pick up where you left off]\""
+    },
+    {
+      "at": 1782943120141,
+      "event": "agent.llmNode.start",
+      "detail": "items=2"
+    },
+    {
+      "at": 1782943120142,
+      "event": "agent.ttsNode.start"
+    },
+    {
+      "at": 1782943120143,
+      "event": "activity.scheduleSpeech",
+      "detail": "speechId=speech_2aea6608-2fa priority=5 interrupted=false"
+    },
+    {
+      "at": 1782943120143,
+      "event": "agent.llmNode.ready",
+      "detail": "hasStream=true"
+    },
+    {
+      "at": 1782943120143,
+      "event": "agent.ttsNode.ready",
+      "detail": "hasStream=true"
+    },
+    {
+      "at": 1782943120145,
+      "event": "session.agent_state_changed",
+      "detail": "thinking"
+    },
+    {
+      "at": 1782943121674,
+      "event": "session.metrics_collected",
+      "detail": "{\"type\":\"llm_metrics\",\"timestamp\":1782943121673,\"requestId\":\"d752d9455ab5476bad2241aed6c46e0e\",\"ttftMs\":121,\"durationMs\":1532,\"cancelled\":false,\"label\":\"gemma-audio-llm\",\"completionTokens\":0,\"promptTo"
+    },
+    {
+      "at": 1782943121853,
+      "event": "instructions.refresh"
+    },
+    {
+      "at": 1782943121853,
+      "event": "planner.update.done",
+      "detail": "reason=session_start"
+    },
+    {
+      "at": 1782943123406,
+      "event": "session.agent_state_changed",
+      "detail": "speaking"
+    },
+    {
+      "at": 1782943123913,
+      "event": "session.metrics_collected",
+      "detail": "{\"type\":\"tts_metrics\",\"timestamp\":1782943123913,\"requestId\":\"9b54daa0-58d\",\"ttfbMs\":3139,\"durationMs\":3648,\"charactersCount\":338,\"audioDurationMs\":17730,\"cancelled\":true,\"label\":\"omnivoice.TTS\",\"input"
+    },
+    {
+      "at": 1782943141137,
+      "event": "session.agent_state_changed",
+      "detail": "listening"
+    },
+    {
+      "at": 1782943141138,
+      "event": "activity._pipelineReplyTaskImpl.done",
+      "detail": "speechId=speech_2aea6608-2fa scheduled=true interrupted=false"
+    },
+    {
+      "at": 1782943141139,
+      "event": "activity.pipelineReplyTask.done",
+      "detail": "speechId=speech_2aea6608-2fa scheduled=true interrupted=false"
+    }
+  ],
+  "updatedAt": "2026-07-01T21:59:01.388Z"
 }

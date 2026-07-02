@@ -23,7 +23,7 @@ import { users, userVocabulary, lexemes, units, activeGoals } from '../db/schema
 import { eq, and, asc } from 'drizzle-orm';
 import { runProcessor, runSupervisor } from '../tools/supervisor-functions.js';
 import { ContextManager } from '../lib/context.js';
-import { getLanguageConfig } from '../config/languages.js';
+import { getLanguageConfig, nativeLanguageName } from '../config/languages.js';
 import { buildInstructions } from '../config/prompts/base.js';
 import { PLANNER_SYSTEM_PROMPT, buildPlannerPrompt } from '../config/prompts/supervisor.js';
 import type { ProcessorResult } from '../tools/supervisor-functions.js';
@@ -480,11 +480,13 @@ class ConversationRunner {
 
     const grammarHints = processorResult?.analysis?.grammarHints?.join(' ') || 'None';
 
-    const systemPrompt = buildInstructions(this.langConfig.prompts.instructionsTemplate, {
+    const systemPrompt = buildInstructions({
       targetLanguage: this.langConfig.name,
       nativeName: this.langConfig.nativeName,
+      nativeLanguage: this.langConfig.nativeLanguage,
       targetRatio: this.langConfig.pedagogy.targetLanguageRatio,
       userLevel: this.scenario.proficiency,
+      persona: this.langConfig.persona,
       initialContext: context,
       mode: 'text',
       recentErrors,
@@ -532,7 +534,7 @@ class ConversationRunner {
       dbContext,
       goalNote: goalUpdate,
       recentHistory,
-      previousPlan: null,
+      previousNudge: null,
       reason: 'eval_turn',
       signals: processorResult?.srsUpdates?.length ? ['srs_updated'] : [],
     });

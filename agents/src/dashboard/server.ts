@@ -4,7 +4,6 @@
  * Simple web dashboard to:
  * - View user progress (SRS levels)
  * - Monitor active goals
- * - Import Duolingo data
  * - View real-time session stats
  */
 
@@ -14,13 +13,16 @@ dotenv.config({ path: '.env.local' });
 import express from 'express';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { AccessToken, AgentDispatchClient } from 'livekit-server-sdk';
+import { watchEvents, type AgentEvent } from '../lib/trace.js';
 import { db } from '../db/index.js';
-import { users, lexemes, userVocabulary, activeGoals, units, duolingoMetadata } from '../db/schema.js';
+import { users, lexemes, userVocabulary, activeGoals, units, userPersona } from '../db/schema.js';
 import { eq, desc, sql, gte, and } from 'drizzle-orm';
 import { execFileSync } from 'child_process';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { AccessToken } from 'livekit-server-sdk';
+import { authenticateByUsername, createUser, hashPassword } from '../lib/user-auth.js';
+import { writePersona } from '../lib/persona.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -52,44 +54,10 @@ const loginAttempts = new Map<string, { count: number; lastAttempt: number }>();
 const LOGIN_RATE_LIMIT = 10; // max attempts
 const LOGIN_RATE_WINDOW_MS = 15 * 60 * 1000; // per 15 minutes
 
-// Scrypt-based password hashing (Node built-in, no deps)
-const HASH_KEYLEN = 64;
-const HASH_SALT = process.env.DASHBOARD_PASSWORD_SALT || 'linglang-dashboard-2026';
-
-async function hashPassword(password: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    crypto.scrypt(password, HASH_SALT, HASH_KEYLEN, (err, derivedKey) => {
-      if (err) return reject(err);
-      resolve(derivedKey.toString('hex'));
-    });
-  });
-}
-
-async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
-  const hash = await hashPassword(password);
-  return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(storedHash, 'hex'));
-}
-
-// Generate or load stored password hash
-let storedPasswordHash: string | null = null;
-
-async function initialiseAuth(): Promise<void> {
-  const envHash = process.env.DASHBOARD_PASSWORD_HASH;
-  const envPassword = process.env.DASHBOARD_PASSWORD;
-
-  if (envHash) {
-    storedPasswordHash = envHash;
-    console.log('[Auth] Using DASHBOARD_PASSWORD_HASH from env');
-  } else if (envPassword) {
-    storedPasswordHash = await hashPassword(envPassword);
-    console.log('[Auth] Generated hash from DASHBOARD_PASSWORD');
-  } else {
-    // Default password: admin (change immediately!)
-    storedPasswordHash = await hashPassword('admin');
-    console.log('[Auth] ⚠️  No DASHBOARD_PASSWORD_HASH or DASHBOARD_PASSWORD set. Using default password: admin');
-    console.log('[Auth] ⚠️  Set DASHBOARD_PASSWORD in .env.local to secure the dashboard');
-  }
-}
+// Scrypt-based password hashing (Node built-in, no deps) — 2026-06-25:
+// moved to lib/user-auth.ts so the lib can be unit-tested and reused. The
+// hash/verify helpers are imported at the top. We only keep the rate
+// limit + session map here.
 
 function parseCookies(cookieHeader: string | undefined): Record<string, string> {
   const cookies: Record<string, string> = {};
@@ -177,13 +145,10 @@ app.post('/api/login', async (req, res) => {
       return res.status(400).json({ error: 'Username and password required' });
     }
 
-    // For now, single admin user; username is informational
-    if (!storedPasswordHash) {
-      return res.status(503).json({ error: 'Auth not initialised' });
-    }
-
-    const valid = await verifyPassword(password, storedPasswordHash);
-    if (!valid) {
+    // 2026-06-25: per-user auth via lib/user-auth.ts. The username is
+    // matched case-insensitively, so "will" / "Will" / "WILL" all work.
+    const user = await authenticateByUsername(username, password);
+    if (!user) {
       recordLoginAttempt(clientIp, false);
       // Constant-time delay to slow down brute force
       await new Promise(r => setTimeout(r, 500));
@@ -194,7 +159,7 @@ app.post('/api/login', async (req, res) => {
 
     // Create session
     const sessionId = crypto.randomUUID();
-    sessions.set(sessionId, { userId: username, createdAt: Date.now() });
+    sessions.set(sessionId, { userId: user.id, createdAt: Date.now() });
 
     // Set cookie — always use Secure when behind nginx (x-forwarded-proto)
     const behindProxy = req.headers['x-forwarded-proto'] === 'https';
@@ -203,8 +168,48 @@ app.post('/api/login', async (req, res) => {
       `ll_session=${sessionId}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400${secureFlag}`
     ].join('; '));
 
-    console.log(`[Auth] User "${username}" logged in from ${clientIp}`);
-    res.json({ success: true, user: { id: username } });
+    console.log(`[Auth] User "${user.username}" (${user.id}) logged in from ${clientIp}`);
+    res.json({ success: true, user: { id: user.id, username: user.username } });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// 2026-06-25: admin-only endpoint to create a new user. Currently `will`
+// is hardcoded as admin — replace with a real role system later.
+app.post('/api/register', requireAuth, async (req, res) => {
+  try {
+    if (req.user?.id !== 'will') {
+      return res.status(403).json({ error: 'Only admin can register new users' });
+    }
+    const { username, password, targetLanguage, nativeLanguage } = req.body ?? {};
+    if (!username || !password) {
+      return res.status(400).json({ error: 'username and password required' });
+    }
+    if (typeof password !== 'string' || password.length < 4) {
+      return res.status(400).json({ error: 'password must be at least 4 characters' });
+    }
+
+    // Derive a URL-safe id from the username. Falls back to a random suffix
+    // if the result is empty (e.g. username is all non-alphanumerics).
+    const idBase = String(username).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    const id = idBase || `user_${Date.now().toString(36)}`;
+
+    const existing = await db.query.users.findFirst({ where: eq(users.id, id) });
+    if (existing) {
+      return res.status(409).json({ error: `User "${id}" already exists` });
+    }
+
+    await createUser({
+      id,
+      username: String(username),
+      password: String(password),
+      targetLanguage: targetLanguage || 'ru',
+      nativeLanguage: nativeLanguage || 'en',
+    });
+
+    console.log(`[Auth] Admin ${req.user.id} created user ${id} (${username}) target=${targetLanguage || 'ru'}`);
+    res.json({ success: true, user: { id, username } });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -219,8 +224,19 @@ app.post('/api/logout', (req, res) => {
   res.json({ success: true });
 });
 
-app.get('/api/me', requireAuth, (req, res) => {
-  res.json({ user: req.user });
+app.get('/api/me', requireAuth, async (req, res) => {
+  try {
+    const userRow = await db.query.users.findFirst({ where: eq(users.id, req.user!.id) });
+    res.json({
+      user: {
+        id: req.user!.id,
+        targetLanguage: userRow?.targetLanguage ?? 'ru',
+        nativeLanguage: userRow?.nativeLanguage ?? 'en',
+      },
+    });
+  } catch {
+    res.json({ user: req.user });
+  }
 });
 
 // ============================================================================
@@ -251,22 +267,31 @@ app.post('/api/waitlist', async (req, res) => {
 // Protect all /api/ routes below this point
 app.use('/api', requireAuth);
 
-// Get all users
-app.get('/api/users', async (req, res) => {
+// Get all users — 2026-06-25: per-user data isolation. Non-admin users
+// only see their own row.
+app.get('/api/users', requireAuth, async (req, res) => {
   try {
-    const allUsers = await db.query.users.findMany({
-      orderBy: [desc(users.createdAt)]
-    });
-    res.json(allUsers);
+    if (req.user!.id === 'will') {
+      const allUsers = await db.query.users.findMany({
+        orderBy: [desc(users.createdAt)]
+      });
+      return res.json(allUsers);
+    }
+    const me = await db.query.users.findFirst({ where: eq(users.id, req.user!.id) });
+    res.json(me ? [me] : []);
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
 });
 
-// Get user details
-app.get('/api/users/:userId', async (req, res) => {
+// Get user details — 2026-06-25: ownership check. Non-admin can only
+// access their own row.
+app.get('/api/users/:userId', requireAuth, async (req, res) => {
   try {
     const { userId } = req.params;
+    if (req.user!.id !== userId && req.user!.id !== 'will') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
 
     const user = await db.query.users.findFirst({
       where: eq(users.id, userId)
@@ -286,11 +311,6 @@ app.get('/api/users/:userId', async (req, res) => {
     const goals = await db.query.activeGoals.findMany({
       where: eq(activeGoals.userId, userId),
       orderBy: [desc(activeGoals.createdAt)]
-    });
-
-    // Get Duolingo metadata if exists
-    const duoData = await db.query.duolingoMetadata.findFirst({
-      where: eq(duolingoMetadata.userId, userId)
     });
 
     // Calculate stats using FSRS state distribution
@@ -314,7 +334,6 @@ app.get('/api/users/:userId', async (req, res) => {
       user,
       progress,
       goals,
-      duolingoData: duoData,
       stats: {
         totalVocab: progress.length,
         stateDistribution,
@@ -328,9 +347,12 @@ app.get('/api/users/:userId', async (req, res) => {
 });
 
 // Get vocabulary with progress
-app.get('/api/users/:userId/vocabulary', async (req, res) => {
+app.get('/api/users/:userId/vocabulary', requireAuth, async (req, res) => {
   try {
     const { userId } = req.params;
+    if (req.user!.id !== userId && req.user!.id !== 'will') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
     const { state, limit = '100' } = req.query;
 
     let progress = await db.query.userVocabulary.findMany({
@@ -371,45 +393,6 @@ app.get('/api/curriculum', async (req, res) => {
     res.json(allUnits);
   } catch (error) {
     res.status(500).json({ error: String(error) });
-  }
-});
-
-// Import Duolingo data
-app.post('/api/users/:userId/import-duolingo', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { jwt, username, language } = req.body;
-
-    if (!jwt || !username || !language) {
-      return res.status(400).json({
-        error: 'Missing required fields: jwt, username, language'
-      });
-    }
-
-    // Run the sync script — execFileSync prevents shell injection
-    const scriptPath = path.join(__dirname, '../scripts/sync-duolingo.ts');
-
-    console.log('[Dashboard] Running Duolingo import...');
-
-    const output = execFileSync('npx', ['tsx', scriptPath, userId, '--jwt', jwt, '--username', username, '--lang', language], {
-      encoding: 'utf-8',
-      cwd: path.join(__dirname, '../../'),
-      timeout: 60000,
-    });
-
-    console.log('[Dashboard] Import complete');
-
-    res.json({
-      success: true,
-      output: output.split('\n').filter(line => line.trim()),
-    });
-
-  } catch (error: any) {
-    console.error('[Dashboard] Import failed:', error);
-    res.status(500).json({
-      error: error.message,
-      output: error.stdout ? error.stdout.toString() : undefined,
-    });
   }
 });
 
@@ -476,6 +459,70 @@ app.get('/api/db/:table', async (req, res) => {
     res.json(data);
   } catch (error) {
     res.status(500).json({ error: String(error) });
+  }
+});
+
+// ============================================================================
+// VOCABULARY (learned words database)
+// ============================================================================
+
+app.get('/api/vocabulary', async (req, res) => {
+  const userId = (req as any).user?.userId || 'will';
+  const lang = req.query.lang as string | undefined;
+  const sort = req.query.sort as string || 'due';
+
+  try {
+    let q = db.select({
+      id: lexemes.id,
+      lemma: lexemes.lemma,
+      pos: lexemes.pos,
+      language: lexemes.language,
+      translation: lexemes.translation,
+      frequencyRank: lexemes.frequencyRank,
+      // SRS state
+      state: userVocabulary.state,
+      stability: userVocabulary.stability,
+      difficulty: userVocabulary.difficulty,
+      reps: userVocabulary.reps,
+      lapses: userVocabulary.lapses,
+      due: userVocabulary.due,
+      lastReview: userVocabulary.lastReview,
+      scaffoldedCount: userVocabulary.scaffoldedCount,
+      nativeSubstitutionCount: userVocabulary.nativeSubstitutionCount,
+    })
+    .from(userVocabulary)
+    .innerJoin(lexemes, eq(userVocabulary.lexemeId, lexemes.id))
+    .where(eq(userVocabulary.userId, userId));
+
+    if (lang) {
+      q = q.where(and(eq(userVocabulary.userId, userId), eq(lexemes.language, lang))) as any;
+    }
+
+    const rows = await q;
+
+    // Sort
+    if (sort === 'stability') {
+      rows.sort((a, b) => b.stability - a.stability);
+    } else if (sort === 'reps') {
+      rows.sort((a, b) => b.reps - a.reps);
+    } else if (sort === 'lapses') {
+      rows.sort((a, b) => b.lapses - a.lapses);
+    } else {
+      // 'due' — soonest due first
+      rows.sort((a, b) => new Date(a.due).getTime() - new Date(b.due).getTime());
+    }
+
+    res.json({
+      total: rows.length,
+      words: rows.map(r => ({
+        ...r,
+        stateName: ['New', 'Learning', 'Review', 'Relearning'][r.state] || 'Unknown',
+        isMastered: r.state === 2 && r.stability > 5 && r.reps > 5,
+      })),
+    });
+  } catch (err: any) {
+    console.error('[Dashboard] Vocabulary query failed:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -653,15 +700,43 @@ app.get('/api/logs', (req, res) => {
 });
 
 // ============================================================================
+// LIVE AGENT EVENTS (SSE) — structured events from the tutor agent
+// ============================================================================
+
+app.get('/api/events', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Content-Type-Options': 'nosniff',
+  });
+
+  const cleanup = watchEvents(
+    (event: AgentEvent) => {
+      try {
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+      } catch { /* client disconnected */ }
+    },
+    () => { /* ignore errors */ }
+  );
+
+  req.on('close', () => {
+    cleanup();
+  });
+});
+
+// ============================================================================
 // LIVEKIT TOKEN
 // ============================================================================
 
-app.post('/api/token', async (req, res) => {
+app.post('/api/token', requireAuth, async (req, res) => {
   try {
-    const { userId, roomName } = req.body;
-    if (!userId || !roomName) {
-      return res.status(400).json({ error: 'userId and roomName required' });
-    }
+    // 2026-06-25: per-user deterministic room. Each user gets their own
+    // room `linglang-<userId>`. The room name is NOT client-controlled
+    // any more — that was the source of cross-user room collisions when
+    // the dashboard generated random room names.
+    const userId = req.user!.id;
+    const roomName = `linglang-${userId}`;
 
     const apiKey = process.env.LIVEKIT_API_KEY;
     const apiSecret = process.env.LIVEKIT_API_SECRET;
@@ -680,7 +755,20 @@ app.post('/api/token', async (req, res) => {
     });
 
     const token = await at.toJwt();
-    res.json({ token, url: process.env.LIVEKIT_URL });
+
+    // Create agent dispatch so LiveKit Cloud assigns our worker to this room
+    const livekitUrl = process.env.LIVEKIT_URL || '';
+    const dispatchClient = new AgentDispatchClient(livekitUrl.replace('wss://', 'https://'), apiKey, apiSecret);
+    try {
+      const agentName = process.env.LINGLANG_AGENT_NAME ?? 'linglang-tutor';
+      await dispatchClient.createDispatch(roomName, agentName);
+      console.log(`[Dashboard] Agent dispatch for user ${userId} in room ${roomName}`);
+    } catch (dispatchErr: any) {
+      // Non-fatal — room may already have a dispatch, or agent is auto-dispatched
+      console.warn(`[Dashboard] Agent dispatch warning: ${dispatchErr.message || dispatchErr}`);
+    }
+
+    res.json({ token, url: process.env.LIVEKIT_URL, roomName });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -690,15 +778,37 @@ app.post('/api/token', async (req, res) => {
 // PAGES
 // ============================================================================
 
-// Landing page — public, no auth required
-app.get('/', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+// Root: redirect to login. We don't ship a public landing page —
+// users always land on auth. Authenticated users go straight to /dashboard.
+app.get('/', (req, res) => {
+  const cookies = parseCookies(req.headers.cookie);
+  const sessionId = cookies['ll_session'];
+  const session = sessionId ? sessions.get(sessionId) : undefined;
+  if (session && (Date.now() - session.createdAt) <= SESSION_MAX_AGE_MS) {
+    return res.redirect('/dashboard');
+  }
+  return res.redirect('/login');
 });
 
-// Dashboard — requires auth
+// Dashboard — new React app (Vite build output in public/app/)
 app.get('/dashboard', requireAuth, (_req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
+  const appPath = path.join(__dirname, 'public', 'app', 'index.html');
+  if (fs.existsSync(appPath)) {
+    res.sendFile(appPath);
+  } else {
+    // Fallback to old dashboard if Vite build hasn't been run
+    res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
+  }
 });
+
+// Debug page — standalone pipeline visualization for developer testing
+app.get('/debug', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'debug.html'));
+});
+
+// Serve Vite-built assets (JS, CSS, chunks) — public, no auth
+// (the app itself does auth via API calls)
+app.use('/assets', express.static(path.join(__dirname, 'public', 'app', 'assets')));
 
 // ============================================================================
 // VOCABULARY BY LANGUAGE
@@ -735,9 +845,12 @@ app.get('/api/vocabulary/:language', async (req, res) => {
 // USER SETTINGS
 // ============================================================================
 
-app.patch('/api/users/:userId', async (req, res) => {
+app.patch('/api/users/:userId', requireAuth, async (req, res) => {
   try {
     const { userId } = req.params;
+    if (req.user!.id !== userId && req.user!.id !== 'will') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
     const { targetLanguage, nativeLanguage, proficiencyLevel } = req.body;
 
     const updates: Record<string, string> = {};
@@ -776,14 +889,156 @@ app.patch('/api/users/:userId', async (req, res) => {
 });
 
 // ============================================================================
+// PERSONA — adaptive conversation shell
+// ============================================================================
+
+/**
+ * GET /api/users/:userId/persona?lang=pt
+ * Returns the merged persona for a user+language.
+ */
+app.get('/api/users/:userId/persona', requireAuth, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const lang = (req.query.lang as string) || 'all';
+    if (req.user!.id !== userId && req.user!.id !== 'will') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const rows = await db.select().from(userPersona)
+      .where(eq(userPersona.userId, userId));
+    res.json({ userId, rows });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+/**
+ * PATCH /api/users/:userId/persona
+ * Body: { languageCode, personaOverride?, tone?, correctionStyle?, teachingMode?, extraInstructions? }
+ * Upserts the persona for the given user+language. Source = 'ui'.
+ */
+app.patch('/api/users/:userId/persona', requireAuth, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (req.user!.id !== userId && req.user!.id !== 'will') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const {
+      languageCode = 'all',
+      personaOverride,
+      tone,
+      correctionStyle,
+      teachingMode,
+      extraInstructions,
+    } = req.body;
+
+    const validTones = ['roast', 'warm', 'neutral', 'formal', 'drill-sergeant', null, ''];
+    const validCorrections = ['immediate', 'gentle', 'ignore', 'end-of-turn', null, ''];
+    const validModes = ['conversational', 'drill', 'roleplay', 'storytelling', null, ''];
+
+    if (tone !== undefined && !validTones.includes(tone)) {
+      return res.status(400).json({ error: `Invalid tone: ${tone}` });
+    }
+    if (correctionStyle !== undefined && !validCorrections.includes(correctionStyle)) {
+      return res.status(400).json({ error: `Invalid correctionStyle: ${correctionStyle}` });
+    }
+    if (teachingMode !== undefined && !validModes.includes(teachingMode)) {
+      return res.status(400).json({ error: `Invalid teachingMode: ${teachingMode}` });
+    }
+
+    const patch: Record<string, string | null> = { source: 'ui' };
+    if (personaOverride !== undefined) patch.personaOverride = personaOverride || null;
+    if (tone !== undefined) patch.tone = tone || null;
+    if (correctionStyle !== undefined) patch.correctionStyle = correctionStyle || null;
+    if (teachingMode !== undefined) patch.teachingMode = teachingMode || null;
+    if (extraInstructions !== undefined) patch.extraInstructions = extraInstructions || null;
+
+    if (Object.keys(patch).length <= 1) {
+      return res.status(400).json({ error: 'No valid fields to update' });
+    }
+
+    await writePersona(userId, languageCode, patch as any);
+    res.json({ ok: true, userId, languageCode, patch });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ============================================================================
+// ONBOARDING API
+// ============================================================================
+
+/**
+ * GET /api/users/:userId/onboarding/:lang
+ * Returns the onboarding state for a user+language.
+ * Returns { exists: false } if no row yet.
+ */
+app.get('/api/users/:userId/onboarding/:lang', requireAuth, async (req, res) => {
+  try {
+    const { userId, lang } = req.params;
+    const { getOnboardingState } = await import('../lib/onboarding.js');
+    const state = await getOnboardingState(userId, lang);
+    if (!state) return res.json({ exists: false, isComplete: false });
+    res.json({ exists: true, ...state });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+/**
+ * POST /api/users/:userId/onboarding/:lang
+ * Submit onboarding data from the UI form.
+ * Body: { priorStudy, studyDetails?, goals, goalDetails?, selfRatedLevel }
+ * Commits the level anchor and marks ui_complete=true.
+ */
+app.post('/api/users/:userId/onboarding/:lang', requireAuth, async (req, res) => {
+  try {
+    const { userId, lang } = req.params;
+    const { priorStudy, studyDetails, goals, goalDetails, selfRatedLevel } = req.body;
+
+    if (!priorStudy || !goals || !selfRatedLevel) {
+      return res.status(400).json({ error: 'priorStudy, goals, and selfRatedLevel are required' });
+    }
+
+    const { saveOnboardingData, commitOnboardingLevel, selfRatedLevelToAnchor } = await import('../lib/onboarding.js');
+
+    await saveOnboardingData(userId, lang, {
+      priorStudy,
+      studyDetails: studyDetails || null,
+      goals: Array.isArray(goals) ? goals : [goals],
+      goalDetails: goalDetails || null,
+      selfRatedLevel,
+    });
+
+    const { level, confidence } = selfRatedLevelToAnchor(selfRatedLevel);
+    const evidence = `UI onboarding: ${priorStudy}${studyDetails ? ` (${studyDetails})` : ''}, self-rated ${selfRatedLevel}`;
+    await commitOnboardingLevel(userId, lang, level, confidence, evidence, 'ui');
+
+    res.json({ ok: true, userId, lang, anchoredLevel: level, confidence });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ============================================================================
 // FRONTEND (careful ordering — auth-bypass prevention)
 // ============================================================================
 
-// Serve landing page assets publicly
-const publicFiles = ['index.html', 'css/design-tokens.css', 'css/landing.css', 'js/landing.js'];
+// Serve public assets if they exist. Each is registered explicitly so
+// missing files return 404 (not 500 from a sendFile ENOENT). Files
+// that don't exist are simply skipped at startup.
+const publicFiles = [
+  'css/design-tokens.css',
+  'css/landing.css',
+  'js/landing.js',
+];
 for (const file of publicFiles) {
+  const filePath = path.join(__dirname, 'public', file);
+  if (!fs.existsSync(filePath)) {
+    // Don't register the route — let it 404 normally.
+    continue;
+  }
   app.get(`/${file}`, (_req, res) => {
-    res.sendFile(path.join(__dirname, 'public', file));
+    res.sendFile(filePath);
   });
 }
 
@@ -813,8 +1068,9 @@ app.use(express.static(path.join(__dirname, 'public'), {
 // START SERVER
 // ============================================================================
 
-initialiseAuth().then(() => {
-  app.listen(PORT, () => {
+// 2026-06-25: removed initialiseAuth() — auth is now per-user via the DB.
+// The server starts up clean; the first /api/login call hits the DB.
+app.listen(PORT, () => {
     console.log(`
 ╔════════════════════════════════════════════════════════════╗
 ║              LingLang Dashboard Server                     ║
@@ -826,4 +1082,3 @@ initialiseAuth().then(() => {
 ╚════════════════════════════════════════════════════════════╝
     `);
   });
-});

@@ -31,7 +31,7 @@
     "lint": "eslint -f unix \"src/**/*.{ts,js}\""
   },
   "devDependencies": {
-    "@livekit/agents": "workspace:*",
+    "@livekit/agents": "^1.2.3",
     "@livekit/rtc-node": "^0.13.22",
     "@types/node": "^22.5.5",
     "tsup": "^8.3.5",
@@ -43,7 +43,7 @@
     "vitest": "^1.6.0"
   },
   "peerDependencies": {
-    "@livekit/agents": "workspace:*",
+    "@livekit/agents": "^1.2.3",
     "@livekit/rtc-node": "^0.13.22",
     "zod": "^3.25.76 || ^4.1.8"
   }

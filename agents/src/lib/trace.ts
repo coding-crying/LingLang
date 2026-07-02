@@ -44,6 +44,7 @@ export type EventType =
   | 'service.init'
   | 'services.health'
   | 'llm.routing'
+  | 'llm.token'         // streaming token delta from the LLM, for UI read-along
   | 'tts.synthesize'
   | 'tts.error'
   | 'session.start'

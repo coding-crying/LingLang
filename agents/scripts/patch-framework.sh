@@ -8,6 +8,8 @@
 #    Fix: replace `instanceof LLM` with `!(instanceof RealtimeModel)`.
 # 2. Ollama/gemma requires strict role alternation — consecutive same-role
 #    messages cause 400 errors. Fix: merge consecutive same-role messages.
+# 3. Default LLM timeout is 10s — too short for local model cold start (30s+).
+#    Fix: increase to 60s.
 #
 # Run: bash scripts/patch-framework.sh
 # Auto-run: pnpm postinstall (via package.json scripts.postinstall)
@@ -17,6 +19,7 @@ set -euo pipefail
 AGENT_ACTIVITY="node_modules/@livekit/agents/dist/voice/agent_activity.js"
 AGENT="node_modules/@livekit/agents/dist/voice/agent.js"
 OPENAI_FORMAT="node_modules/@livekit/agents/dist/llm/provider_format/openai.js"
+TYPES="node_modules/@livekit/agents/dist/types.js"
 
 cd "$(dirname "$0")/.."
 
@@ -78,6 +81,18 @@ if [ -f "$OPENAI_FORMAT" ]; then
   fi
 else
   echo "[patch]   WARNING: $OPENAI_FORMAT not found"
+fi
+
+# --- types.js: Increase LLM timeout for local model cold start ---
+if [ -f "$TYPES" ]; then
+  if grep -q 'timeoutMs: 1e4' "$TYPES"; then
+    sed -i 's/timeoutMs: 1e4/timeoutMs: 6e4/' "$TYPES"
+    echo "[patch]   types.js: timeout increased from 10s to 60s"
+  else
+    echo "[patch]   types.js: timeout already patched"
+  fi
+else
+  echo "[patch]   WARNING: $TYPES not found"
 fi
 
 echo "[patch] Done. All framework patches applied."

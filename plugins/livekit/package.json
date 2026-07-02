@@ -34,14 +34,14 @@
     "api:update": "api-extractor run --local --typescript-compiler-folder ../../node_modules/typescript --verbose"
   },
   "devDependencies": {
-    "@livekit/agents": "workspace:*",
+    "@livekit/agents": "^1.2.3",
     "@microsoft/api-extractor": "^7.35.0",
     "onnxruntime-common": "1.21.0",
     "tsup": "^8.3.5",
     "typescript": "^5.0.0"
   },
   "peerDependencies": {
-    "@livekit/agents": "workspace:*"
+    "@livekit/agents": "^1.2.3"
   },
   "dependencies": {
     "@huggingface/hub": "2.4.1",

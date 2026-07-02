@@ -6,7 +6,7 @@
  * Modes:
  *   local             — Qwen3-ASR + Ollama LLM + MossTTS (all local)
  *   cloud             — ElevenLabs STT + NanoGPT LLM + ElevenLabs TTS
- *   local-gemma-audio — Gemma 4 E4B audio pass-through (experimental)
+ *   local-gemma-audio — Gemma 4 12B native-audio pass-through (experimental)
  *   gemini            — Gemini RealtimeModel (handles STT+LLM+TTS in one WebSocket)
  */
 
@@ -18,6 +18,7 @@ import type { llm, stt, tts } from '@livekit/agents';
 import { createTTS } from '../tts/fallback.js';
 import { getLanguageConfig } from '../config/languages.js';
 import { GemmaAudioSTT } from '../stt/gemma-audio-stt.js';
+import { OpenRouterLLM } from '../llm/openrouter-llm.js';
 import { GemmaAudioLLM } from '../llm/gemma-audio-llm.js';
 import { ElevenLabsRealtimeSTT } from '../stt/elevenlabs-realtime.js';
 
@@ -56,39 +57,31 @@ export class ServiceFactory {
    */
   createSTT(): stt.STT {
     if (this.mode === 'local-gemma-audio') {
-      console.log(`[ServiceFactory] STT: Gemma 4 E4B (Audio Pass-Through)`);
+      console.log(`[ServiceFactory] STT: Gemma 4 12B (Native Audio Pass-Through)`);
       return new GemmaAudioSTT();
     }
 
     if (this.mode === 'gemini') {
-      // Gemini RealtimeModel handles STT internally — return a no-op placeholder.
-      // AgentSession still expects an stt param, but the framework ignores it
-      // when llm is a RealtimeModel.
       throw new Error('Use createLLM() for gemini mode — RealtimeModel handles STT+TTS');
     }
 
-    // local mode — Qwen3-ASR
     const langConfig = getLanguageConfig(this.targetLanguage);
 
+    // Cloud mode — use Groq Whisper (fast, free tier) or custom STT endpoint
     if (this.mode === 'cloud') {
-      const ELEVENLABS_LANGUAGE_CODES: Record<string, string | undefined> = {
-        en: undefined,
-        ru: 'rus',
-        es: 'spa',
-        fr: 'fra',
-        pt: 'por',
-        ar: 'ara',
-      };
-      const languageCode = ELEVENLABS_LANGUAGE_CODES[langConfig.code];
-      console.log(`[ServiceFactory] STT: ElevenLabs Scribe v2 Realtime (lang: ${languageCode || 'auto'})`);
-      return new ElevenLabsRealtimeSTT({
-        apiKey: process.env.ELEVENLABS_API_KEY || '',
-        language: languageCode,
-        commitStrategy: 'vad',
-        vadSilenceThresholdSecs: 1.5,
-      }) as unknown as stt.STT;
+      const sttUrl = process.env.CLOUD_STT_URL || 'https://api.groq.com/openai/v1';
+      const sttKey = process.env.CLOUD_STT_KEY || process.env.GROQ_API_KEY || '';
+      const sttModel = process.env.CLOUD_STT_MODEL || 'whisper-large-v3';
+      console.log(`[ServiceFactory] STT: ${sttModel} @ ${sttUrl}`);
+      return new openai.STT({
+        baseURL: sttUrl,
+        apiKey: sttKey,
+        model: sttModel,
+        language: langConfig.stt.language,
+      });
     }
 
+    // Local mode — Qwen3-ASR
     console.log(`[ServiceFactory] STT: Qwen3-ASR (${langConfig.stt.language})`);
     return new openai.STT({
       baseURL: process.env.LOCAL_STT_URL || 'http://localhost:8001/v1',
@@ -104,10 +97,12 @@ export class ServiceFactory {
    */
   async createLLM(): Promise<llm.LLM | llm.RealtimeModel> {
     if (this.mode === 'local-gemma-audio') {
-      console.log(`[ServiceFactory] LLM: Gemma 4 E4B (Multimodal Reconstructor)`);
+      const url = process.env.GEMMA_AUDIO_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8093/v1';
+      const model = process.env.GEMMA_AUDIO_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma4-12b-it';
+      console.log(`[ServiceFactory] LLM: Gemma 4 12B Native Audio (${model} @ ${url})`);
       return new GemmaAudioLLM({
-        baseURL: process.env.LOCAL_STT_URL || 'http://localhost:8001/v1',
-        model: 'google/gemma-4-E4B-it'
+        baseURL: url,
+        model
       });
     }
 
@@ -142,12 +137,19 @@ export class ServiceFactory {
       });
     }
 
-    // local or cloud — standard OpenAI-compatible LLM
-    const url = process.env.CONVERSATION_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1';
-    const model = process.env.CONVERSATION_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma4-26b';
-    const key = process.env.CONVERSATION_LLM_KEY || process.env.LOCAL_LLM_KEY || 'ollama';
-    console.log(`[ServiceFactory] LLM: ${model} @ ${url}`);
-    return new openai.LLM({ baseURL: url, model, apiKey: key });
+    // Cloud mode — OpenRouter with DeepInfra provider (fast TTFT, cheap)
+    const url = process.env.CONVERSATION_LLM_URL || 'https://openrouter.ai/api/v1';
+    const model = process.env.CONVERSATION_LLM_MODEL || 'google/gemma-4-26b-a4b-it';
+    const key = process.env.CONVERSATION_LLM_KEY || '';
+    const provider = process.env.CONVERSATION_LLM_PROVIDER || 'deepinfra';
+
+    console.log(`[ServiceFactory] LLM: ${model} via ${provider} @ OpenRouter`);
+    return new OpenRouterLLM({
+      baseURL: url,
+      model,
+      apiKey: key,
+      provider,
+    });
   }
 
   /**

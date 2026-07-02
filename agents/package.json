@@ -16,7 +16,9 @@
     "dev:tutor-duolingo": "tsx src/tutor_duolingo.ts dev",
     "dev:tutor-ed": "tsx src/tutor-event-driven.ts dev",
     "dev:demo": "tsx src/demo.ts dev",
+    "dev:matrix-bot": "tsx src/scripts/matrix-call-bot.ts",
     "dashboard": "tsx src/dashboard/server.ts",
+    "dashboard:build": "cd src/dashboard/frontend && npx vite build",
     "test:arch": "tsx test-architecture.ts",
     "test:db": "tsx test-database-flow.ts"
   },
@@ -71,6 +73,7 @@
     "heap-js": "^2.6.0",
     "json-schema": "^0.4.0",
     "livekit-server-sdk": "^2.14.1",
+    "matrix-js-sdk": "^31.6.1",
     "openai": "^6.8.1",
     "pidusage": "^4.0.1",
     "pino": "^8.19.0",

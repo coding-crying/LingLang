@@ -123,26 +123,6 @@ async function main() {
   }
   console.log(`[Migration] Converted ${vocabCount} progress records → user_vocabulary`);
 
-  // 6. Copy duolingo metadata
-  console.log('[Migration] Copying duolingo metadata...');
-  const duoMeta = sqlite.prepare('SELECT * FROM duolingo_metadata WHERE user_id = ?').all(WILL_USER_ID);
-  for (const dm of duoMeta) {
-    await db.insert(schema.duolingoMetadata).values({
-      userId: dm.user_id,
-      duolingoUsername: dm.duolingo_username,
-      duolingoPassword: dm.duolingo_password,
-      duolingoJWT: dm.duolingo_jwt,
-      lastSyncTimestamp: dm.last_sync_timestamp ? new Date(dm.last_sync_timestamp * 1000) : null,
-      syncStatus: dm.sync_status || 'pending',
-      syncError: dm.sync_error,
-      duolingoUserId: dm.duolingo_user_id,
-      learningLanguage: dm.learning_language,
-      createdAt: new Date(dm.created_at * 1000),
-      updatedAt: new Date(dm.updated_at * 1000),
-    }).onConflictDoNothing();
-  }
-  console.log(`[Migration] Copied ${duoMeta.length} duolingo metadata records`);
-
   console.log('[Migration] Done!');
   sqlite.close();
   process.exit(0);

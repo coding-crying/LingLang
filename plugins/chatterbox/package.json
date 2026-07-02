@@ -16,7 +16,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@livekit/agents": "workspace:*",
+    "@livekit/agents": "^1.2.3",
     "ws": "^8.18.0"
   },
   "devDependencies": {

@@ -38,13 +38,14 @@ export async function analyzeTurn({ userId, userUtterance, context }: TurnInput)
 
   const ISO_TO_NAME: Record<string, string> = { ru: 'Russian', es: 'Spanish', fr: 'French', pt: 'Portuguese', ar: 'Arabic', en: 'English' };
   const targetLangName = ISO_TO_NAME[user?.targetLanguage || 'ru'] || 'Russian';
+  const nativeLangName = ISO_TO_NAME[user?.nativeLanguage || 'en'] || 'English';
 
   // 1. Call Step 3.5 Flash via OpenRouter for Analysis
   const model = process.env.SUPERVISOR_LLM_MODEL || 'stepfun/step-3.5-flash:free';
   const result = await getClient().chat.completions.create({
     model,
     messages: [
-      { role: 'system', content: buildFullPrompt(targetLangName) },
+      { role: 'system', content: buildFullPrompt(targetLangName, nativeLangName) },
       { role: 'user', content: `Context: ${context}\nUser said: "${userUtterance}"` },
     ],
     temperature: 0.3,
@@ -77,26 +78,40 @@ export async function analyzeTurn({ userId, userUtterance, context }: TurnInput)
   // 2. Update DB
   await db.insert(users).values({ id: userId }).onConflictDoNothing();
 
-  const targetLang = analysis.language || user?.targetLanguage || 'ru';
+  // Per-lemma language routing: don't trust analysis.language (utterance-level)
+  // for native substitution checks. Prefer the per-lexeme `item.language` field
+  // the new prompt emits. Fall back to user's targetLanguage for the lexeme
+  // lookup since we need to know which language's lexeme table to search.
+  const targetLang = user?.targetLanguage || 'ru';
+  const nativeLang = user?.nativeLanguage || 'en';
 
   if (analysis.lexemes) {
     for (const item of analysis.lexemes) {
+      // Per-lexeme language (may be undefined for old LLM responses that
+      // don't yet emit it). When present, it overrides the utterance-level
+      // signal for both lexeme lookup and native-substitution classification.
+      const itemLang = (item.language || '').toLowerCase().trim();
+      const isNative = (itemLang && itemLang === nativeLang) || item.performance === 'native_substitution';
+      // Lookup language: for native words, the lexeme lives in nativeLang;
+      // for target words, in targetLang.
+      const lookupLang = isNative ? nativeLang : targetLang;
+
       // Match lexeme with correct language filter - try exact POS first
       let existingLexeme = await db.query.lexemes.findFirst({
         where: and(
           eq(lexemes.lemma, item.lemma),
           eq(lexemes.pos, item.pos),
-          eq(lexemes.language, targetLang)
+          eq(lexemes.language, lookupLang)
         )
       });
 
-      // Fallback: try GENERAL pos for Duolingo words
+      // Fallback: try GENERAL pos
       if (!existingLexeme) {
         existingLexeme = await db.query.lexemes.findFirst({
           where: and(
             eq(lexemes.lemma, item.lemma),
             eq(lexemes.pos, 'GENERAL'),
-            eq(lexemes.language, targetLang)
+            eq(lexemes.language, lookupLang)
           )
         });
       }
@@ -106,7 +121,7 @@ export async function analyzeTurn({ userId, userUtterance, context }: TurnInput)
         existingLexeme = await db.query.lexemes.findFirst({
           where: and(
             eq(lexemes.lemma, item.lemma),
-            eq(lexemes.language, targetLang)
+            eq(lexemes.language, lookupLang)
           )
         });
       }
@@ -114,7 +129,9 @@ export async function analyzeTurn({ userId, userUtterance, context }: TurnInput)
       if (existingLexeme) {
         // Use FSRS algorithm via supervisor-functions
         const { updateSRSFromAnalysis } = await import('../tools/supervisor-functions.js');
-        await updateSRSFromAnalysis(userId, { language: targetLang, lexemes: [item], grammarHints: analysis.grammarHints || [] });
+        // Pass the per-lexeme language through so updateSRSFromAnalysis can
+        // apply the function-word filter and per-lemma native-detection logic.
+        await updateSRSFromAnalysis(userId, { language: lookupLang, lexemes: [{ ...item, language: lookupLang }], grammarHints: analysis.grammarHints || [] });
       }
     }
   }

@@ -1,7 +1,6 @@
 import * as dotenv from 'dotenv';
 dotenv.config({ path: '.env.local' });
-import { type JobContext, type JobProcess, WorkerOptions, cli, defineAgent, llm, voice } from '@livekit/agents';
-import * as openai from '@livekit/agents-plugin-openai';
+import { type JobContext, type JobProcess, WorkerOptions, cli, defineAgent, voice } from '@livekit/agents';
 import * as silero from '@livekit/agents-plugin-silero';
 import { fileURLToPath } from 'node:url';
 import { analyzeTurn } from './tools/supervisor.js';
@@ -11,8 +10,7 @@ import { buildInstructions } from './config/prompts/base.js';
 import { db } from './db/index.js';
 import { users } from './db/schema.js';
 import { eq } from 'drizzle-orm';
-import { createTTS } from './tts/fallback.js';
-import { createSTT } from './stt/fallback.js';
+import { ServiceFactory } from './services/factory.js';
 
 export default defineAgent({
   prewarm: async (proc: JobProcess) => {
@@ -74,11 +72,13 @@ export default defineAgent({
 
     // === BUILD INSTRUCTIONS ===
 
-    const instructions = buildInstructions(langConfig.prompts.instructionsTemplate, {
+    const instructions = buildInstructions({
       targetLanguage: langConfig.name,
       nativeName: langConfig.nativeName,
+      nativeLanguage: langConfig.nativeLanguage,
       targetRatio: langConfig.pedagogy.targetLanguageRatio,
       userLevel: user.proficiencyLevel || 'beginner',
+      persona: "You are a sharp, witty language tutor. Roast mistakes with charm — not cruelty. No cheerleading.",
       initialContext,
       mode: 'voice',
     });
@@ -89,26 +89,20 @@ export default defineAgent({
       instructions,
     });
 
-    // === CONFIGURE SESSION WITH LANGUAGE-SPECIFIC SETTINGS ===
+    // === CONFIGURE SESSION WITH SERVICE FACTORY ===
 
-    const [ttsInstance, sttInstance] = await Promise.all([
-      createTTS(langConfig),
-      createSTT(langConfig),
+    const factory = new ServiceFactory({ targetLanguage: targetLang });
+    const [ttsInstance, llmInstance] = await Promise.all([
+      factory.createTTS(),
+      factory.createLLM(),
     ]);
+    const sttInstance = factory.createSTT();
 
     const session = new voice.AgentSession({
       agent,
       vad: ctx.proc.userData.vad! as silero.VAD,
       stt: sttInstance,
-
-      // LLM: Cloud (OLMo 3.1 via NanoGPT) or Local (Ollama)
-      llm: new openai.LLM({
-        baseURL: process.env.CONVERSATION_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:11434/v1',
-        model: process.env.CONVERSATION_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma3:4b',
-        apiKey: process.env.CONVERSATION_LLM_KEY || 'ollama',
-      }),
-
-      // TTS: MossTTS with ElevenLabs fallback
+      llm: llmInstance,
       tts: ttsInstance,
     });
 

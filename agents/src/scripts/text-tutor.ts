@@ -20,7 +20,7 @@ import { users, userVocabulary, lexemes } from '../db/schema.js';
 import { eq, asc } from 'drizzle-orm';
 import { ContextManager } from '../lib/context.js';
 import { runProcessor, runSupervisor, analyzeUtteranceWithLocalLLM, type UtteranceAnalysis, type UtteranceAnalysisResult } from '../tools/supervisor-functions.js';
-import { getLanguageConfig } from '../config/languages.js';
+import { getLanguageConfig, nativeLanguageName } from '../config/languages.js';
 import { buildInstructions } from '../config/prompts/base.js';
 
 // ============================================================================
@@ -118,11 +118,13 @@ async function generateTutorResponse(
 
   const grammarHints = processorResult?.analysis?.grammarHints?.join(' ') || 'None';
 
-  const systemPrompt = buildInstructions(langConfig.prompts.instructionsTemplate, {
+  const systemPrompt = buildInstructions({
     targetLanguage: langConfig.name,
     nativeName: langConfig.nativeName,
+    nativeLanguage: langConfig.nativeLanguage,
     targetRatio: langConfig.pedagogy.targetLanguageRatio,
     userLevel: 'beginner',
+    persona: langConfig.persona,
     initialContext: context,
     mode: 'text',
     recentErrors,

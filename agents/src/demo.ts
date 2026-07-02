@@ -202,11 +202,13 @@ Do not teach. Do not explain. Do not add anything else.`,
       ? 'Complete beginner. Lead the session — introduce ONE word or phrase at a time. Start with a basic greeting.'
       : 'Has some experience. Probe their level in the first exchange and calibrate accordingly.';
 
-    const instructions = buildInstructions(langConfig.prompts.instructionsTemplate, {
+    const instructions = buildInstructions({
       targetLanguage: langConfig.name,
       nativeName: langConfig.nativeName,
+      nativeLanguage: langConfig.nativeLanguage,
       targetRatio: langConfig.pedagogy.targetLanguageRatio,
       userLevel: isNew ? 'beginner' : 'intermediate',
+      persona: "You are a sharp, witty language tutor. Roast mistakes with charm — not cruelty. No cheerleading.",
       initialContext: `Language: ${langConfig.name}\nUser: ${userId}\n${levelNote}`,
       mode: 'voice',
     });

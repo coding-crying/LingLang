@@ -25,7 +25,15 @@
  */
 
 import * as dotenv from 'dotenv';
-dotenv.config({ path: '.env.local' });
+// override:true ensures .env.local always wins over inherited shell env —
+// otherwise a stray SERVICE_MODE=cloud from a parent shell silently pins us
+// to the cloud stack and the local gemma-audio path never runs.
+const _dotenvResult = dotenv.config({ path: '.env.local', override: true });
+const _envMode = process.env.SERVICE_MODE || 'local';
+const _envTts = process.env.TTS_MODE || 'local';
+const _envLlm = process.env.LOCAL_LLM_URL || 'unset';
+const _envLlmModel = process.env.LOCAL_LLM_MODEL || 'unset';
+console.log(`[ENV] SERVICE_MODE=${_envMode} TTS_MODE=${_envTts} LLM_URL=${_envLlm} LLM_MODEL=${_envLlmModel} (dotenv loaded ${_dotenvResult.parsed ? Object.keys(_dotenvResult.parsed).length : 0} vars${_dotenvResult.error ? `, error: ${_dotenvResult.error.message}` : ''})`);
 
 import {
   type JobContext,
@@ -46,30 +54,46 @@ import http from 'node:http';
 import { runProcessor } from './tools/supervisor-functions.js';
 import { dbTools } from './tools/db-tools.js';
 import { ContextManager } from './lib/context.js';
-import { getLanguageConfig, nativeLanguageName } from './config/languages.js';
-import { buildInstructions } from './config/prompts/base.js';
+import { audioPayloadRegistry } from './stt/gemma-audio-stt.js';
+import { getLanguageConfig, nativeLanguageName, LANGUAGES } from './config/languages.js';
+import { buildInstructions, buildOnboardingInstructions } from './config/prompts/base.js';
 import { PLANNER_SYSTEM_PROMPT, buildPlannerPrompt } from './config/prompts/supervisor.js';
 import { db } from './db/index.js';
 import { users } from './db/schema.js';
 import { eq } from 'drizzle-orm';
 import { emitEvent, setSessionId } from './lib/trace.js';
+import { llmEvents } from './lib/llm-events.js';
+import { getOnboardingState, saveOnboardingData, commitOnboardingLevel, buildOnboardingContext } from './lib/onboarding.js';
 
 // ============================================================================
 // CONVERSATION HISTORY (for context)
 // ============================================================================
 
+/**
+ * Audio-aware turn: a user turn may carry a `data:audio/wav;base64,...` URI
+ * captured by GemmaAudioSTT (the STT pass-through). The Tutor's main LLM
+ * resolves placeholders into audio_url content; the Processor and Planner do
+ * the same so they can critique pronunciation, not just lexemes/grammar.
+ */
+interface AudioAttachment {
+  audioId: string;
+  audioUri: string;       // data:audio/wav;base64,...
+  durationSec: number;
+}
+
 interface ConversationTurn {
   role: 'user' | 'assistant';
   content: string;
   timestamp: number;
+  audio?: AudioAttachment;  // present on user turns that came in as native audio
 }
 
 class ConversationHistory {
   private turns: ConversationTurn[] = [];
   private maxTurns = 5; // Planner maintains a running summary for older context
 
-  addUserTurn(content: string) {
-    this.turns.push({ role: 'user', content, timestamp: Date.now() });
+  addUserTurn(content: string, audio?: AudioAttachment) {
+    this.turns.push({ role: 'user', content, timestamp: Date.now(), audio });
     this.trim();
   }
 
@@ -90,6 +114,58 @@ class ConversationHistory {
       .join('\n');
   }
 
+  /**
+   * Audio-aware context for Processor/Planner.
+   * Returns an array of OpenAI-style chat messages where audio turns become
+   * `audio_url` content (mirrors GemmaAudioLLM.buildMessages) so the LLM
+   * can analyze pronunciation, not just the placeholder text.
+   *
+   * Older audio turns are collapsed to a short marker to bound the prompt
+   * size — the LLM only needs the *recent* audio for pronunciation feedback.
+   */
+  getContextAsMessages(opts: { keepRecentAudioTurns?: number } = {}): any[] {
+    const MAX_AUDIO_TURNS = opts.keepRecentAudioTurns ?? 3;
+
+    // First pass: find audio turns from the END backwards.
+    const audioIndices: number[] = [];
+    for (let i = this.turns.length - 1; i >= 0; i--) {
+      if (this.turns[i].role === 'user' && this.turns[i].audio) {
+        audioIndices.push(i);
+        if (audioIndices.length >= MAX_AUDIO_TURNS) break;
+      }
+    }
+    const audioKeep = new Set(audioIndices);
+    let collapsedOldAudio = false;
+
+    const out: any[] = [];
+    for (let i = 0; i < this.turns.length; i++) {
+      const t = this.turns[i];
+      if (t.role === 'user' && t.audio) {
+        if (audioKeep.has(i)) {
+          // Recent audio — keep as audio_url content for pronunciation analysis.
+          out.push({
+            role: 'user',
+            content: [
+              { type: 'text', text: '[User spoke — analyze their pronunciation and what they said.]' },
+              { type: 'audio_url', audio_url: { url: t.audio.audioUri } },
+            ],
+          });
+        } else if (!collapsedOldAudio) {
+          collapsedOldAudio = true;
+          out.push({
+            role: 'user',
+            content: '[The user spoke several sentences in Russian earlier in this conversation.]',
+          });
+        }
+        // else: skip — already collapsed
+      } else {
+        // Plain text turn (assistant replies, or text-only user turns)
+        out.push({ role: t.role, content: t.content });
+      }
+    }
+    return out;
+  }
+
   getLastUserTurn(): string | null {
     for (let i = this.turns.length - 1; i >= 0; i--) {
       if (this.turns[i].role === 'user') {
@@ -97,6 +173,22 @@ class ConversationHistory {
       }
     }
     return null;
+  }
+
+  /**
+   * Read-only view of recent user audio turns. Used by the Planner to hear
+   * pronunciation when audio is present. Returns up to `limit` turns, in
+   * chronological order (oldest first).
+   */
+  getRecentAudioTurns(limit: number = 3): AudioAttachment[] {
+    const out: AudioAttachment[] = [];
+    for (let i = this.turns.length - 1; i >= 0 && out.length < limit; i--) {
+      const t = this.turns[i];
+      if (t.role === 'user' && t.audio) {
+        out.unshift(t.audio);
+      }
+    }
+    return out;
   }
 }
 
@@ -263,8 +355,10 @@ export default defineAgent({
     if (!user) throw new Error(`Failed to create user ${userId}`);
 
     // === LANGUAGE CONFIG ===
-    const targetLang = user.targetLanguage;
-    const langConfig = getLanguageConfig(targetLang);
+    // Mutable: the processor can detect a language change request and
+    // update this mid-session, then refresh instructions.
+    let targetLang = user.targetLanguage;
+    let langConfig = getLanguageConfig(targetLang);
     console.log(`[Tutor-ED] Language: ${langConfig.name}`);
     emitEvent('session.start', { userId, language: langConfig.name, mode: process.env.SERVICE_MODE || 'local' });
 
@@ -279,20 +373,79 @@ export default defineAgent({
       initialContext = `Learning: ${langConfig.name}\nProficiency: ${user.proficiencyLevel}`;
     }
 
-    const usersNativeLanguage = nativeLanguageName(user.nativeLanguage || 'en');
+    let usersNativeLanguage = nativeLanguageName(user.nativeLanguage || 'en');
 
+    // 2026-06-25: per-language level inference. Reads all DB signals
+    // (vocab state distribution, grammar coverage, sessions, lapse rate)
+    // and produces a CEFR level. Manual override (dashboard) and onboarding
+    // results are respected. Replaces user.proficiencyLevel (global).
+    const { inferLevel } = await import('./lib/level-inference.js');
+    const levelEstimate = await inferLevel(userId, targetLang);
+    const userLevel = levelEstimate.level;
+    console.log(`[Tutor-ED] Level: ${userLevel} (${levelEstimate.source}, score=${levelEstimate.score.toFixed(1)}, conf=${levelEstimate.confidence.toFixed(2)})`);
+
+    // === ONBOARDING STATE ===
+    // Check if this user has completed onboarding for this language.
+    // If not, the agent runs the onboarding conversation first, then
+    // switches to normal tutoring once the verdict JSON is emitted.
+    const onboardingState = await getOnboardingState(userId, targetLang);
+    let inOnboarding = !onboardingState?.isComplete;
+    if (inOnboarding) {
+      console.log(`[Tutor-ED] Onboarding incomplete for ${userId}/${targetLang} — running intake flow`);
+      // Ensure the onboarding row exists (upsert with startedAt)
+      await saveOnboardingData(userId, targetLang, {});
+    } else {
+      console.log(`[Tutor-ED] Onboarding complete for ${userId}/${targetLang}`);
+    }
+
+    // Load the user's detected communication style. The processor EMA's the
+    // LLM's per-turn styleSignals into user_style; we read the current profile
+    // and tell the conversation LLM to mirror it.
+    const { readPersona, buildPersonaBlockSync, writePersona, parsePersonaRequest } = await import('./lib/persona.js');
+    const initialPersona = await readPersona(userId, targetLang);
+
+    // Mutable persona cache — updated when supervisor writes PERSONA: or user says "be more X"
+    let cachedPersona = {
+      personaOverride: initialPersona.personaOverride,
+      tone: initialPersona.tone,
+      correctionStyle: initialPersona.correctionStyle,
+      teachingMode: initialPersona.teachingMode,
+      extraInstructions: initialPersona.extraInstructions,
+    };
+
+    // Mutable cache of the user's style signals, refreshed by the processor
+    // when styleSignals arrive. Used by buildDynamicInstructions to compose
+    // adaptive length/register/roast lines. Initialized from defaults.
+    let currentStyleCache: Record<string, string> = {
+      humor: 'warm', pacing: 'medium', register: 'casual',
+      preamble: 'low', bsCallouts: 'neutral',
+    };
+
+    // 2026-06-25: parse wordsDue/wordsNew out of the initialContext string
+    // so the conversation prompt can foreground them as natural conversation
+    // seeds, not bury them in a multi-line context dump.
+    const wordsDue = extractWordsLine(initialContext, 'Vocabulary to Review');
+    const wordsNew = extractWordsLine(initialContext, 'New Vocabulary to Introduce');
     const instructions = buildInstructions({
       targetLanguage: langConfig.name,
       nativeName: langConfig.nativeName,
       nativeLanguage: usersNativeLanguage,
       targetRatio: langConfig.pedagogy.targetLanguageRatio,
-      userLevel: user.proficiencyLevel || 'beginner',
-      persona: langConfig.persona,
+      userLevel,
+      persona: buildPersonaBlockSync(
+        cachedPersona.personaOverride, cachedPersona.tone,
+        cachedPersona.correctionStyle, cachedPersona.teachingMode,
+        cachedPersona.extraInstructions, currentStyleCache,
+      ),
       initialContext,
       mode: 'voice',
       recentErrors: 'None',
       grammarHints: 'None',
       goalUpdate: '',
+      styleDirective: '',
+      wordsDue,
+      wordsNew,
+      previousSessionContext: null, // not loaded yet; refreshInstructions picks up real value
     });
 
     // === DYNAMIC INSTRUCTIONS (Supervisor-driven teaching plan) ===
@@ -367,26 +520,111 @@ export default defineAgent({
       }, 250);
     };
 
+    // Will be populated by refreshDbContext(); remains null for initial instructions
+    let greetingContext: string | null = null;
+
+    // ── Adaptive state — computed each time buildDynamicInstructions runs ──
+    // The conversation prompt adapts to session phase, error density, user
+    // engagement, and detected style. These are signals the orchestrator
+    // owns; the prompt builder is pure.
+    const recentUserTurnWords: number[] = []  // word counts, last 3 turns
+
+    // 2026-06-30: moved up from line ~1096. entry() calls
+    // buildDynamicInstructions() at line 591, which captures this. A `let`
+    // declared after the call site sits in the temporal dead zone when the
+    // closure runs. Keep all state captured by buildDynamicInstructions
+    // declared above its definition.
+    let totalUserTurns = 0;
+    const recentErrorCounts: number[] = []    // errors per processor run, last 3
+    const MAX_RECENT = 3
+
+    function computeSessionPhase(turnCount: number): 'opening' | 'warmup' | 'flow' | 'wrapup' {
+      if (turnCount === 0) return 'opening'
+      if (turnCount <= 2) return 'warmup'
+      // Wrapup: if user has had a long session and is in the last ~5 turns before disconnect
+      if (turnCount > 20) return 'wrapup'
+      return 'flow'
+    }
+
+    function computeErrorDensity(): number {
+      if (recentErrorCounts.length === 0) return 0
+      const sum = recentErrorCounts.reduce((a, b) => a + b, 0)
+      // 4 errors in a turn = 1.0, normalized
+      return Math.min(1, sum / (recentErrorCounts.length * 4))
+    }
+
+    function computeEngagement(): 'fast' | 'medium' | 'slow' {
+      if (recentUserTurnWords.length === 0) return 'medium'
+      const avg = recentUserTurnWords.reduce((a, b) => a + b, 0) / recentUserTurnWords.length
+      if (avg < 3) return 'fast'  // terse
+      if (avg > 12) return 'slow'  // long, detailed
+      return 'medium'
+    }
+
     const buildDynamicInstructions = () => {
+      // Onboarding mode: use the intake prompt until verdict is emitted
+      if (inOnboarding) {
+        return buildOnboardingInstructions({
+          targetLanguage: langConfig.name,
+          nativeName: langConfig.nativeName,
+          nativeLanguage: usersNativeLanguage,
+          existingData: onboardingState ? {
+            priorStudy: onboardingState.priorStudy ?? undefined,
+            studyDetails: onboardingState.studyDetails ?? undefined,
+            goals: onboardingState.goals ?? undefined,
+            goalDetails: onboardingState.goalDetails ?? undefined,
+            selfRatedLevel: onboardingState.selfRatedLevel ?? undefined,
+          } : undefined,
+        });
+      }
+
       const errorContext = lastProcessorRun?.structuredErrors
         ?.map((e: any) => `${e.lemma}: ${e.grammarRule?.rule || 'error'}`)
         .join('; ') || 'None';
 
       const hintContext = lastProcessorRun?.grammarHints?.join(' ') || 'None';
 
+      // Adaptive signals — read style from cache (refreshed by processor)
+      const styleMap = currentStyleCache;
+
+      const phase = computeSessionPhase(totalUserTurns)
+      const adaptive = {
+        sessionPhase: phase,
+        turnCount: totalUserTurns,
+        errorDensity: computeErrorDensity(),
+        avgUserTurnWords: recentUserTurnWords.length > 0
+          ? recentUserTurnWords.reduce((a, b) => a + b, 0) / recentUserTurnWords.length
+          : 5,
+        roastTolerance: (styleMap.bsCallouts ?? 'neutral') as 'tolerant' | 'neutral' | 'skeptical',
+        register: (styleMap.register ?? 'casual') as 'formal' | 'casual' | 'profane',
+        pacing: (styleMap.pacing === 'fast' || styleMap.pacing === 'slow')
+          ? styleMap.pacing
+          : computeEngagement(),
+      } as const;
+
       // Rebuild base instructions with current errors/hints (fills placeholders)
+      // Style directive is cached and refreshed by the processor.
       const updatedBase = buildInstructions({
         targetLanguage: langConfig.name,
         nativeName: langConfig.nativeName,
         nativeLanguage: usersNativeLanguage,
         targetRatio: langConfig.pedagogy.targetLanguageRatio,
-        userLevel: user.proficiencyLevel || 'beginner',
-        persona: langConfig.persona,
+        userLevel,
+        persona: buildPersonaBlockSync(
+          cachedPersona.personaOverride, cachedPersona.tone,
+          cachedPersona.correctionStyle, cachedPersona.teachingMode,
+          cachedPersona.extraInstructions, currentStyleCache,
+        ),
         initialContext,
         mode: 'voice',
         recentErrors: errorContext,
         grammarHints: hintContext,
-        goalUpdate: supervisorNudge || 'Get them talking. Find out what they know, then build from there.',
+        goalUpdate: supervisorNudge || 'Just chat. React to what they say. If quiet, ask a simple question.',
+        styleDirective: '',
+        wordsDue,
+        wordsNew,
+        previousSessionContext: greetingContext,
+        adaptive,
       });
 
       return `${updatedBase}
@@ -395,6 +633,14 @@ You have tools to look up words and check the learner's progress. Use them when 
 Correct the underlying pattern, not just the individual word.`;
     };
 
+    // Helper: pull a single line out of the initialContext string by its
+    // label. Used to surface due/new vocab lists to the conversation prompt
+    // as foregrounded conversation seeds.
+    function extractWordsLine(ctx: string, label: string): string {
+      const m = ctx.match(new RegExp(`${label}[^:]*:\\s*([^\\n]+)`));
+      const v = m?.[1]?.trim() || '';
+      return v === 'None' ? '' : v;
+    }
     // === CREATE AGENT ===
     const agent = new voice.Agent({
       instructions: buildDynamicInstructions(),
@@ -554,6 +800,8 @@ Correct the underlying pattern, not just the individual word.`;
     let cachedDbContext = '';
     let cachedNotes = '';
     let cachedSessions = '';
+    let lastSessionHint: string | null = null;
+    let lastSessionGapHours: number | null = null;
     let dbContextAt = 0;
 
     const refreshDbContext = async () => {
@@ -565,11 +813,157 @@ Correct the underlying pattern, not just the individual word.`;
       cachedDbContext = dbContext;
       cachedNotes = notes;
       cachedSessions = sessions;
+      // 2026-06-25: pull the most-recent session's nextSessionHint so the
+      // greeting can use it. Without this the agent opens every session
+      // with the same hardcoded greeting — even if the previous session
+      // explicitly wrote "next time focus on Bom dia" to the DB.
+      const recent = await ContextManager.getRecentSummaries(userId, 1);
+      const last = recent[0];
+      if (last) {
+        lastSessionHint = last.nextSessionHint ?? null;
+        if (last.endedAt) {
+          lastSessionGapHours = Math.round(
+            (Date.now() - new Date(last.endedAt).getTime()) / 3_600_000,
+          );
+        }
+      }
       dbContextAt = Date.now();
     };
 
     // Warm the cache at session start
-    refreshDbContext().catch(() => {});
+    await refreshDbContext().catch(() => {});
+
+    // === BUILD GREETING CONTEXT ===
+    // 2026-06-25: instead of a hardcoded greeting string, the LLM
+    // generates the opening itself — but with the previous session's
+    // nextSessionHint + gap foregrounded in the system prompt so the
+    // agent naturally picks up where it left off. The greeting line
+    // itself comes from the persona + hint, not a template.
+    greetingContext = lastSessionHint
+      ? lastSessionGapHours !== null && lastSessionGapHours >= 24
+        ? `Last session was ${Math.round(lastSessionGapHours / 24)} day(s) ago. You had planned to focus on: ${lastSessionHint}. Start with a warmup of that before anything new.`
+        : lastSessionGapHours !== null && lastSessionGapHours >= 1
+          ? `Last session was ${lastSessionGapHours} hour(s) ago. You had planned to focus on: ${lastSessionHint}. Pick that up.`
+          : `Last session just ended. You had planned to focus on: ${lastSessionHint}. Continue from there.`
+      : null;
+
+    // === HELPERS: supervisor trigger handling ===
+    // Called after processor runs. Handles immediate-action triggers
+    // detected by the processor (language change, difficulty adjustment,
+    // goal change, session feedback) without waiting for the planner timer.
+    const handleSupervisorTriggers = async (triggers: any[]) => {
+      // Reverse map: language name → ISO code (for fallback reclassification)
+      const langNameToCode: Record<string, string> = {
+        english: 'en', russian: 'ru', spanish: 'es', french: 'fr',
+        portuguese: 'pt', arabic: 'ar', german: 'de', chinese: 'zh',
+        japanese: 'ja', korean: 'ko', italian: 'it', dutch: 'nl',
+      };
+
+      for (const trigger of triggers) {
+        // Fallback: if goal_change value matches a language name, reclassify as language_change
+        if (trigger.type === 'goal_change' && trigger.value) {
+          const langCode = langNameToCode[trigger.value.toLowerCase()];
+          if (langCode && langCode !== targetLang) {
+            console.log(`[Trigger] Reclassifying goal_change→language_change: ${trigger.value} → ${langCode}`);
+            trigger.type = 'language_change';
+            trigger.value = langCode;
+          }
+        }
+
+        emitEvent('supervisor.trigger', trigger as any);
+        console.log(`[Trigger] ${trigger.type}: ${trigger.value || trigger.reason || ''}`);
+
+        if (trigger.type === 'language_change' && trigger.value) {
+          const newLang = trigger.value;
+          const newConfig = getLanguageConfig(newLang);
+          if (!newConfig || !LANGUAGES[newLang]) {
+            console.warn(`[Trigger] Unsupported language: ${newLang}`);
+            continue;
+          }
+          try {
+            await db.update(users).set({ targetLanguage: newLang }).where(eq(users.id, userId));
+            console.log(`[Trigger] Language changed: ${targetLang} → ${newLang}`);
+          } catch (err) {
+            console.error(`[Trigger] Failed to update DB:`, err);
+            continue;
+          }
+          targetLang = newLang;
+          langConfig = newConfig;
+          // Update TTS voice to match the new language
+          const ttsService = session.tts as any;
+          if (ttsService?.updateVoice) {
+            ttsService.updateVoice(newConfig.tts.omnivoiceVoice || 'auto', newConfig.tts.omnivoiceLanguage || newLang);
+          } else {
+            console.warn('[Trigger] TTS does not support updateVoice — voice will stay as the old language');
+          }
+          await refreshDbContext();
+          supervisorNudge = `The user has switched to learning ${newConfig.name}. Greet them in ${newConfig.name} and start fresh — find out what they know.`;
+          await refreshInstructions();
+          pendingSignals.push('language_changed');
+          updatePlanNow('user_request').catch(() => {});
+        }
+
+        if (trigger.type === 'difficulty_adjustment' && trigger.value) {
+          const direction = trigger.value;
+          try {
+            const currentLevel = user.proficiencyLevel || 'beginner';
+            const levels = ['beginner', 'intermediate', 'advanced'];
+            const idx = levels.indexOf(currentLevel);
+            const newIdx = direction === 'easier' ? Math.max(0, idx - 1) : Math.min(levels.length - 1, idx + 1);
+            const newLevel = levels[newIdx];
+            if (newLevel !== currentLevel) {
+              await db.update(users).set({ proficiencyLevel: newLevel }).where(eq(users.id, userId));
+              user.proficiencyLevel = newLevel;
+              console.log(`[Trigger] Difficulty: ${currentLevel} → ${newLevel}`);
+              supervisorNudge = `Adjusted difficulty to ${newLevel}. Adapt your teaching accordingly.`;
+              await refreshInstructions();
+            }
+          } catch (err) {
+            console.error(`[Trigger] Difficulty adjustment failed:`, err);
+          }
+        }
+
+        if (trigger.type === 'goal_change' && trigger.value) {
+          supervisorNudge = `The user wants to focus on: ${trigger.value}. Adjust your teaching to cover this topic.`;
+          await refreshInstructions();
+          pendingSignals.push('goal_changed');
+        }
+
+        if (trigger.type === 'onboarding_signal' && trigger.value) {
+          try {
+            const data = JSON.parse(trigger.value);
+            await saveOnboardingData(userId, targetLang, {
+              priorStudy: data.priorStudy,
+              studyDetails: data.studyDetails,
+              goals: data.goals,
+              goalDetails: data.goalDetails,
+              selfRatedLevel: data.selfRatedLevel,
+            });
+            trace('onboarding.signal.saved', trigger.value.substring(0, 120));
+            console.log(`[Onboarding] Signal saved: ${trigger.value.substring(0, 80)}`);
+          } catch (err) {
+            console.warn('[Onboarding] Failed to parse onboarding_signal value:', err);
+          }
+        }
+
+        if (trigger.type === 'session_feedback') {
+          pendingSignals.push('user_feedback');
+        }
+
+        // persona_update: user said "be more X" or similar — parse and apply
+        if (trigger.type === 'persona_update' && trigger.value) {
+          const personaPatch = parsePersonaRequest(trigger.value);
+          if (personaPatch) {
+            personaPatch.source = 'user_voice';
+            await writePersona(userId, targetLang, personaPatch);
+            Object.assign(cachedPersona, personaPatch);
+            supervisorNudge = `The user asked to adjust the teaching style: "${trigger.value}". Acknowledge briefly and adapt.`;
+            await refreshInstructions();
+            trace('trigger.persona_update', JSON.stringify(personaPatch));
+          }
+        }
+      }
+    };
 
     const updatePlanNow = async (reason: string) => {
       try {
@@ -614,6 +1008,14 @@ Correct the underlying pattern, not just the individual word.`;
 
       const systemPrompt = PLANNER_SYSTEM_PROMPT;
 
+      // Collect recent user audio turns from history. 2026-06-25: the
+      // planner was returning empty responses because 3 base64 audio
+      // URLs (~1300 tokens each) plus max_tokens=4096 exceeded the model's
+      // 4096 context limit, SGLang returned 400, and the planner code
+      // saw no content field. The planner doesn't actually need to hear
+      // the audio — the processor scores pronunciation. Planner only
+      // needs the text transcripts. Force text mode.
+      const useAudioMessages = false;
       const userPrompt = buildPlannerPrompt({
         dbContext,
         goalNote,
@@ -625,7 +1027,14 @@ Correct the underlying pattern, not just the individual word.`;
         notes,
         recentSessions,
       });
+      const plannerMessages: any[] = [{ role: 'user', content: userPrompt }];
 
+      console.log(
+        `[Planner] mode=text model=${plannerModel} url=${plannerUrl}`,
+      );
+
+      // 2026-06-25: planner now text-only. 300 tokens is plenty for
+      // NUDGE + SUMMARY (2-3 short sentences).
       const resp = await fetch(`${plannerUrl}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -636,14 +1045,19 @@ Correct the underlying pattern, not just the individual word.`;
           model: plannerModel,
           messages: [
             { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt },
+            ...plannerMessages,
           ],
           temperature: 0.2,
-          max_tokens: 4096,
+          max_tokens: 300,
         }),
       });
 
       const data = (await resp.json()) as any;
+      // 2026-06-25: log non-2xx so silent failures (400, 500) are visible.
+      if (!resp.ok) {
+        console.warn(`[Planner] HTTP ${resp.status}: ${JSON.stringify(data).slice(0, 300)}`);
+        return;
+      }
       const msg = data.choices?.[0]?.message;
       // Think models: content may be empty if reasoning consumed the budget.
       // Fall back to reasoning_content, or extract JSON from it.
@@ -670,6 +1084,10 @@ Correct the underlying pattern, not just the individual word.`;
       let parsedNudge = '';
       let parsedSummary = '';
       const noteRegex = /^NOTE\[([a-z]+)\]:\s*(.+)$/;
+      // PERSONA: <field>=<value>[, <field>=<value>...] — supervisor patches the adaptive shell
+      // Example: PERSONA: tone=warm, correctionStyle=gentle
+      // Example: PERSONA: personaOverride=You are a sharp Lisbon local who roasts with dry wit.
+      const personaRegex = /^PERSONA:\s*(.+)$/;
 
       if (noteContent) {
         for (const line of noteContent.split('\n')) {
@@ -678,6 +1096,33 @@ Correct the underlying pattern, not just the individual word.`;
             const [, category, noteText] = m;
             await ContextManager.writeNote(userId, category, noteText, 'observed');
             trace('planner.note.written', `${category}: ${noteText.substring(0, 60)}`);
+
+            // NOTE[preference] also feeds into persona — parse it as a natural-language request
+            if (category === 'preference') {
+              const personaPatch = parsePersonaRequest(noteText);
+              if (personaPatch) {
+                personaPatch.source = 'supervisor';
+                await writePersona(userId, targetLang, personaPatch);
+                Object.assign(cachedPersona, personaPatch);
+                trace('planner.persona.updated', JSON.stringify(personaPatch));
+              }
+            }
+          }
+
+          // PERSONA: direct structured patch from supervisor
+          const pm = line.match(personaRegex);
+          if (pm) {
+            const patch: Record<string, string> = {};
+            for (const part of pm[1].split(',')) {
+              const [k, ...rest] = part.trim().split('=');
+              if (k && rest.length) patch[k.trim()] = rest.join('=').trim();
+            }
+            if (Object.keys(patch).length > 0) {
+              const personaPatch = { ...patch, source: 'supervisor' } as any;
+              await writePersona(userId, targetLang, personaPatch);
+              Object.assign(cachedPersona, patch);
+              trace('planner.persona.patched', JSON.stringify(patch));
+            }
           }
         }
       }
@@ -764,7 +1209,6 @@ Correct the underlying pattern, not just the individual word.`;
     // Batch ingestion: run the processor every N user turns and feed it the last N turns.
     const PROCESSOR_TURN_INTERVAL = Number(process.env.PROCESSOR_TURN_INTERVAL || 1);
     const pendingUserTurns: string[] = [];
-    let totalUserTurns = 0;
     let lastProcessedTranscript = '';  // Deduplicate: STT may emit FINAL_TRANSCRIPT after VAD EOU
 
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, async (ev: any) => {
@@ -786,8 +1230,36 @@ Correct the underlying pattern, not just the individual word.`;
       }
       lastProcessedTranscript = transcription;
 
-      console.log(`[User] ${transcription}`);
-      history.addUserTurn(transcription);
+      // Detect audio-placeholder transcripts from GemmaAudioSTT. The STT
+      // pass-through emits `[audio key=<id> dur=<n>s]` and stashes the real
+      // audio URI in audioPayloadRegistry. We pull the URI here so the
+      // Processor and Planner can analyze pronunciation.
+      const audioKeyMatch = transcription.match(/^\[audio key=([A-Za-z0-9]+)(?: dur=([0-9.]+)s)?\]$/);
+      let audioAttachment: AudioAttachment | undefined;
+      if (audioKeyMatch) {
+        const audioId = audioKeyMatch[1];
+        const entry = audioPayloadRegistry.get(audioId);
+        if (entry) {
+          audioAttachment = {
+            audioId,
+            audioUri: entry.uri,
+            durationSec: entry.durationSec,
+          };
+          console.log(
+            `[User] Audio turn: key=${audioId} dur=${entry.durationSec.toFixed(2)}s ` +
+            `(${(entry.uri.length / 1024).toFixed(1)} KB)`,
+          );
+        } else {
+          console.warn(
+            `[User] Audio key=${audioId} not in registry ` +
+            `(size=${audioPayloadRegistry.size}) — Processor will see placeholder only`,
+          );
+        }
+      } else {
+        console.log(`[User] ${transcription}`);
+      }
+
+      history.addUserTurn(transcription, audioAttachment);
       emitEvent('user.transcript', { text: transcription, isFinal: true });
 
       totalUserTurns++;
@@ -796,10 +1268,24 @@ Correct the underlying pattern, not just the individual word.`;
         pendingUserTurns.shift();
       }
 
+      // Adaptive: track turn length for engagement detection.
+      // Audio placeholder words ≈ duration * 2.5; text = actual word count.
+      const isAudioTurn = transcription.startsWith('[audio key=');
+      const wordCount = isAudioTurn
+        ? Math.round((audioAttachment?.durationSec ?? 0) * 2.5)
+        : transcription.split(/\s+/).filter(w => w.length > 0).length;
+      recentUserTurnWords.push(wordCount);
+      if (recentUserTurnWords.length > MAX_RECENT) recentUserTurnWords.shift();
+
       // Only run the processor every N turns
       if (totalUserTurns % PROCESSOR_TURN_INTERVAL !== 0) return;
 
       const batchUtterance = pendingUserTurns.join('\n');
+
+      // For audio turns, hand the Processor the audio-aware history (recent
+      // audio kept as audio_url, older audio collapsed to text). For text-only
+      // turns, fall back to the legacy flat-string path.
+      const historyMessages = history.getContextAsMessages({ keepRecentAudioTurns: 3 });
 
       runProcessor(userId, batchUtterance, history.getContext(), {
         useGemini: false,
@@ -807,6 +1293,7 @@ Correct the underlying pattern, not just the individual word.`;
         llmModel: process.env.PROCESSOR_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma4-26b',
         llmKey: process.env.PROCESSOR_LLM_KEY || process.env.LOCAL_LLM_KEY || '',
         recentHistory: history.getContext(),
+        historyMessages,
       }).then((result) => {
         lastProcessorRun = {
           at: Date.now(),
@@ -817,6 +1304,22 @@ Correct the underlying pattern, not just the individual word.`;
           rawPrompt: result.rawPrompt,
           rawResponse: result.rawResponse,
         };
+
+        // Adaptive: track error count for error density computation
+        const errorCount = (result.analysis?.lexemes ?? []).filter(
+          (l: any) => l.performance === 'wrong_use' || l.performance === 'recall_fail',
+        ).length;
+        recentErrorCounts.push(errorCount);
+        if (recentErrorCounts.length > MAX_RECENT) recentErrorCounts.shift();
+
+        // Adaptive: refresh style cache from supervisor's styleSignals
+        if (result.analysis?.styleSignals) {
+          for (const [k, v] of Object.entries(result.analysis.styleSignals)) {
+            if (typeof v === 'string' && v.length > 0) {
+              currentStyleCache[k] = v;
+            }
+          }
+        }
 
         // Accumulate for session summary
         sessionStats.totalSrsUpdates += result.srsUpdates?.length || 0;
@@ -831,14 +1334,28 @@ Correct the underlying pattern, not just the individual word.`;
         addSubagentChat('Processor', result.rawPrompt || 'No prompt', result.rawResponse || 'No response');
         writeRuntimeStateSoon();
 
-        // Emit structured processor events for dashboard
+        // Emit structured processor events for dashboard.
+        // Decorate each lexeme with its tracking status so the UI can color-code:
+        //   'tracked'  — DB row created or updated (color by performance: green/red/yellow/orange/blue)
+        //   'analyzed' — LLM classified but no DB row (function words, displayed as neutral grey)
+        //   'noop'     — looked up but no row modified (displayed but no change)
+        const trackingArr: ('tracked' | 'analyzed' | 'noop')[] =
+          (result.analysis as any)?.tracking || [];
+        const decoratedLexemes = (result.analysis?.lexemes || []).map((lex, i) => ({
+          ...lex,
+          tracking: trackingArr[i] || 'analyzed',
+        }));
+
         emitEvent('processor.analysis', {
           utterance: batchUtterance,
+          lexemes: decoratedLexemes,
+          srsUpdates: result.srsUpdates || [],
           lexemeCount: result.analysis?.lexemes?.length || 0,
           srsUpdateCount: result.srsUpdates?.length || 0,
           errors: result.errors,
           structuredErrors: result.structuredErrors || [],
           grammarHints: result.grammarHints || [],
+          supervisorTriggers: result.supervisorTriggers || [],
         });
         emitEvent('processor.raw', {
           prompt: (result.rawPrompt || '').substring(0, 4000),
@@ -855,6 +1372,14 @@ Correct the underlying pattern, not just the individual word.`;
         }
         if ((result.srsUpdates?.length || 0) > 0) {
           pendingSignals.push('srs_updated');
+        }
+
+        // Handle immediate-action triggers from the processor
+        // (language change, difficulty adjustment, goal change, session feedback)
+        if (result.supervisorTriggers && result.supervisorTriggers.length > 0) {
+          handleSupervisorTriggers(result.supervisorTriggers).catch((err) => {
+            console.error('[Trigger] Handler failed:', err);
+          });
         }
 
         // Mark so supervisor considers a refresh on the next timer tick.
@@ -895,6 +1420,50 @@ Correct the underlying pattern, not just the individual word.`;
       if (item?.role === 'assistant' && item?.textContent) {
         emitEvent('agent.reply', { text: item.textContent, source: item.source || 'unknown' });
         history.addAssistantTurn(item.textContent);
+
+        // Onboarding verdict detection — watch for the JSON block the intake
+        // prompt instructs the agent to emit when it has enough signal.
+        if (inOnboarding) {
+          const verdictMatch = item.textContent.match(/```onboarding_verdict\s*([\s\S]*?)```/);
+          if (verdictMatch) {
+            try {
+              const verdict = JSON.parse(verdictMatch[1].trim());
+              const level = verdict.anchoredLevel || verdict.selfRatedLevel || 'a1';
+              const confidence = typeof verdict.anchorConfidence === 'number' ? verdict.anchorConfidence : 0.6;
+              const evidence = verdict.anchorEvidence || 'Voice onboarding assessment';
+              console.log(`[Onboarding] Verdict received: level=${level} conf=${confidence} evidence="${evidence}"`);
+              trace('onboarding.verdict', `level=${level} conf=${confidence}`);
+
+              // Commit level anchor + mark onboarding complete
+              commitOnboardingLevel(userId, targetLang, level, confidence, evidence, 'voice')
+                .then(() => {
+                  // Save background/goals from verdict
+                  return saveOnboardingData(userId, targetLang, {
+                    priorStudy: verdict.priorStudy ?? undefined,
+                    studyDetails: verdict.studyDetails ?? undefined,
+                    goals: verdict.goals ?? undefined,
+                    goalDetails: verdict.goalDetails ?? undefined,
+                    selfRatedLevel: verdict.selfRatedLevel ?? undefined,
+                  });
+                })
+                .then(async () => {
+                  inOnboarding = false;
+                  // Refresh instructions to switch to normal tutoring
+                  await refreshDbContext();
+                  supervisorNudge = `Onboarding complete. The user's level is ${level}. Start the first real lesson — pick up naturally from the intake conversation.`;
+                  await refreshInstructions();
+                  pendingSignals.push('onboarding_complete');
+                  updatePlanNow('onboarding_complete').catch(() => {});
+                  console.log(`[Onboarding] Complete — switched to normal tutoring (${level})`);
+                })
+                .catch((err) => {
+                  console.error('[Onboarding] Failed to commit verdict:', err);
+                });
+            } catch (err) {
+              console.warn('[Onboarding] Failed to parse verdict JSON:', err);
+            }
+          }
+        }
       }
     });
 
@@ -968,9 +1537,15 @@ Correct the underlying pattern, not just the individual word.`;
       if (typeof activity._pipelineReplyTaskImpl === 'function') {
         const origPipelineReplyTaskImpl = activity._pipelineReplyTaskImpl.bind(activity);
         activity._pipelineReplyTaskImpl = (async (opts: any) => {
+          // Strip channel markers from LLM output before TTS + history
+          const rawText = opts?.newMessage?.textContent || '';
+          const cleanText = rawText.replace(/<\|channel>thought\n<channel\|>/g, '').trim();
+          if (cleanText !== rawText && opts?.newMessage) {
+            opts.newMessage.textContent = cleanText;
+          }
           trace(
             'activity._pipelineReplyTaskImpl.start',
-            `speechId=${opts?.speechHandle?.id || 'unknown'} newMessage=${JSON.stringify(opts?.newMessage?.textContent || '')}`,
+            `speechId=${opts?.speechHandle?.id || 'unknown'} newMessage=${JSON.stringify(cleanText || '')}`,
           );
           try {
             const result = await origPipelineReplyTaskImpl(opts);
@@ -1025,19 +1600,62 @@ Correct the underlying pattern, not just the individual word.`;
       trace('session.activity.missing');
     }
 
-    console.log('[Tutor-ED] Sending initial greeting...');
-    // RealtimeModel doesn't support say() - AgentSession handles it internally
-    // The agent instructions already contain the greeting context
+    // === OPENING MESSAGE ===
+    // 2026-06-25: was a hardcoded `session.say(langConfig.prompts.greeting)` —
+    // a fixed string that opened every session the same way. The agent
+    // would say "Olá, ready?" even when the previous session had a
+    // specific nextSessionHint waiting in the DB.
+    //
+    // Now: the LLM generates the opening itself based on the persona,
+    // the previous-session context (foregrounded in the system prompt
+    // right after the persona — QAT loses focus on context buried at
+    // the bottom of the prompt), and the frontier vocabulary. The
+    // agent decides how to say it — a Lisbon local would naturally
+    // say "E aí, vamos continuar com o pão?" when picking up from a
+    // previous session.
+    //
+    // We trigger the LLM by sending a system-style user message that
+    // the LLM reads as "the user has just connected." Plain "..." was
+    // too vague and the LLM defaulted to a generic "Olá, tudo bem?"
+    // — explicit context cues the persona + previous-session hint to
+    // produce a real continuation message.
+    console.log('[Tutor-ED] Sending initial greeting (LLM-generated)...');
     if (!isGemini) {
-      trace('session.say.initial_greeting');
-      session.say(langConfig.prompts.greeting);
+      trace('session.generateReply.opening');
+      try {
+        await session.generateReply({
+          userInput: '[system: the user has just connected — greet them and pick up where you left off]',
+        });
+      } catch (err: any) {
+        console.warn('[Tutor-ED] generateReply failed, falling back to hardcoded greeting:', err?.message);
+        session.say(langConfig.prompts.greeting);
+      }
     }
-    // For gemini, let AgentSession handle the initial response naturally
+
+    // === LLM TOKEN STREAM → DASHBOARD ===
+    // Subscribe to the LLM event bus and forward each text delta to the
+    // dashboard as `llm.token` events. The dashboard's SSE endpoint relays
+    // these to the UI so the user can read along with the audio playback.
+    // The bus is process-wide, so we tag each event with the user/room for
+    // the dashboard to filter.
+    const roomName = ctx.room.name;
+    const onLlmToken = (ev: { text: string; index: number; isStart: boolean; isEnd: boolean }) => {
+      emitEvent('llm.token', {
+        userId,
+        roomName,
+        text: ev.text,
+        index: ev.index,
+        isStart: ev.isStart,
+        isEnd: ev.isEnd,
+      });
+    };
+    llmEvents.on('token', onLlmToken);
 
     // Persist session summary on disconnect — uses planner's running summary, no extra LLM call
     ctx.room.on('disconnected', () => {
       console.log('[Tutor-ED] Session ended');
       clearInterval(planTimer);
+      llmEvents.off('token', onLlmToken);
       persistSessionSummary(userId, sessionStartedAt, runningSummary, sessionStats);
     });
   },
@@ -1045,5 +1663,8 @@ Correct the underlying pattern, not just the individual word.`;
 
 // CLI entry point
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  cli.runApp(new WorkerOptions({ agent: fileURLToPath(import.meta.url) }));
+  cli.runApp(new WorkerOptions({
+    agent: fileURLToPath(import.meta.url),
+    agentName: process.env.LINGLANG_AGENT_NAME ?? 'linglang-tutor',
+  }));
 }

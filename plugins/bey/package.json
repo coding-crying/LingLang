@@ -34,7 +34,7 @@
     "api:update": "api-extractor run --local --typescript-compiler-folder ../../node_modules/typescript --verbose"
   },
   "devDependencies": {
-    "@livekit/agents": "workspace:*",
+    "@livekit/agents": "^1.2.3",
     "@livekit/rtc-node": "^0.13.22",
     "@microsoft/api-extractor": "^7.35.0",
     "pino": "^8.19.0",
@@ -45,7 +45,7 @@
     "livekit-server-sdk": "^2.13.3"
   },
   "peerDependencies": {
-    "@livekit/agents": "workspace:*",
+    "@livekit/agents": "^1.2.3",
     "@livekit/rtc-node": "^0.13.22"
   }
 }

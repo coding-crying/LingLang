@@ -1,21 +1,11 @@
 import { db } from '../db/index.js';
-import { userVocabulary, units, lexemes, users, activeGoals, duolingoMetadata } from '../db/schema.js';
-import { eq, and, asc, desc, lte, isNull, sql } from 'drizzle-orm';
+import { userVocabulary, units, lexemes, users, activeGoals, userNotes, sessionSummaries } from '../db/schema.js';
+import { eq, and, asc, desc, lte, isNull, sql, isNotNull } from 'drizzle-orm';
 
 export class ContextManager {
 
   static async getInitialContext(userId: string): Promise<string> {
     console.log(`[Context] Fetching context for ${userId}...`);
-
-    // Check if user has Duolingo data linked
-    const metadata = await db.query.duolingoMetadata.findFirst({
-      where: eq(duolingoMetadata.userId, userId)
-    });
-
-    if (metadata) {
-      console.log(`[Context] User has Duolingo metadata, using Duolingo context.`);
-      return this.getInitialContextForDuolingo(userId);
-    }
 
     // Get user to determine target language
     const user = await db.query.users.findFirst({
@@ -29,45 +19,44 @@ export class ContextManager {
     const targetLang = user.targetLanguage || 'ru';
     console.log(`[Context] Target language: ${targetLang}`);
 
-    // Curriculum: pick the earliest unit for the target language.
-    const currentUnit = await db.query.units.findFirst({
-      where: eq(units.language, targetLang),
-      orderBy: [asc(units.order)],
-    });
-    console.log(`[Context] Current unit: ${currentUnit?.title}`);
-
-    if (!currentUnit) return "No curriculum found.";
-
     const now = new Date();
 
-    // FSRS: only show items that are actually due.
+    // FSRS: only show items that are actually due AND in the target language.
     console.log(`[Context] Querying due reviews...`);
-    const dueReviews = await db.query.userVocabulary.findMany({
+    const allDue = await db.query.userVocabulary.findMany({
       where: and(
         eq(userVocabulary.userId, userId),
         lte(userVocabulary.due, now)
       ),
       with: { lexeme: true },
       orderBy: [asc(userVocabulary.due)],
-      limit: 5,
+      limit: 20,
     });
-    console.log(`[Context] Found ${dueReviews.length} reviews`);
+    // Filter to target-language lexemes only (native-language entries are substitution tracking, not learning targets)
+    const dueReviews = allDue.filter((v: any) => v.lexeme?.language === targetLang).slice(0, 5);
+    console.log(`[Context] Found ${dueReviews.length} target-language reviews (filtered from ${allDue.length} total)`);
 
     const reviewList = dueReviews.map((p: any) => `${p.lexeme.lemma} (${p.lexeme.translation})`).join(', ');
 
     console.log(`[Context] Querying new words...`);
-    const unitLexemes = await db.query.lexemes.findMany({
-      where: and(
-        eq(lexemes.unitId, currentUnit.id),
-        eq(lexemes.language, targetLang)
-      ),
-      limit: 12,
+    // Pick new words by frequency rank (breadth-first, not unit-based)
+    const allStartedVocab = await db.query.userVocabulary.findMany({
+      where: eq(userVocabulary.userId, userId),
+      columns: { lexemeId: true },
     });
-    console.log(`[Context] Found ${unitLexemes.length} unit lexemes`);
+    const startedLexemeIds = new Set(allStartedVocab.map((p: typeof userVocabulary.$inferSelect) => p.lexemeId));
+    const newWordCandidates = await db.query.lexemes.findMany({
+      where: and(
+        eq(lexemes.language, targetLang),
+      ),
+      orderBy: [asc(lexemes.frequencyRank)],
+      limit: 30,
+    });
+    console.log(`[Context] Found ${newWordCandidates.length} candidates`);
 
-    // Filter: words not in dueReviews
-    const newWords = unitLexemes
-        .filter((l: typeof lexemes.$inferSelect) => !dueReviews.find((r: typeof userVocabulary.$inferSelect & { lexeme: typeof lexemes.$inferSelect }) => r.lexemeId === l.id))
+    // Filter: words not already in dueReviews or started vocab
+    const newWords = newWordCandidates
+        .filter((l: typeof lexemes.$inferSelect) => !startedLexemeIds.has(l.id))
         .slice(0, 3)
         .map((l: typeof lexemes.$inferSelect) => `${l.lemma} (${l.translation})`)
         .join(', ');
@@ -82,14 +71,12 @@ export class ContextManager {
 User ID: ${userId}
 Target Language: ${targetLang}
 Native Language: ${user.nativeLanguage}
-Proficiency Level: ${user.proficiencyLevel}
 NEW_USER: ${isNewUser ? 'true' : 'false'}
 
-Curriculum Unit: ${currentUnit.title}
-Unit Description: ${currentUnit.description}
-
 Vocabulary to Review (DUE by FSRS): ${reviewList || "None"}
-New Vocabulary to Introduce (next in curriculum): ${newWords || "None"}
+New Vocabulary to Introduce (by frequency): ${newWords || "None"}
+
+Note: This snapshot was taken at session start. Use your tools to check current vocab state during the session.
     `.trim();
   }
 
@@ -135,20 +122,19 @@ New Vocabulary to Introduce (next in curriculum): ${newWords || "None"}
     console.log(`[GoalSeek] No active goal. Checking for remediation...`);
 
     // Priority A: Remediation (Recent failures = state 1 Learning or state 3 Relearning)
+    // Skip function words — they don't need drilling
+    const FUNCTION_POS = new Set(['PRON', 'CONJ', 'PREP', 'DET', 'ART', 'NUM', 'INTJ']);
     const recentFailure = await db.query.userVocabulary.findFirst({
         where: and(
             eq(userVocabulary.userId, userId),
-            // State 1 (Learning) or State 3 (Relearning) = struggling
-          // Using OR: state in (1, 3) means struggling
-          // For Drizzle, we check state <= 1 which covers state 0 (New) and 1 (Learning)
-          eq(userVocabulary.state, 1),
+            eq(userVocabulary.state, 1),
         ),
         orderBy: [desc(userVocabulary.lastReview)],
         with: { lexeme: true }
     });
 
-    if (recentFailure) {
-        console.log(`[GoalSeek] Remediation needed for "${recentFailure.lexeme.lemma}" (state ${recentFailure.state})`);
+    if (recentFailure && !FUNCTION_POS.has(recentFailure.lexeme?.pos || '')) {
+        console.log(`[GoalSeek] Remediation needed for "${recentFailure.lexeme.lemma}" (state ${recentFailure.state}, pos ${recentFailure.lexeme?.pos})`);
         await db.insert(activeGoals).values({
             userId,
             type: 'remediation',
@@ -180,7 +166,8 @@ New Vocabulary to Introduce (next in curriculum): ${newWords || "None"}
                 return and(base, notInArray(lexemes.id, Array.from(startedLexemeIds).slice(0, 999)));
             }
             return base;
-        }
+        },
+        orderBy: [asc(lexemes.frequencyRank)],
     });
 
     if (unstartedLexeme) {
@@ -199,103 +186,6 @@ New Vocabulary to Introduce (next in curriculum): ${newWords || "None"}
 
     console.log(`[GoalSeek] No candidates for new goals found.`);
     return null;
-  }
-
-  /**
-   * Get initial context specifically for Duolingo-powered tutoring
-   */
-  static async getInitialContextForDuolingo(userId: string): Promise<string> {
-    console.log(`[Context] Fetching Duolingo context for ${userId}...`);
-
-    const metadata = await db.query.duolingoMetadata.findFirst({
-      where: eq(duolingoMetadata.userId, userId)
-    });
-
-    if (!metadata) {
-      return `
-User ID: ${userId}
-Data Source: Duolingo (Not Yet Connected)
-
-IMPORTANT: This user wants to use Duolingo as their learning source.
-Please ask for their Duolingo username and password to get started.
-Use the authenticateDuolingo tool to connect their account.
-      `.trim();
-    }
-
-    const language = metadata.learningLanguage;
-    const lastSync = metadata.lastSyncTimestamp
-      ? new Date(metadata.lastSyncTimestamp).toLocaleString()
-      : 'Never';
-
-    // Get words needing practice (low stability = weak)
-    const weakWords = await db.query.userVocabulary.findMany({
-      where: eq(userVocabulary.userId, userId),
-      with: { lexeme: true },
-      orderBy: [asc(userVocabulary.stability)],
-      limit: 10,
-    });
-
-    // Filter to truly weak words (state 0-2)
-    const filteredWeakWords = weakWords.filter(p => p.state <= 2);
-
-    const reviewList = filteredWeakWords
-      .map(p => `${p.lexeme.lemma} (${p.lexeme.translation}) [${
-        p.state === 0 ? 'New' :
-        p.state === 1 ? 'Learning' :
-        p.state === 3 ? 'Relearning' :
-        'Reviewing'
-      }]`)
-      .join(', ');
-
-    // Get upcoming content: units with no progress yet
-    const allUnits = await db.query.units.findMany({
-        where: eq(units.language, language),
-        orderBy: [asc(units.order)],
-    });
-
-    const startedLexemes = await db.query.userVocabulary.findMany({
-        where: eq(userVocabulary.userId, userId),
-        columns: { lexemeId: true }
-    });
-    const startedLexemeIds = new Set(startedLexemes.map(p => p.lexemeId));
-
-    let nextUnit = null;
-    for (const unit of allUnits) {
-        const unitLexemes = await db.query.lexemes.findMany({
-            where: eq(lexemes.unitId, unit.id),
-            limit: 1
-        });
-        if (unitLexemes.length > 0 && !startedLexemeIds.has(unitLexemes[0].id)) {
-            nextUnit = unit;
-            break;
-        }
-    }
-
-    const totalVocab = await db.query.userVocabulary.findMany({
-      where: eq(userVocabulary.userId, userId)
-    });
-
-    const syncStatusMsg = metadata.syncStatus === 'success'
-      ? 'Up to date'
-      : metadata.syncStatus === 'failed'
-      ? `Failed (${metadata.syncError})`
-      : 'Pending';
-
-    return `
-User ID: ${userId}
-Data Source: Duolingo
-Learning Language: ${language.toUpperCase()}
-Last Sync: ${lastSync}
-Sync Status: ${syncStatusMsg}
-Total Vocabulary: ${totalVocab.length} words
-
-Words Needing Practice (low stability): ${reviewList || "None identified yet - sync data first!"}
-
-Next Lesson/Skill: ${nextUnit ? `${nextUnit.title} - ${nextUnit.description}` : "All known skills mastered!"}
-
-STRATEGY: Focus on conversational practice using weak vocabulary items.
-If the user seems comfortable, bridge into the next topic: ${nextUnit?.title || "advanced conversation"}.
-    `.trim();
   }
 
   /**
@@ -332,28 +222,31 @@ If the user seems comfortable, bridge into the next topic: ${nextUnit?.title || 
     }
 
     // 2. Add new remediation goals from recent analysis errors
+    // Skip function words — they're learned through exposure, not drilling
+    const GOAL_FUNCTION_POS: Set<string> = new Set(['PRON', 'CONJ', 'PREP', 'DET', 'ART', 'NUM', 'INTJ']);
     if (recentAnalysis && recentAnalysis.errors.length > 0) {
       const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
       const targetLang = user?.targetLanguage || 'ru';
 
       for (const error of recentAnalysis.errors) {
+        // Find the lexeme to check POS before creating a goal
+        const lexeme = await db.query.lexemes.findFirst({
+          where: and(eq(lexemes.lemma, error.lemma), eq(lexemes.language, targetLang)),
+        });
+
+        if (!lexeme || GOAL_FUNCTION_POS.has(lexeme.pos)) continue;
+
         // Check if there's already an active goal for this word
         const existing = await db.query.activeGoals.findFirst({
           where: and(
             eq(activeGoals.userId, userId),
             eq(activeGoals.status, 'active'),
-            eq(activeGoals.targetId, error.lemma),
+            eq(activeGoals.targetId, lexeme.id),
           ),
         });
 
         if (!existing) {
-          // Find the lexeme ID for this error word
-          const lexeme = await db.query.lexemes.findFirst({
-            where: and(eq(lexemes.lemma, error.lemma), eq(lexemes.language, targetLang)),
-          });
-
-          if (lexeme) {
-            await db.insert(activeGoals).values({
+          await db.insert(activeGoals).values({
               userId,
               type: 'remediation',
               targetId: lexeme.id,
@@ -365,7 +258,6 @@ If the user seems comfortable, bridge into the next topic: ${nextUnit?.title || 
               updatedAt: now,
             }).onConflictDoNothing();
           }
-        }
       }
     }
 
@@ -387,12 +279,15 @@ If the user seems comfortable, bridge into the next topic: ${nextUnit?.title || 
       const startedIds = new Set(startedLexemes.map(p => p.lexemeId));
 
       // Try to find an unstarted lexeme that's not already an active goal
+      // Pick by frequency rank (breadth-first, not semantic proximity)
       const excludeIds = [...startedIds, ...activeTargets].slice(0, 999);
 
-      // Use a simpler approach: find any lexeme not in our exclude set
+      // Use frequency_rank to pick the most common word the user hasn't seen yet
+      // This gives breadth coverage, not synonym clusters
       const allLexemes = await db.query.lexemes.findMany({
         where: eq(lexemes.language, targetLang),
-        limit: 100,
+        orderBy: [asc(lexemes.frequencyRank)],
+        limit: 200,
       });
 
       const unstartedLexeme = allLexemes.find(l => !excludeIds.includes(l.id));
@@ -466,6 +361,140 @@ If the user seems comfortable, bridge into the next topic: ${nextUnit?.title || 
     `);
 
     return neighbors as any;
+  }
+
+  // ============================================================================
+  // USER NOTES (durable learner insights)
+  // ============================================================================
+
+  static readonly NOTE_CATEGORIES = ['preference', 'level', 'frustration', 'goal', 'engagement'] as const;
+  static readonly MAX_NOTES_PER_CATEGORY = 3;
+
+  /** Read all active (non-superseded) notes for a user. */
+  static async getUserNotes(userId: string): Promise<Array<{ id: string; category: string; content: string; source: string }>> {
+    const notes = await db.query.userNotes.findMany({
+      where: and(
+        eq(userNotes.userId, userId),
+        isNull(userNotes.supersededById),
+      ),
+      orderBy: [asc(userNotes.createdAt)],
+    });
+    return notes.map(n => ({ id: n.id, category: n.category, content: n.content, source: n.source }));
+  }
+
+  /** Format notes for the planner context. */
+  static async getNotesContext(userId: string): Promise<string> {
+    const notes = await this.getUserNotes(userId);
+    if (notes.length === 0) return '';
+    return 'Learner Notes:\n' + notes.map(n => `- [${n.category}] ${n.content}`).join('\n');
+  }
+
+  /**
+   * Write a new note. If the category is at cap, supersede the oldest note.
+   * Returns the note ID or null if invalid.
+   */
+  static async writeNote(userId: string, category: string, content: string, source: string = 'observed'): Promise<string | null> {
+    if (!(this.NOTE_CATEGORIES as readonly string[]).includes(category)) return null;
+    if (!content || content.length > 200) return null;
+
+    // Check for duplicate/similar content in this category
+    const existing = await db.query.userNotes.findMany({
+      where: and(
+        eq(userNotes.userId, userId),
+        eq(userNotes.category, category),
+        isNull(userNotes.supersededById),
+      ),
+      orderBy: [asc(userNotes.createdAt)],
+    });
+
+    // Skip if a very similar note already exists (simple substring check)
+    const trimmedContent = content.trim().toLowerCase();
+    for (const note of existing) {
+      const existingContent = note.content.toLowerCase();
+      // Skip if the new note is nearly identical to an existing one
+      if (existingContent === trimmedContent) return null;
+      // Skip if one contains the other (handles paraphrases like "loves travel" vs "loves travel topics")
+      if (existingContent.length > 10 && trimmedContent.length > 10 &&
+          (existingContent.includes(trimmedContent) || trimmedContent.includes(existingContent))) {
+        return null;
+      }
+    }
+
+    let supersededId: string | null = null;
+    if (existing.length >= this.MAX_NOTES_PER_CATEGORY && existing[0]) {
+      // Supersede the oldest note in this category
+      supersededId = existing[0].id;
+    }
+
+    const [inserted] = await db.insert(userNotes).values({
+      userId,
+      category,
+      content: content.trim(),
+      source,
+      supersededById: null,
+    }).returning({ id: userNotes.id });
+
+    // Link superseded note to the new one
+    if (supersededId && inserted) {
+      await db.update(userNotes)
+        .set({ supersededById: inserted.id })
+        .where(eq(userNotes.id, supersededId));
+    }
+
+    return inserted?.id || null;
+  }
+
+  // ============================================================================
+  // SESSION SUMMARIES (cross-session memory)
+  // ============================================================================
+
+  /** Get last N session summaries for planner context. */
+  static async getRecentSummaries(userId: string, limit: number = 3): Promise<Array<{ endedAt: Date; durationMinutes: number; topicsCovered: string | null; errorsPattern: string | null; summary: string; nextSessionHint: string | null }>> {
+    const summaries = await db.query.sessionSummaries.findMany({
+      where: eq(sessionSummaries.userId, userId),
+      orderBy: [desc(sessionSummaries.endedAt)],
+      limit,
+    });
+    return summaries;
+  }
+
+  /** Format recent summaries for the planner context, including time gap since last session. */
+  static async getSummariesContext(userId: string): Promise<string> {
+    const summaries = await this.getRecentSummaries(userId, 3);
+    if (summaries.length === 0) return '';
+
+    const now = new Date();
+    const lastEnded = summaries[0].endedAt;
+    const gapMs = now.getTime() - new Date(lastEnded).getTime();
+    const gapHours = Math.round(gapMs / 3_600_000);
+    let gapStr: string;
+    if (gapHours < 1) gapStr = 'just now';
+    else if (gapHours < 24) gapStr = `${gapHours} hour${gapHours !== 1 ? 's' : ''} ago`;
+    else {
+      const gapDays = Math.round(gapHours / 24);
+      gapStr = `${gapDays} day${gapDays !== 1 ? 's' : ''} ago`;
+    }
+
+    const lines = summaries.map(s => {
+      const date = s.endedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      let line = `- ${date} (${s.durationMinutes}min): ${s.summary}`;
+      if (s.nextSessionHint) line += ` Next: ${s.nextSessionHint}`;
+      return line;
+    });
+    return `Recent Sessions (last was ${gapStr}):\n` + lines.join('\n');
+  }
+
+  /** Write a session summary. */
+  static async writeSessionSummary(userId: string, data: {
+    startedAt: Date; endedAt: Date; durationMinutes: number;
+    topicsCovered: string | null; wordsWorked: string | null;
+    errorsPattern: string | null; summary: string; nextSessionHint: string | null;
+  }): Promise<string> {
+    const [inserted] = await db.insert(sessionSummaries).values({
+      userId,
+      ...data,
+    }).returning({ id: sessionSummaries.id });
+    return inserted?.id || '';
   }
 }
 
