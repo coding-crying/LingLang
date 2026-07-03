@@ -19,6 +19,28 @@
     href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=Golos+Text:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap"
     rel="stylesheet"
   />
+  <!-- 2026-07-03: pre-hydration theme script (Task 2). Mirrors
+       AppState.tsx's resolveInitialTheme() priority (localStorage wins,
+       then prefers-color-scheme, else 'dark') so the CSS `data-theme`
+       attribute is set before first paint — avoids a flash of the wrong
+       theme for a first-time visitor whose resolved theme differs from
+       design-tokens.css's `:root` (dark) default. Keep in sync with
+       resolveInitialTheme() if that logic ever changes. -->
+  <script>
+    (function () {
+      try {
+        var stored = localStorage.getItem('linglang-theme');
+        var theme = stored === 'dark' || stored === 'light' ? stored : null;
+        if (!theme && window.matchMedia) {
+          if (window.matchMedia('(prefers-color-scheme: dark)').matches) theme = 'dark';
+          else if (window.matchMedia('(prefers-color-scheme: light)').matches) theme = 'light';
+        }
+        document.documentElement.dataset.theme = theme || 'dark';
+      } catch (e) {
+        document.documentElement.dataset.theme = 'dark';
+      }
+    })();
+  </script>
 </head>
 <body>
   <div id="root"></div>

@@ -72,8 +72,8 @@ export default function App() {
     return <LoginScreen onLogin={login} />;
   }
 
-  return <VoiceRoom onLogout={logout} />;
+  return <AppShell onLogout={logout} />;
 }
 
 // ─── Inline import to avoid circular deps ───
-import VoiceRoom from './VoiceRoom';
+import AppShell from './components/AppShell';

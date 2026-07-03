@@ -81,18 +81,101 @@ pre,
   color: var(--text);
 }
 
-/* ── Top bar (per-tab header) — filled in by later tasks ───────────── */
+/* ── Top bar (per-tab header) ───────────────────────────────────────── */
 .top-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px 10px;
 }
 
-/* ── Bottom tab bar (Voice / Library / Profile) — filled in by later
-   tasks ─────────────────────────────────────────────────────────────── */
+.top-bar-left {
+  flex: 0 0 auto;
+}
+
+.top-bar-center {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+}
+
+.top-bar-right {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.theme-toggle {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0;
+}
+
+/* ── Bottom tab bar (Voice / Library / Profile) ────────────────────── */
 .tab-bar {
+  flex: 0 0 auto;
+  display: flex;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
-/* ── Bottom sheet scrim + panel — filled in by later tasks ─────────── */
+.tab-bar-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 0 8px;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.tab-bar-label {
+  font-size: 11px;
+}
+
+/* ── Bottom sheet scrim + panel ─────────────────────────────────────── */
 .sheet-scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--overlay);
+  backdrop-filter: blur(2px);
+  animation: llFade 0.18s ease;
+  z-index: 100;
 }
 
 .sheet-panel {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--surface2);
+  border-radius: 20px 20px 0 0;
+  border-top: 1px solid var(--border);
+  padding: 10px 20px calc(22px + env(safe-area-inset-bottom));
+  animation: llSheet 0.22s ease;
+  max-height: 78%;
+  overflow-y: auto;
+}
+
+.sheet-drag-handle {
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  margin: 0 auto 16px;
 }
