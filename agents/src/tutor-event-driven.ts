@@ -1392,9 +1392,14 @@ export default defineAgent({
       }
 
       history.addUserTurn(transcription, audioAttachment);
-      emitEvent('user.transcript', { text: transcription, isFinal: true });
-
       totalUserTurns++;
+      // turnSeq: monotonic per-user-turn id, threaded through the related
+      // processor.analysis / agent.reply / llm.token events below so the
+      // dashboard frontend can correlate them without guessing from arrival
+      // order or timestamps (see Task 4a — useConversationStream rewrite).
+      const turnSeq = totalUserTurns;
+      emitEvent('user.transcript', { text: transcription, isFinal: true, turnSeq });
+
       pendingUserTurns.push(transcription);
       if (pendingUserTurns.length > PROCESSOR_TURN_INTERVAL) {
         pendingUserTurns.shift();
@@ -1515,6 +1520,13 @@ export default defineAgent({
         }));
 
         emitEvent('processor.analysis', {
+          // turnSeq of the last (most recent) user turn in this batch —
+          // when PROCESSOR_TURN_INTERVAL > 1 this analysis covers multiple
+          // prior turns joined into `utterance`, but the frontend still
+          // needs a single anchor point to attach it to; the newest turn
+          // in the batch is the natural choice since the batch only fires
+          // once that turn lands.
+          turnSeq,
           utterance: batchUtterance,
           lexemes: decoratedLexemes,
           srsUpdates: result.srsUpdates || [],
@@ -1593,7 +1605,10 @@ export default defineAgent({
     session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev: any) => {
       const item = ev.item;
       if (item?.role === 'assistant' && item?.textContent) {
-        emitEvent('agent.reply', { text: item.textContent, source: item.source || 'unknown' });
+        // turnSeq: the most recent user turn this reply responds to. Lets
+        // the frontend replace/finalize the matching streamed bubble
+        // instead of appending a duplicate (see Task 4a).
+        emitEvent('agent.reply', { text: item.textContent, source: item.source || 'unknown', turnSeq: totalUserTurns });
         history.addAssistantTurn(item.textContent);
 
         // Comprehensible-input controller: measure how much of the reply
@@ -1785,6 +1800,11 @@ export default defineAgent({
         index: ev.index,
         isStart: ev.isStart,
         isEnd: ev.isEnd,
+        // turnSeq: most recent user turn at token-emission time — same
+        // value `agent.reply` for this exchange will carry, so the
+        // frontend can key the streaming bubble by turnSeq up front
+        // instead of only by a random per-stream id (Task 4a).
+        turnSeq: totalUserTurns,
       });
     };
     llmEvents.on('token', onLlmToken);
