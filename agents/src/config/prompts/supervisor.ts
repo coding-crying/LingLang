@@ -5,60 +5,36 @@
  * short nudge for the conversation agent. The nudge gets injected into
  * the tutor's system prompt as CURRENT_FOCUS.
  *
- * The planner should care about TWO things equally:
- *   1. Learning effectiveness (FSRS state, review timing, difficulty)
- *   2. User enjoyment (variety, pacing, not grinding the same drill)
+ * 2026-07-02: Redesigned per
+ * docs/superpowers/specs/2026-07-02-adaptive-loop-redesign-design.md §5.
+ * Mandate rewritten from an unactionable "care about enjoyment equally" to
+ * a concrete rule fed by an engagement block (turn-length trend, pacing,
+ * error-density trend — the same signals the conversation prompt already
+ * computes). The planner is also now the sole writer of the learner's
+ * style profile (§4) — one free-text line via the existing PERSONA:
+ * mechanism, replacing the processor's per-turn style-enum tagging.
  */
 
-export const PLANNER_SYSTEM_PROMPT = `You are a language tutor planner. Read the learner's state and produce two things:
+// 2026-07-02: rewritten aggressively (user-approved) — the old version spent
+// over a third of its ~880 tokens on NOTE/PERSONA/style-profile blocks the
+// planner is told to use rarely. Same parser contract (NUDGE:/SUMMARY:/
+// NOTE[cat]:/PERSONA: line formats), roughly half the tokens, and the nudge
+// guidance is now the headline instead of buried mid-prompt.
+export const PLANNER_SYSTEM_PROMPT = `You are the strategist behind a voice language tutor. Every cycle you read the session state and steer the conversation agent with one nudge. You are the only agent that sees the whole session — the conversation agent only sees the last few turns and the latest errors, so your job is direction, not data.
 
-1. A short teaching nudge for the conversation agent (1-3 sentences)
-2. An updated running summary of what's happened in this session
+Output — exactly these two lines (NOTE/PERSONA optional, see below):
+NUDGE: 1-3 sentences
+SUMMARY: 2-3 sentences
 
-Your nudge adds STRATEGY, not data. The agent already knows what errors just happened and what grammar hints to give. Your job is to decide: what matters most right now, and how to approach it. Suggest context, angle, or tone — not just "review this word."
+NUDGE is strategy. Don't repeat errors or hints the agent already sees. Decide what matters most right now and give an angle: a scenario, a topic shift, a natural way to surface a due word, when to push and when to lighten up. If engagement is dropping (shrinking turns, rising errors), change the angle before the material. Match the level: beginners get basics and support; intermediates get nuance and natural phrasing; advanced learners get register and subtlety. Never build a nudge around function words (pronouns, prepositions, articles) — exposure teaches those. A word stuck in Learning/Relearning needs a different approach, not the same quiz again.
 
-The running summary is your memory of the session so far. Update it each cycle to reflect what happened. Keep it 2-3 sentences. It should capture: topics covered, what the learner struggled with, what they got comfortable with, and any patterns you noticed. This summary gets passed back to you next cycle so you remember what already happened.
+SUMMARY is your memory — it comes back to you next cycle. Capture topics covered, what they struggled with, what clicked, and patterns you noticed.
 
-Session gap: if the learner's last session was recent (minutes ago), pick up where they left off. If it was hours ago, do a light review of what they learned. If it was days ago or longer, start with a warm-up review of struggling words before introducing new material.
+Session gap: minutes since last session → continue where they left off; hours → light review first; days → warm up with their struggling words before anything new.
 
-Match the learner's level:
-- Beginner (A1-A2): teach basic words, give lots of support
-- Intermediate (B1-B2): focus on nuance, idioms, natural phrasing — they already know function words
-- Advanced (C1-C2): challenge them with register, style, subtlety
+NOTE[category]: one sentence — only when you learn something durable and NEW about this learner worth remembering tomorrow. Categories: preference, level, frustration, goal, engagement. Never restate a note already shown to you. Most cycles produce no note.
 
-Do NOT create remediation goals for basic function words (pronouns, conjunctions, prepositions, articles). Those are acquired through exposure, not drilling.
-
-Balance:
-- Learning: review due/struggling words, introduce new ones when ready
-- Enjoyment: variety, natural flow, no repetitive drilling
-
-FSRS states:
-  New (0) = never seen, Learning (1) = struggling, Review (2) = stable, Relearning (3) = forgot
-
-If a word keeps showing up as Learning or Relearning, try a different angle — don't just quiz the same way.
-
-Output format — exactly two lines:
-NUDGE: your 1-3 sentence teaching nudge
-SUMMARY: your updated 2-3 sentence session summary
-
-LEARNER NOTES:
-If you discover something durable about this learner that you'd want to remember tomorrow, append a NOTE line. Only write a note when you've learned something genuinely new — most cycles should NOT produce a note. Categories: preference, level, frustration, goal, engagement. Max 1 note per cycle. Format:
-
-NOTE[category]: one sentence
-
-Example: NOTE[preference]: Engages more with role-play scenarios than vocabulary drills.
-Do NOT repeat or restate notes that are already in the Learner Notes section below.
-
-PERSONA UPDATES:
-If you observe that the current teaching style is clearly wrong for this learner (e.g. they're frustrated by the roasting, or they explicitly asked for something different), you may patch the persona. Only do this when you have clear evidence — not on a whim. Format:
-
-PERSONA: field=value[, field=value...]
-
-Valid fields: tone (roast|warm|neutral|formal|drill-sergeant), correctionStyle (immediate|gentle|ignore|end-of-turn), teachingMode (conversational|drill|roleplay|storytelling), personaOverride (free text), extraInstructions (free text)
-
-Example: PERSONA: tone=warm, correctionStyle=gentle
-Example: PERSONA: extraInstructions=pretend we are at a café in Lisbon
-Do NOT emit PERSONA unless you have clear evidence the current style is wrong.` as const;
+PERSONA: field=value[, field=value...] — only on clear evidence the current teaching style is wrong for this learner, or to record how they like to be taught (you are the sole writer of that style read). Fields: tone (roast|warm|neutral|formal|drill-sergeant), correctionStyle (immediate|gentle|ignore|end-of-turn), teachingMode (conversational|drill|roleplay|storytelling), personaOverride (free text), extraInstructions (free text — the usual home of a 1-2 sentence style read, e.g. "Terse, likes being teased back, skip pleasantries"). Most cycles produce no persona line.` as const;
 
 
 export interface PlannerContext {
@@ -70,6 +46,8 @@ export interface PlannerContext {
   recentHistory: string;
   /** Previous nudge text, or null if first run */
   previousNudge: string | null;
+  /** How many turns ago the previous nudge was issued, or null if none. */
+  previousNudgeAgeTurns: number | null;
   /** Running session summary from last planner cycle */
   runningSummary: string;
   /** Reason this planner invocation was triggered */
@@ -82,6 +60,18 @@ export interface PlannerContext {
   recentSessions: string;
   /** Onboarding state summary — null if complete, string if in-progress/not-started */
   onboardingContext?: string | null;
+  /**
+   * Engagement block — same signals the conversation prompt already
+   * computes, shared here so the planner's mandate is actionable instead
+   * of "care about enjoyment" with no inputs.
+   */
+  engagement: {
+    /** Turn-length trend over the last ~6 turns. */
+    turnLengthTrend: 'growing' | 'shrinking' | 'steady';
+    pacing: 'fast' | 'medium' | 'slow';
+    /** Error-density trend over recent processor runs. */
+    errorTrend: 'rising' | 'falling' | 'steady';
+  };
 }
 
 export function buildPlannerPrompt(ctx: PlannerContext): string {
@@ -91,10 +81,17 @@ export function buildPlannerPrompt(ctx: PlannerContext): string {
   const sessionsSection = ctx.recentSessions ? `\n${ctx.recentSessions}` : '';
   const summarySection = ctx.runningSummary ? `\nRunning Summary: ${ctx.runningSummary}` : '\nRunning Summary: (first cycle — no summary yet)';
 
+  const nudgeLine = ctx.previousNudge
+    ? `Previous nudge (issued ${ctx.previousNudgeAgeTurns ?? '?'} turn(s) ago): ${ctx.previousNudge}`
+    : 'No previous nudge — this is the first one.';
+
+  const engagementLine = `Engagement: turn length ${ctx.engagement.turnLengthTrend}, pacing ${ctx.engagement.pacing}, errors ${ctx.engagement.errorTrend}.`;
+
   return `Reason: ${ctx.reason}
 Signals: ${signals}
+${engagementLine}
 
-${ctx.previousNudge ? `Previous nudge (did the agent follow this?): ${ctx.previousNudge}` : 'No previous nudge — this is the first one.'}
+${nudgeLine}
 
 DB state:
 ${ctx.dbContext}
@@ -104,80 +101,4 @@ ${ctx.goalNote || 'None'}${notesSection}${sessionsSection}${summarySection}
 
 Recent conversation:
 ${ctx.recentHistory}`;
-}
-
-/**
- * Audio-aware planner messages. When the caller has audio history (recent
- * user audio as audio_url content, older audio collapsed), we send those
- * turns to the LLM directly so the planner can hear pronunciation issues
- * and tailor nudges accordingly (e.g. "drill palatal fricative next" if
- * the user keeps aspirating /x/).
- *
- * The control block (DB state, previous nudge, running summary, signals)
- * is sent as a single text user message so the planner has full context
- * before the audio turns.
- */
-export interface AudioTurn {
-  /** Original transcript text or placeholder */
-  content: string;
-  audioUri: string;
-  durationSec: number;
-}
-
-export function buildPlannerMessages(
-  ctx: PlannerContext,
-  audioTurns: AudioTurn[] = [],
-  opts: { keepRecentAudioTurns?: number } = {},
-): any[] {
-  const MAX_AUDIO_TURNS = opts.keepRecentAudioTurns ?? 3;
-  const signals = ctx.signals.slice(-10).join(', ') || 'none';
-  const notesSection = ctx.notes ? `\n${ctx.notes}` : '';
-  const sessionsSection = ctx.recentSessions ? `\n${ctx.recentSessions}` : '';
-  const summarySection = ctx.runningSummary ? `\nRunning Summary: ${ctx.runningSummary}` : '\nRunning Summary: (first cycle — no summary yet)';
-
-  const controlBlock = `Reason: ${ctx.reason}
-Signals: ${signals}
-
-${ctx.previousNudge ? `Previous nudge (did the agent follow this?): ${ctx.previousNudge}` : 'No previous nudge — this is the first one.'}
-
-DB state:
-${ctx.dbContext}
-
-Goals:
-${ctx.goalNote || 'None'}${notesSection}${sessionsSection}${summarySection}`;
-
-  const out: any[] = [
-    { role: 'user', content: controlBlock },
-  ];
-
-  if (audioTurns.length > 0) {
-    // Most-recent audio turns become audio_url. Older ones collapse to a
-    // single text marker so the LLM knows they happened but doesn't waste
-    // tokens on stale audio.
-    const recentAudio = audioTurns.slice(-MAX_AUDIO_TURNS);
-    const olderCount = audioTurns.length - recentAudio.length;
-
-    if (olderCount > 0) {
-      out.push({
-        role: 'user',
-        content: `[${olderCount} earlier user audio turn(s) — already analyzed; see running summary above.]`,
-      });
-    }
-
-    for (const t of recentAudio) {
-      out.push({
-        role: 'user',
-        content: [
-          { type: 'text', text: `[User spoke for ${t.durationSec.toFixed(2)}s. Listen for pronunciation patterns and what they said.]` },
-          { type: 'audio_url', audio_url: { url: t.audioUri } },
-        ],
-      });
-    }
-  } else {
-    // No audio — also include the text recent history so the planner has
-    // something to read.
-    out.push({ role: 'user', content: `Recent conversation:\n${ctx.recentHistory}` });
-  }
-
-  return out;
 }

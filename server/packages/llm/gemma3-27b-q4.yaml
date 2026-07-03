@@ -1,0 +1,17 @@
+id: gemma3-27b-q4
+type: llm
+name: Gemma 3 27B Q4_K_M
+languages: [multi]
+gpu: true
+vram_mb: 15500
+disk_mb: 15500
+service_dir: llama-swap
+download:
+  repo_id: bartowski/gemma-3-27b-it-GGUF
+  files:
+    - gemma-3-27b-it-Q4_K_M.gguf
+server:
+  type: llama-swap
+  port: 8083
+  endpoint: /v1/chat/completions
+  health: /health

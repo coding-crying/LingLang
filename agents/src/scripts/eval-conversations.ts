@@ -26,6 +26,8 @@ import { ContextManager } from '../lib/context.js';
 import { getLanguageConfig, nativeLanguageName } from '../config/languages.js';
 import { buildInstructions } from '../config/prompts/base.js';
 import { PLANNER_SYSTEM_PROMPT, buildPlannerPrompt } from '../config/prompts/supervisor.js';
+import { readLearnerView } from '../lib/learner-view.js';
+import { buildFrontierInfo } from '../lib/frontier.js';
 import type { ProcessorResult } from '../tools/supervisor-functions.js';
 
 // ============================================================================
@@ -480,15 +482,14 @@ class ConversationRunner {
 
     const grammarHints = processorResult?.analysis?.grammarHints?.join(' ') || 'None';
 
+    const view = await readLearnerView(this.userId, this.lang);
+
     const systemPrompt = buildInstructions({
       targetLanguage: this.langConfig.name,
-      nativeName: this.langConfig.nativeName,
       nativeLanguage: this.langConfig.nativeLanguage,
-      targetRatio: this.langConfig.pedagogy.targetLanguageRatio,
       userLevel: this.scenario.proficiency,
       persona: this.langConfig.persona,
-      initialContext: context,
-      mode: 'text',
+      frontier: buildFrontierInfo(view.dueWords, view.newWords, view.dueBacklog, view.recentSuccess),
       recentErrors,
       grammarHints,
       goalUpdate: goalUpdate || undefined,
@@ -535,8 +536,13 @@ class ConversationRunner {
       goalNote: goalUpdate,
       recentHistory,
       previousNudge: null,
+      previousNudgeAgeTurns: null,
+      runningSummary: '',
       reason: 'eval_turn',
       signals: processorResult?.srsUpdates?.length ? ['srs_updated'] : [],
+      notes: '',
+      recentSessions: '',
+      engagement: { turnLengthTrend: 'steady', pacing: 'medium', errorTrend: 'steady' },
     });
 
     try {

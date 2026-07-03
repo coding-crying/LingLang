@@ -23,7 +23,10 @@ interface LexemeChip {
   lemma: string;
   form: string;
   pos: string;
-  performance: 'correct_use' | 'wrong_use' | 'recall_fail' | 'scaffolded' | 'native_substitution';
+  performance:
+    | 'correct' | 'correct_instant' | 'correct_struggled'
+    | 'wrong_use' | 'recall_fail' | 'native_substitution'
+    | 'correct_use' | 'scaffolded'; // legacy labels, still in old events
   grammarRule?: { rule: string; example: string };
   pronunciation?: { stress: string; notes?: string };
 }
@@ -66,10 +69,13 @@ interface VocabWord {
 // ─── Performance → Color mapping ───
 
 const perfColors: Record<string, { bg: string; text: string; label: string }> = {
-  correct_use:  { bg: '#1a5334', text: '#4ade80', label: '✓ correct' },
-  wrong_use:    { bg: '#5a1a1a', text: '#f87171', label: '✗ wrong' },
-  recall_fail:  { bg: '#5a3a1a', text: '#fbbf24', label: '? forgot' },
-  scaffolded:   { bg: '#1a3a5a', text: '#60a5fa', label: '↻ scaffolded' },
+  correct:          { bg: '#1a5334', text: '#4ade80', label: '✓ correct' },
+  correct_instant:  { bg: '#1a5334', text: '#4ade80', label: '✓✓ fluent' },
+  correct_struggled:{ bg: '#1a3a5a', text: '#60a5fa', label: '~ struggled' },
+  correct_use:      { bg: '#1a5334', text: '#4ade80', label: '✓ correct' }, // legacy
+  wrong_use:        { bg: '#5a1a1a', text: '#f87171', label: '✗ wrong' },
+  recall_fail:      { bg: '#5a3a1a', text: '#fbbf24', label: '? forgot' },
+  scaffolded:       { bg: '#1a3a5a', text: '#60a5fa', label: '↻ scaffolded' }, // legacy
   native_substitution: { bg: '#5a4a1a', text: '#facc15', label: '⚠ native' },
 };
 
@@ -79,10 +85,11 @@ function getChipClass(lex: LexemeChip, srsUpdates: SrsUpdate[]): string {
   const isNew = !srs || srs.newState <= 1;
   const isMastered = srs && srs.newState === 2 && srs.grade >= 3;
 
-  if (lex.performance === 'correct_use') {
+  if (lex.performance === 'correct' || lex.performance === 'correct_instant' || lex.performance === 'correct_use') {
     // Green for new words used correctly, grey for mastered
     return isMastered ? 'chip-mastered' : 'chip-correct';
   }
+  if (lex.performance === 'correct_struggled') return 'chip-scaffolded'; // reuse blue "effortful" styling
   return `chip-${lex.performance}`;
 }
 

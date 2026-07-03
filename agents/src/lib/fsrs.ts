@@ -223,8 +223,25 @@ function constrainDifficulty(d: number): number {
 // ============================================================================
 
 export interface VoicePerformance {
-  /** How the user performed: correct_use, wrong_use, recall_fail, scaffolded, native_substitution */
-  performance: 'correct_use' | 'wrong_use' | 'recall_fail' | 'scaffolded' | 'native_substitution';
+  /**
+   * How the user performed — ONE judgment per word, fluency folded into the
+   * correct_* variants instead of a separate `confidence` field (2026-07-02
+   * processor slim-down: one enum choice instead of two fields halves the
+   * per-word decisions the 12B makes, with identical grade resolution).
+   *
+   * Current labels: correct (clean production; also the text-only default) |
+   * correct_instant (fluent, immediate) | correct_struggled (hesitation,
+   * self-correction, stutter) | wrong_use | recall_fail | native_substitution.
+   *
+   * Legacy labels (correct_use, scaffolded) still grade correctly — old code
+   * paths (supervisor.ts / tutor.ts) and stored raw analyses emit them.
+   */
+  performance:
+    | 'correct' | 'correct_instant' | 'correct_struggled'
+    | 'wrong_use' | 'recall_fail' | 'native_substitution'
+    | 'correct_use' | 'scaffolded';
+  /** Legacy audio-confidence signal — only consulted for legacy correct_use/scaffolded labels. */
+  confidence?: 'instant' | 'hesitant' | 'struggled';
   /** Escalation level used (1=natural, 2=nudge, 3=direct correction) */
   escalationLevel?: number;
   /** Pronunciation confidence from ASR (0-1) */
@@ -239,9 +256,17 @@ export interface VoicePerformance {
  * Map voice conversation performance to FSRS grade (1-4).
  *
  * Grade 1 (Again): Completely wrong, or failed even after direct correction.
- * Grade 2 (Hard):  Got it but only after nudge, or with poor pronunciation/long latency.
- * Grade 3 (Good):  Natural use at escalation level 1 — the default pass.
- * Grade 4 (Easy):  Unprompted use with fluent pronunciation.
+ * Grade 2 (Hard):  Got it but only after nudge, with poor pronunciation/long
+ *                   latency, or hesitantly (scaffolded) / with a struggle.
+ * Grade 3 (Good):  Natural use at escalation level 1, or hesitant-but-correct
+ *                   production — the default pass.
+ * Grade 4 (Easy):  Unprompted use with fluent pronunciation, or instant
+ *                   confident production.
+ *
+ * Text-only fallback: when `confidence` is absent (no audio capability, or
+ * a text-mode session), grading falls back to the pronunciationScore /
+ * escalationLevel / durationMs heuristics below — unchanged from before
+ * confidence existed, so the feature degrades cleanly rather than blocking.
  */
 export function voiceToGrade(perf: VoicePerformance): FSRSGrade {
   switch (perf.performance) {
@@ -250,15 +275,26 @@ export function voiceToGrade(perf: VoicePerformance): FSRSGrade {
     case 'native_substitution':
       // Native substitution = user used their native language instead of the target word
       // This is a recall failure — they couldn't produce the target word
-      if (perf.escalationLevel === 3) return 1; // Failed even with direct correction
       return 1;
 
-    case 'scaffolded':
+    case 'correct_instant':
+      return 4; // Easy — fluent, immediate production
+
+    case 'correct_struggled':
+      return 2; // Hard — got there, but hesitation/self-correction/stutter
+
+    case 'scaffolded': // legacy
+      if (perf.confidence === 'instant') return 3; // got it fast even though scaffolded
       return 2; // Correct but prompted — lower stability boost than independent use
 
-    case 'correct_use':
+    case 'correct':
+    case 'correct_use': // legacy
     default:
-      // correct_use is the default; default catches any unexpected labels
+      // Legacy confidence field (old two-field analyses) still refines.
+      if (perf.confidence === 'instant') return 4;
+      if (perf.confidence === 'hesitant') return 3;
+      if (perf.confidence === 'struggled') return 2;
+      // No confidence signal — text-only heuristics.
       if (perf.unprompted && (perf.pronunciationScore ?? 1) > 0.8) return 4; // Easy
       if (perf.escalationLevel === 2) return 2; // Needed a nudge
       if ((perf.pronunciationScore ?? 1) < 0.5) return 2; // Poor pronunciation

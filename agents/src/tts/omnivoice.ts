@@ -245,14 +245,25 @@ class OmniVoiceSynthesizeStream extends tts.SynthesizeStream {
     if (!response.body) throw new Error('No response body');
 
     const reader = response.body.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value) {
-        for (const frame of bstream.write(Buffer.from(value))) {
-          this.queue.put({ requestId: shortuuid(), frame, final: false, segmentId });
+    const READ_TIMEOUT_MS = 15_000;
+    try {
+      while (true) {
+        const { done, value } = await Promise.race([
+          reader.read(),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`OmniVoice stream stalled (no data for ${READ_TIMEOUT_MS}ms)`)), READ_TIMEOUT_MS),
+          ),
+        ]);
+        if (done) break;
+        if (value) {
+          for (const frame of bstream.write(Buffer.from(value))) {
+            this.queue.put({ requestId: shortuuid(), frame, final: false, segmentId });
+          }
         }
       }
+    } catch (err) {
+      reader.cancel().catch(() => {});
+      throw err;
     }
 
     for (const frame of bstream.flush()) {

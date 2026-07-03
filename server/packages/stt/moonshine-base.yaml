@@ -1,0 +1,15 @@
+id: moonshine-base
+type: stt
+name: Moonshine v2 Base
+languages: [en]
+gpu: false
+vram_mb: 0
+disk_mb: 200
+service_dir: moonshine
+download:
+  repo_id: usefulsensors/moonshine-base
+server:
+  type: openai-compatible
+  port: 8002
+  endpoint: /v1/audio/transcriptions
+  health: /health

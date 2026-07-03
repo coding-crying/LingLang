@@ -75,8 +75,6 @@ NEW_USER: ${isNewUser ? 'true' : 'false'}
 
 Vocabulary to Review (DUE by FSRS): ${reviewList || "None"}
 New Vocabulary to Introduce (by frequency): ${newWords || "None"}
-
-Note: This snapshot was taken at session start. Use your tools to check current vocab state during the session.
     `.trim();
   }
 
@@ -87,6 +85,11 @@ Note: This snapshot was taken at session start. Use your tools to check current 
   static async getDynamicGoal(userId: string): Promise<string | null> {
     const now = new Date();
     console.log(`[GoalSeek] Searching for next goal for user ${userId}...`);
+
+    // Legacy path (text-tutor script only) — still tag goals with the
+    // language so it can't create unscoped rows.
+    const goalUser = await db.query.users.findFirst({ where: eq(users.id, userId) });
+    const goalLang = goalUser?.targetLanguage || 'ru';
 
     // 1. Check for ACTIVE Goal
     const currentGoal = await db.query.activeGoals.findFirst({
@@ -137,6 +140,7 @@ Note: This snapshot was taken at session start. Use your tools to check current 
         console.log(`[GoalSeek] Remediation needed for "${recentFailure.lexeme.lemma}" (state ${recentFailure.state}, pos ${recentFailure.lexeme?.pos})`);
         await db.insert(activeGoals).values({
             userId,
+            languageCode: goalLang,
             type: 'remediation',
             targetId: recentFailure.lexemeId,
             status: 'active',
@@ -174,6 +178,7 @@ Note: This snapshot was taken at session start. Use your tools to check current 
         console.log(`[GoalSeek] Setting new vocabulary goal: "${unstartedLexeme.lemma}"`);
         await db.insert(activeGoals).values({
             userId,
+            languageCode: goalLang,
             type: 'vocab',
             targetId: unstartedLexeme.id,
             status: 'active',
@@ -199,13 +204,40 @@ Note: This snapshot was taken at session start. Use your tools to check current 
     const MAX_ACTIVE_GOALS = 3;
     const now = new Date();
 
-    // 1. Complete any goals whose target word was used correctly (sustained — at least 2 reps)
+    // Language scope for everything below. Goals used to be unscoped, so a
+    // Portuguese remediation goal surfaced in a Russian session's planner
+    // prompt (confirmed live 2026-07-02). Legacy rows with a null
+    // language_code simply drop out of view.
+    const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
+    const targetLang = user?.targetLanguage || 'ru';
+    const scoped = and(
+      eq(activeGoals.userId, userId),
+      eq(activeGoals.status, 'active'),
+      eq(activeGoals.languageCode, targetLang),
+    );
+
+    // 1. Complete any goals whose target word was used correctly (sustained — at least 2 reps).
+    // Also retire goals whose target lexeme no longer exists (contamination
+    // cleanups delete lexemes; their goals used to linger active forever and
+    // this loop re-queried every one of them on every user turn — 145 zombie
+    // goals observed live, 2026-07-02).
     const activeGoalsList = await db.query.activeGoals.findMany({
-      where: and(eq(activeGoals.userId, userId), eq(activeGoals.status, 'active')),
+      where: scoped,
       orderBy: [asc(activeGoals.priority)],
     });
 
     for (const goal of activeGoalsList) {
+      const lexemeExists = await db.query.lexemes.findFirst({
+        where: eq(lexemes.id, goal.targetId),
+        columns: { id: true },
+      });
+      if (!lexemeExists) {
+        await db.update(activeGoals)
+          .set({ status: 'failed', updatedAt: now })
+          .where(eq(activeGoals.id, goal.id));
+        continue;
+      }
+
       const progress = await db.query.userVocabulary.findFirst({
         where: and(
           eq(userVocabulary.userId, userId),
@@ -225,9 +257,6 @@ Note: This snapshot was taken at session start. Use your tools to check current 
     // Skip function words — they're learned through exposure, not drilling
     const GOAL_FUNCTION_POS: Set<string> = new Set(['PRON', 'CONJ', 'PREP', 'DET', 'ART', 'NUM', 'INTJ']);
     if (recentAnalysis && recentAnalysis.errors.length > 0) {
-      const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
-      const targetLang = user?.targetLanguage || 'ru';
-
       for (const error of recentAnalysis.errors) {
         // Find the lexeme to check POS before creating a goal
         const lexeme = await db.query.lexemes.findFirst({
@@ -246,8 +275,20 @@ Note: This snapshot was taken at session start. Use your tools to check current 
         });
 
         if (!existing) {
+          // Remediation goals respect the same cap as vocab goals — they
+          // used to be uncapped, which is how one account accumulated 145
+          // simultaneously-"active" goals (each re-checked with its own DB
+          // queries on every turn). Three goals is all the planner prompt
+          // can act on anyway; older errors resurface through FSRS.
+          const activeCount = await db.query.activeGoals.findMany({
+            where: scoped,
+            columns: { id: true },
+          });
+          if (activeCount.length >= MAX_ACTIVE_GOALS) break;
+
           await db.insert(activeGoals).values({
               userId,
+              languageCode: targetLang,
               type: 'remediation',
               targetId: lexeme.id,
               status: 'active',
@@ -263,14 +304,11 @@ Note: This snapshot was taken at session start. Use your tools to check current 
 
     // 3. If we have fewer than MAX_ACTIVE_GOALS, fill with vocab goals
     const currentActive = await db.query.activeGoals.findMany({
-      where: and(eq(activeGoals.userId, userId), eq(activeGoals.status, 'active')),
+      where: scoped,
       orderBy: [asc(activeGoals.priority)],
     });
 
     if (currentActive.length < MAX_ACTIVE_GOALS) {
-      const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
-      const targetLang = user?.targetLanguage || 'ru';
-
       const startedLexemes = await db.query.userVocabulary.findMany({
         where: eq(userVocabulary.userId, userId),
         columns: { lexemeId: true },
@@ -295,6 +333,7 @@ Note: This snapshot was taken at session start. Use your tools to check current 
       if (unstartedLexeme && currentActive.length < MAX_ACTIVE_GOALS) {
         await db.insert(activeGoals).values({
           userId,
+          languageCode: targetLang,
           type: 'vocab',
           targetId: unstartedLexeme.id,
           status: 'active',
@@ -309,7 +348,7 @@ Note: This snapshot was taken at session start. Use your tools to check current 
 
     // 4. Build the goal message for the tutor — ALL active goals, not just one
     const allActive = await db.query.activeGoals.findMany({
-      where: and(eq(activeGoals.userId, userId), eq(activeGoals.status, 'active')),
+      where: scoped,
       orderBy: [asc(activeGoals.priority)],
     });
 
@@ -448,10 +487,15 @@ Note: This snapshot was taken at session start. Use your tools to check current 
   // SESSION SUMMARIES (cross-session memory)
   // ============================================================================
 
-  /** Get last N session summaries for planner context. */
-  static async getRecentSummaries(userId: string, limit: number = 3): Promise<Array<{ endedAt: Date; durationMinutes: number; topicsCovered: string | null; errorsPattern: string | null; summary: string; nextSessionHint: string | null }>> {
+  /**
+   * Get last N session summaries for planner context, scoped to a single
+   * target language. Cross-language bleed here (e.g. Russian vocabulary
+   * hints surfacing in a Portuguese session) was a confirmed live bug —
+   * pre-2026-07-02 rows have no language recorded and are excluded.
+   */
+  static async getRecentSummaries(userId: string, languageCode: string, limit: number = 3): Promise<Array<{ endedAt: Date; durationMinutes: number; topicsCovered: string | null; errorsPattern: string | null; summary: string; nextSessionHint: string | null }>> {
     const summaries = await db.query.sessionSummaries.findMany({
-      where: eq(sessionSummaries.userId, userId),
+      where: and(eq(sessionSummaries.userId, userId), eq(sessionSummaries.languageCode, languageCode)),
       orderBy: [desc(sessionSummaries.endedAt)],
       limit,
     });
@@ -459,8 +503,8 @@ Note: This snapshot was taken at session start. Use your tools to check current 
   }
 
   /** Format recent summaries for the planner context, including time gap since last session. */
-  static async getSummariesContext(userId: string): Promise<string> {
-    const summaries = await this.getRecentSummaries(userId, 3);
+  static async getSummariesContext(userId: string, languageCode: string): Promise<string> {
+    const summaries = await this.getRecentSummaries(userId, languageCode, 3);
     if (summaries.length === 0) return '';
 
     const now = new Date();
@@ -486,6 +530,7 @@ Note: This snapshot was taken at session start. Use your tools to check current 
 
   /** Write a session summary. */
   static async writeSessionSummary(userId: string, data: {
+    languageCode: string;
     startedAt: Date; endedAt: Date; durationMinutes: number;
     topicsCovered: string | null; wordsWorked: string | null;
     errorsPattern: string | null; summary: string; nextSessionHint: string | null;

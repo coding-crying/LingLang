@@ -1,0 +1,17 @@
+id: bge-m3
+type: embed
+name: BGE-M3 Q8
+languages: [multi]
+gpu: true
+vram_mb: 600
+disk_mb: 606
+service_dir: llama-swap
+download:
+  repo_id: bgunlp/bge-m3-GGUF
+  files:
+    - bge-m3-Q8_0.gguf
+server:
+  type: llama-swap
+  port: 8091
+  endpoint: /v1/embeddings
+  health: /health

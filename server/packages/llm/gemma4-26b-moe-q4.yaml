@@ -1,0 +1,17 @@
+id: gemma4-26b-moe-q4
+type: llm
+name: Gemma 4 26B-A4B MoE Q4_K_M
+languages: [multi]
+gpu: true
+vram_mb: 14600
+disk_mb: 14600
+service_dir: llama-swap
+download:
+  repo_id: bartowski/gemma-4-26b-it-A4B-GGUF
+  files:
+    - gemma-4-26b-it-A4B-Q4_K_M.gguf
+server:
+  type: llama-swap
+  port: 8083
+  endpoint: /v1/chat/completions
+  health: /health

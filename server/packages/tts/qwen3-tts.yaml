@@ -1,0 +1,17 @@
+id: qwen3-tts
+type: tts
+name: Qwen3-TTS
+languages: [zh, ja, ko, en]
+gpu: true
+vram_mb: 4000
+disk_mb: 3500
+service_dir: qwen3-tts
+download:
+  repo_id: Qwen/Qwen3-TTS-1.7B
+server:
+  type: openai-compatible
+  port: 8882
+  endpoint: /v1/audio/speech
+  format: pcm
+  sample_rate: 24000
+  health: /health

@@ -45,6 +45,8 @@ import {
 } from '@livekit/agents';
 import * as openai from '@livekit/agents-plugin-openai';
 import * as silero from '@livekit/agents-plugin-silero';
+import { llm } from '@livekit/agents';
+import * as z from 'zod';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { resolve, dirname } from 'node:path';
@@ -57,13 +59,17 @@ import { ContextManager } from './lib/context.js';
 import { audioPayloadRegistry } from './stt/gemma-audio-stt.js';
 import { getLanguageConfig, nativeLanguageName, LANGUAGES } from './config/languages.js';
 import { buildInstructions, buildOnboardingInstructions } from './config/prompts/base.js';
+import { computeTargetShare, buildMixLine, measureTargetShare, targetShareForLevel, MAX_THROTTLE_NOTCHES } from './lib/language-mix.js';
 import { PLANNER_SYSTEM_PROMPT, buildPlannerPrompt } from './config/prompts/supervisor.js';
+import { readLearnerView, invalidateLearnerView } from './lib/learner-view.js';
+import { buildFrontierInfo } from './lib/frontier.js';
 import { db } from './db/index.js';
 import { users } from './db/schema.js';
 import { eq } from 'drizzle-orm';
 import { emitEvent, setSessionId } from './lib/trace.js';
 import { llmEvents } from './lib/llm-events.js';
 import { getOnboardingState, saveOnboardingData, commitOnboardingLevel, buildOnboardingContext } from './lib/onboarding.js';
+import type { Level } from './lib/level-inference.js';
 
 // ============================================================================
 // CONVERSATION HISTORY (for context)
@@ -115,79 +121,96 @@ class ConversationHistory {
   }
 
   /**
-   * Audio-aware context for Processor/Planner.
-   * Returns an array of OpenAI-style chat messages where audio turns become
-   * `audio_url` content (mirrors GemmaAudioLLM.buildMessages) so the LLM
-   * can analyze pronunciation, not just the placeholder text.
-   *
-   * Older audio turns are collapsed to a short marker to bound the prompt
-   * size — the LLM only needs the *recent* audio for pronunciation feedback.
+   * Replace an audio user turn's placeholder text with the words the
+   * Processor actually extracted from it. Without this, the text-only
+   * planner sees "User: [audio key=... dur=1.60s]" — it was strategizing
+   * off half a conversation (tutor lines only, confirmed in a live planner
+   * prompt 2026-07-02). Matched by audio key because the processor
+   * completes asynchronously — by then the user may already be on a
+   * later turn.
    */
-  getContextAsMessages(opts: { keepRecentAudioTurns?: number } = {}): any[] {
-    const MAX_AUDIO_TURNS = opts.keepRecentAudioTurns ?? 3;
-
-    // First pass: find audio turns from the END backwards.
-    const audioIndices: number[] = [];
+  annotateUserTurnByAudioKey(audioId: string, heardText: string) {
     for (let i = this.turns.length - 1; i >= 0; i--) {
-      if (this.turns[i].role === 'user' && this.turns[i].audio) {
-        audioIndices.push(i);
-        if (audioIndices.length >= MAX_AUDIO_TURNS) break;
+      const t = this.turns[i]!;
+      if (t.role === 'user' && t.audio?.audioId === audioId) {
+        t.content = heardText;
+        return;
       }
     }
-    const audioKeep = new Set(audioIndices);
-    let collapsedOldAudio = false;
-
-    const out: any[] = [];
-    for (let i = 0; i < this.turns.length; i++) {
-      const t = this.turns[i];
-      if (t.role === 'user' && t.audio) {
-        if (audioKeep.has(i)) {
-          // Recent audio — keep as audio_url content for pronunciation analysis.
-          out.push({
-            role: 'user',
-            content: [
-              { type: 'text', text: '[User spoke — analyze their pronunciation and what they said.]' },
-              { type: 'audio_url', audio_url: { url: t.audio.audioUri } },
-            ],
-          });
-        } else if (!collapsedOldAudio) {
-          collapsedOldAudio = true;
-          out.push({
-            role: 'user',
-            content: '[The user spoke several sentences in Russian earlier in this conversation.]',
-          });
-        }
-        // else: skip — already collapsed
-      } else {
-        // Plain text turn (assistant replies, or text-only user turns)
-        out.push({ role: t.role, content: t.content });
-      }
-    }
-    return out;
-  }
-
-  getLastUserTurn(): string | null {
-    for (let i = this.turns.length - 1; i >= 0; i--) {
-      if (this.turns[i].role === 'user') {
-        return this.turns[i].content;
-      }
-    }
-    return null;
   }
 
   /**
-   * Read-only view of recent user audio turns. Used by the Planner to hear
-   * pronunciation when audio is present. Returns up to `limit` turns, in
-   * chronological order (oldest first).
+   * Flat-text version of the last exchange only (tutor's previous line +
+   * the current user turn). See getLatestTurnMessages for why this is
+   * kept minimal — this is the text-fallback twin of that method, used
+   * when there's no audio for the current turn.
    */
-  getRecentAudioTurns(limit: number = 3): AudioAttachment[] {
-    const out: AudioAttachment[] = [];
-    for (let i = this.turns.length - 1; i >= 0 && out.length < limit; i--) {
-      const t = this.turns[i];
-      if (t.role === 'user' && t.audio) {
-        out.unshift(t.audio);
+  getLastExchangeText(): string {
+    const n = this.turns.length;
+    if (n === 0) return '';
+    const last = this.turns[n - 1]!;
+    const prev = n >= 2 ? this.turns[n - 2] : null;
+    const lines: string[] = [];
+    if (prev && prev.role === 'assistant') lines.push(`Tutor: ${prev.content}`);
+    lines.push(`${last.role === 'user' ? 'User' : 'Tutor'}: ${last.content}`);
+    return lines.join('\n');
+  }
+
+  /**
+   * Minimal Processor context: the CURRENT user turn ONLY, as audio if
+   * present. No prior turns, not even the tutor's immediately-preceding
+   * line — see the note inside for why that was tried and rolled back.
+   *
+   * 2026-07-02: this originally sent a 5-turn window with up to 3 recent
+   * audio clips plus interleaved assistant text. Confirmed live: with that
+   * much context in view, the Processor tagged words from the assistant's
+   * OWN prior turn as if the user had said them — a real, complex sentence
+   * graded "correct_use" that the user never spoke, which directly
+   * corrupted level inference. A wider window doesn't help this model
+   * reason better about "whose turn is this"; it just gives it more
+   * surface area to get confused on. One user turn in, one word-tagging
+   * job out.
+   */
+  getLatestTurnMessages(): any[] {
+    const out: any[] = [];
+    const n = this.turns.length;
+    if (n === 0) return out;
+
+    const last = this.turns[n - 1]!;
+
+    // 2026-07-02, round two: including the tutor's previous line (even as
+    // its own message, even with an explicit "don't tag this" instruction)
+    // was NOT enough — confirmed live, repeatedly, the model kept copying
+    // the assistant's own sentence into the lexeme output as if the user
+    // had said it (e.g. a 22-word Russian reply graded as "correct_use"
+    // the user never spoke). A prompt instruction is not a hard constraint
+    // for a 12B model; the only reliable fix is to not put the assistant's
+    // text in front of it at all. Losing "scaffolded" detection accuracy
+    // is a worthwhile trade for not writing hallucinated FSRS grades.
+    if (last.role === 'user') {
+      if (last.audio) {
+        // 2026-07-02: a 1.57s clip produced a fabricated 9-word English
+        // sentence — physically impossible (speech tops out ~2-3
+        // words/sec, so ~4 words max). The system prompt's "return empty
+        // if unclear" is a soft judgment call the model doesn't reliably
+        // follow; a computed, per-turn word ceiling is a hard number it
+        // can actually check itself against.
+        const maxWords = Math.max(2, Math.round(last.audio.durationSec * 3));
+        out.push({
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: `[User spoke for ${last.audio.durationSec.toFixed(2)}s — at most ~${maxWords} words could physically fit in that time. Grade only the words you clearly hear. Do not invent content beyond what's physically possible in this clip — if you can't make out real words, return an empty lexemes array.]`,
+            },
+            { type: 'audio_url', audio_url: { url: last.audio.audioUri } },
+          ],
+        });
+      } else {
+        out.push({ role: 'user', content: last.content });
       }
     }
+
     return out;
   }
 }
@@ -270,6 +293,7 @@ async function ensureLocalServices(): Promise<void> {
 
 function persistSessionSummary(
   userId: string,
+  targetLang: string,
   startedAt: Date,
   runningSummary: string,
   stats: { totalSrsUpdates: number; allErrors: Array<{ lemma: string; rule?: string }>; allHints: string[] },
@@ -291,6 +315,7 @@ function persistSessionSummary(
   const summary = runningSummary || `Session lasted ${durationMinutes}min with ${stats.totalSrsUpdates} word reviews.`;
 
   ContextManager.writeSessionSummary(userId, {
+    languageCode: targetLang,
     startedAt,
     endedAt,
     durationMinutes,
@@ -398,60 +423,15 @@ export default defineAgent({
       console.log(`[Tutor-ED] Onboarding complete for ${userId}/${targetLang}`);
     }
 
-    // Load the user's detected communication style. The processor EMA's the
-    // LLM's per-turn styleSignals into user_style; we read the current profile
-    // and tell the conversation LLM to mirror it.
-    const { readPersona, buildPersonaBlockSync, writePersona, parsePersonaRequest } = await import('./lib/persona.js');
-    const initialPersona = await readPersona(userId, targetLang);
-
-    // Mutable persona cache — updated when supervisor writes PERSONA: or user says "be more X"
-    let cachedPersona = {
-      personaOverride: initialPersona.personaOverride,
-      tone: initialPersona.tone,
-      correctionStyle: initialPersona.correctionStyle,
-      teachingMode: initialPersona.teachingMode,
-      extraInstructions: initialPersona.extraInstructions,
-    };
-
-    // Mutable cache of the user's style signals, refreshed by the processor
-    // when styleSignals arrive. Used by buildDynamicInstructions to compose
-    // adaptive length/register/roast lines. Initialized from defaults.
-    let currentStyleCache: Record<string, string> = {
-      humor: 'warm', pacing: 'medium', register: 'casual',
-      preamble: 'low', bsCallouts: 'neutral',
-    };
-
-    // 2026-06-25: parse wordsDue/wordsNew out of the initialContext string
-    // so the conversation prompt can foreground them as natural conversation
-    // seeds, not bury them in a multi-line context dump.
-    const wordsDue = extractWordsLine(initialContext, 'Vocabulary to Review');
-    const wordsNew = extractWordsLine(initialContext, 'New Vocabulary to Introduce');
-    const instructions = buildInstructions({
-      targetLanguage: langConfig.name,
-      nativeName: langConfig.nativeName,
-      nativeLanguage: usersNativeLanguage,
-      targetRatio: langConfig.pedagogy.targetLanguageRatio,
-      userLevel,
-      persona: buildPersonaBlockSync(
-        cachedPersona.personaOverride, cachedPersona.tone,
-        cachedPersona.correctionStyle, cachedPersona.teachingMode,
-        cachedPersona.extraInstructions, currentStyleCache,
-      ),
-      initialContext,
-      mode: 'voice',
-      recentErrors: 'None',
-      grammarHints: 'None',
-      goalUpdate: '',
-      styleDirective: '',
-      wordsDue,
-      wordsNew,
-      previousSessionContext: null, // not loaded yet; refreshInstructions picks up real value
-    });
+    // The persona/style profile is read fresh through readLearnerView on
+    // every prompt build (§1/§4 of the redesign) — no session-local persona
+    // or style cache. writePersona() call sites invalidate the cached view
+    // so a patch takes effect on the very next build, not after a TTL.
+    const { buildPersonaBlockSync, writePersona, parsePersonaRequest } = await import('./lib/persona.js');
 
     // === DYNAMIC INSTRUCTIONS (Supervisor-driven teaching plan) ===
-    const baseInstructions = instructions;
-
     let supervisorNudge = '';
+    let nudgeIssuedAtTurn: number | null = null;
     let runningSummary = '';
     let lastPlanAt = 0;
     const sessionStartedAt = new Date();
@@ -538,11 +518,37 @@ export default defineAgent({
     const recentErrorCounts: number[] = []    // errors per processor run, last 3
     const MAX_RECENT = 3
 
+    // Nudge lifecycle (§5): a nudge older than this many turns is dropped
+    // from the prompt so a stalled/failed planner cycle can't leave a stale
+    // angle pinned indefinitely.
+    const NUDGE_TTL_TURNS = 8;
+    const setNudge = (text: string) => {
+      supervisorNudge = text;
+      nudgeIssuedAtTurn = totalUserTurns;
+    };
+
+    // ── Comprehensible-input controller state (lib/language-mix.ts) ──
+    // Measured target-language share of the tutor's own last reply
+    // (script-based, null when unmeasurable), plus session-local distress
+    // notches: difficulty_adjustment=easier drops the target share a
+    // notch, and a notch decays after enough clean processor runs. This
+    // is what makes "I'm drowning" persist past one turn instead of the
+    // model apologizing in English once and reverting.
+    let lastTutorMixShare: number | null = null;
+    let mixThrottleNotches = 0;
+    let cleanRunsSinceThrottle = 0;
+    const THROTTLE_DECAY_RUNS = 8;
+
+    // Session phase (§3): signal-driven, not turn-count-driven. wrapup is
+    // sticky once set — reached only via an explicit "wants_to_end" signal
+    // or the participant leaving, never by turn count alone (a long
+    // session used to lock into goodbye mode forever at turn 21).
+    let forcedWrapup = false;
+
     function computeSessionPhase(turnCount: number): 'opening' | 'warmup' | 'flow' | 'wrapup' {
+      if (forcedWrapup) return 'wrapup'
       if (turnCount === 0) return 'opening'
       if (turnCount <= 2) return 'warmup'
-      // Wrapup: if user has had a long session and is in the last ~5 turns before disconnect
-      if (turnCount > 20) return 'wrapup'
       return 'flow'
     }
 
@@ -561,8 +567,29 @@ export default defineAgent({
       return 'medium'
     }
 
-    const buildDynamicInstructions = () => {
-      // Onboarding mode: use the intake prompt until verdict is emitted
+    // Turn-length trend and error trend — shared with the planner's
+    // engagement block (§5) so its mandate has real inputs instead of
+    // "care about enjoyment equally" with nothing to act on.
+    function computeTurnLengthTrend(): 'growing' | 'shrinking' | 'steady' {
+      if (recentUserTurnWords.length < MAX_RECENT) return 'steady'
+      const first = recentUserTurnWords[0]!
+      const last = recentUserTurnWords[recentUserTurnWords.length - 1]!
+      if (last > first * 1.3) return 'growing'
+      if (last < first * 0.7) return 'shrinking'
+      return 'steady'
+    }
+
+    function computeErrorTrend(): 'rising' | 'falling' | 'steady' {
+      if (recentErrorCounts.length < MAX_RECENT) return 'steady'
+      const first = recentErrorCounts[0]!
+      const last = recentErrorCounts[recentErrorCounts.length - 1]!
+      if (last > first) return 'rising'
+      if (last < first) return 'falling'
+      return 'steady'
+    }
+
+    const buildDynamicInstructions = async (): Promise<string> => {
+      // Onboarding mode: use the intake prompt until the verdict tool is called
       if (inOnboarding) {
         return buildOnboardingInstructions({
           targetLanguage: langConfig.name,
@@ -584,67 +611,103 @@ export default defineAgent({
 
       const hintContext = lastProcessorRun?.grammarHints?.join(' ') || 'None';
 
-      // Adaptive signals — read style from cache (refreshed by processor)
-      const styleMap = currentStyleCache;
-
       const phase = computeSessionPhase(totalUserTurns)
       const adaptive = {
         sessionPhase: phase,
         turnCount: totalUserTurns,
         errorDensity: computeErrorDensity(),
-        avgUserTurnWords: recentUserTurnWords.length > 0
-          ? recentUserTurnWords.reduce((a, b) => a + b, 0) / recentUserTurnWords.length
-          : 5,
-        roastTolerance: (styleMap.bsCallouts ?? 'neutral') as 'tolerant' | 'neutral' | 'skeptical',
-        register: (styleMap.register ?? 'casual') as 'formal' | 'casual' | 'profane',
-        pacing: (styleMap.pacing === 'fast' || styleMap.pacing === 'slow')
-          ? styleMap.pacing
-          : computeEngagement(),
+        pacing: computeEngagement(),
       } as const;
 
-      // Rebuild base instructions with current errors/hints (fills placeholders)
-      // Style directive is cached and refreshed by the processor.
-      const updatedBase = buildInstructions({
-        targetLanguage: langConfig.name,
-        nativeName: langConfig.nativeName,
-        nativeLanguage: usersNativeLanguage,
-        targetRatio: langConfig.pedagogy.targetLanguageRatio,
+      // The one read path (§1): due/new words, frontier inputs, and the
+      // persona row, all live off the DB with a short TTL — no session
+      // cache to keep in sync by hand.
+      const view = await readLearnerView(userId, targetLang);
+      const frontier = buildFrontierInfo(view.dueWords, view.newWords, view.dueBacklog, view.recentSuccess);
+
+      const nudgeAgeTurns = nudgeIssuedAtTurn !== null ? totalUserTurns - nudgeIssuedAtTurn : null;
+      const activeNudge = nudgeAgeTurns !== null && nudgeAgeTurns > NUDGE_TTL_TURNS ? '' : supervisorNudge;
+
+      const mixTargetShare = computeTargetShare({
         userLevel,
-        persona: buildPersonaBlockSync(
-          cachedPersona.personaOverride, cachedPersona.tone,
-          cachedPersona.correctionStyle, cachedPersona.teachingMode,
-          cachedPersona.extraInstructions, currentStyleCache,
-        ),
-        initialContext,
-        mode: 'voice',
-        recentErrors: errorContext,
-        grammarHints: hintContext,
-        goalUpdate: supervisorNudge || 'Just chat. React to what they say. If quiet, ask a simple question.',
-        styleDirective: '',
-        wordsDue,
-        wordsNew,
-        previousSessionContext: greetingContext,
-        adaptive,
+        recentSuccess: view.recentSuccess,
+        throttleNotches: mixThrottleNotches,
+      });
+      const mixLine = buildMixLine({
+        targetShare: mixTargetShare,
+        lastMeasuredShare: lastTutorMixShare,
+        targetLanguage: langConfig.name,
+        nativeLanguage: usersNativeLanguage,
       });
 
-      return `${updatedBase}
-
-You have tools to look up words and check the learner's progress. Use them when you need to — not every turn.
-Correct the underlying pattern, not just the individual word.`;
+      return buildInstructions({
+        targetLanguage: langConfig.name,
+        nativeLanguage: usersNativeLanguage,
+        userLevel,
+        persona: buildPersonaBlockSync(
+          view.persona.personaOverride, view.persona.tone,
+          view.persona.correctionStyle, view.persona.teachingMode,
+          view.persona.extraInstructions,
+        ),
+        frontier,
+        recentErrors: errorContext,
+        grammarHints: hintContext,
+        goalUpdate: activeNudge || 'Just chat. React to what they say. If quiet, ask a simple question.',
+        previousSessionContext: greetingContext,
+        mixLine,
+        adaptive,
+      });
     };
 
-    // Helper: pull a single line out of the initialContext string by its
-    // label. Used to surface due/new vocab lists to the conversation prompt
-    // as foregrounded conversation seeds.
-    function extractWordsLine(ctx: string, label: string): string {
-      const m = ctx.match(new RegExp(`${label}[^:]*:\\s*([^\\n]+)`));
-      const v = m?.[1]?.trim() || '';
-      return v === 'None' ? '' : v;
-    }
+    // === ONBOARDING VERDICT TOOL (§10) ===
+    // Structured by construction — replaces the old inline
+    // ```onboarding_verdict``` JSON block, which was one strip-regex away
+    // from being read aloud by TTS. The processor's onboarding_signal
+    // trigger remains supplementary field-filling only; this tool call is
+    // the sole writer of the level anchor.
+    const submitOnboardingVerdictTool = llm.tool({
+      description: 'Call this once you have a good picture of the learner\'s background, goals, and level from the onboarding conversation. Commits the level anchor and switches the session to normal tutoring. Do not call mid-conversation — only when you are ready to end the intake.',
+      parameters: z.object({
+        priorStudy: z.enum(['none', 'self_taught', 'class', 'immersion', 'heritage']),
+        studyDetails: z.string().optional().describe('Free text, e.g. "Duolingo 6 months"'),
+        goals: z.array(z.enum(['travel', 'work', 'heritage', 'media', 'academic', 'other'])),
+        goalDetails: z.string().optional(),
+        selfRatedLevel: z.enum(['pre_a1', 'a1', 'a2', 'b1', 'b2', 'c1', 'c2']),
+        anchoredLevel: z.enum(['pre_a1', 'a1', 'a2', 'b1', 'b2', 'c1', 'c2']).describe('Your own assessment based on the conversation — may differ from selfRatedLevel if you probed them and got evidence'),
+        anchorConfidence: z.number().min(0).max(1).describe('0.9 if you heard them speak, 0.6 if self-report only, 0.4 if you had to guess'),
+        anchorEvidence: z.string().describe('One sentence explaining your level estimate'),
+      }),
+      execute: async (args: any) => {
+        const level = (args.anchoredLevel || args.selfRatedLevel || 'a1') as Level;
+        console.log(`[Onboarding] Verdict tool called: level=${level} conf=${args.anchorConfidence}`);
+        trace('onboarding.verdict', `level=${level} conf=${args.anchorConfidence}`);
+
+        await commitOnboardingLevel(userId, targetLang, level, args.anchorConfidence ?? 0.6, args.anchorEvidence || 'Voice onboarding assessment', 'voice');
+        await saveOnboardingData(userId, targetLang, {
+          priorStudy: args.priorStudy,
+          studyDetails: args.studyDetails,
+          goals: args.goals,
+          goalDetails: args.goalDetails,
+          selfRatedLevel: args.selfRatedLevel,
+        });
+
+        inOnboarding = false;
+        await refreshDbContext();
+        setNudge(`Onboarding complete. The user's level is ${level}. Start the first real lesson — pick up naturally from the intake conversation.`);
+        await refreshInstructions();
+        pendingSignals.push('onboarding_complete');
+        updatePlanNow('onboarding_complete').catch(() => {});
+        console.log(`[Onboarding] Complete — switched to normal tutoring (${level})`);
+
+        return { ok: true };
+      },
+    });
+    const onboardingTools = { submit_onboarding_verdict: submitOnboardingVerdictTool };
+
     // === CREATE AGENT ===
     const agent = new voice.Agent({
-      instructions: buildDynamicInstructions(),
-      tools: dbTools as any,
+      instructions: await buildDynamicInstructions(),
+      tools: { ...dbTools, ...onboardingTools } as any,
     });
 
     // === CREATE SERVICES (LOCAL, CLOUD, OR GEMINI) ===
@@ -789,7 +852,7 @@ Correct the underlying pattern, not just the individual word.`;
     // === HELPERS: instruction refresh ===
     const refreshInstructions = async () => {
       trace('instructions.refresh');
-      (agent as any)._instructions = buildDynamicInstructions();
+      (agent as any)._instructions = await buildDynamicInstructions();
       await agent.updateChatCtx((agent as any)._chatCtx);
     };
 
@@ -808,7 +871,7 @@ Correct the underlying pattern, not just the individual word.`;
       const [dbContext, notes, sessions] = await Promise.all([
         ContextManager.getInitialContext(userId),
         ContextManager.getNotesContext(userId),
-        ContextManager.getSummariesContext(userId),
+        ContextManager.getSummariesContext(userId, targetLang),
       ]);
       cachedDbContext = dbContext;
       cachedNotes = notes;
@@ -817,7 +880,10 @@ Correct the underlying pattern, not just the individual word.`;
       // greeting can use it. Without this the agent opens every session
       // with the same hardcoded greeting — even if the previous session
       // explicitly wrote "next time focus on Bom dia" to the DB.
-      const recent = await ContextManager.getRecentSummaries(userId, 1);
+      // 2026-07-02: scoped to targetLang — this used to pull the most
+      // recent session across ALL languages, so a Russian session's hint
+      // could open a Portuguese session.
+      const recent = await ContextManager.getRecentSummaries(userId, targetLang, 1);
       const last = recent[0];
       if (last) {
         lastSessionHint = last.nextSessionHint ?? null;
@@ -874,12 +940,37 @@ Correct the underlying pattern, not just the individual word.`;
         console.log(`[Trigger] ${trigger.type}: ${trigger.value || trigger.reason || ''}`);
 
         if (trigger.type === 'language_change' && trigger.value) {
-          const newLang = trigger.value;
-          const newConfig = getLanguageConfig(newLang);
-          if (!newConfig || !LANGUAGES[newLang]) {
+          let newLang = trigger.value;
+
+          // The 12B fumbles the value field: live 2026-07-03 its reason
+          // said "user explicitly asked to learn Portuguese" while value
+          // was "ru" — the CURRENT language — so the switch was a ru→ru
+          // no-op and the conversation agent riffed a refusal. When the
+          // value is a no-op, recover the intent from the reason text:
+          // the one supported language it names that is neither the
+          // current target nor the learner's native language (those two
+          // appear in context phrases like "English-to-Russian learner").
+          if (newLang === targetLang) {
+            const reason = (trigger.reason || '').toLowerCase();
+            const candidates = Object.entries(LANGUAGES).filter(([code, cfg]) => {
+              if (code === targetLang || code === (user.nativeLanguage || 'en')) return false;
+              const tokens = cfg.name.toLowerCase().match(/[a-z]{4,}/g) || [];
+              return tokens.some((t) => reason.includes(t));
+            });
+            if (candidates.length === 1) {
+              newLang = candidates[0]![0];
+              console.log(`[Trigger] language_change value was a no-op (${targetLang}→${targetLang}); recovered "${newLang}" from trigger reason`);
+            } else {
+              console.warn(`[Trigger] language_change is a no-op (already ${targetLang}) and reason names ${candidates.length} other languages — skipping`);
+              continue;
+            }
+          }
+
+          if (!LANGUAGES[newLang]) {
             console.warn(`[Trigger] Unsupported language: ${newLang}`);
             continue;
           }
+          const newConfig = getLanguageConfig(newLang);
           try {
             await db.update(users).set({ targetLanguage: newLang }).where(eq(users.id, userId));
             console.log(`[Trigger] Language changed: ${targetLang} → ${newLang}`);
@@ -897,7 +988,8 @@ Correct the underlying pattern, not just the individual word.`;
             console.warn('[Trigger] TTS does not support updateVoice — voice will stay as the old language');
           }
           await refreshDbContext();
-          supervisorNudge = `The user has switched to learning ${newConfig.name}. Greet them in ${newConfig.name} and start fresh — find out what they know.`;
+          invalidateLearnerView(userId, newLang);
+          setNudge(`The user just asked to switch to ${newConfig.name}. Switch immediately, no pushback — don't question it, joke about it, or make them justify it. That's not a teaching moment, it's a request to honor. Greet them warmly in ${newConfig.name} right now and find out what they know.`);
           await refreshInstructions();
           pendingSignals.push('language_changed');
           updatePlanNow('user_request').catch(() => {});
@@ -905,6 +997,21 @@ Correct the underlying pattern, not just the individual word.`;
 
         if (trigger.type === 'difficulty_adjustment' && trigger.value) {
           const direction = trigger.value;
+
+          // Comprehensible-input throttle: "easier" also drops the
+          // language-mix target a notch so the complaint has a mechanical,
+          // persistent effect on how much target language the tutor speaks
+          // — not just on vocabulary difficulty.
+          if (direction === 'easier' && mixThrottleNotches < MAX_THROTTLE_NOTCHES) {
+            mixThrottleNotches++;
+            cleanRunsSinceThrottle = 0;
+            console.log(`[Trigger] Mix throttle: notch ${mixThrottleNotches} — reducing target-language share`);
+            trace('mix.throttle', `notches=${mixThrottleNotches}`);
+          } else if (direction === 'harder' && mixThrottleNotches > 0) {
+            mixThrottleNotches--;
+            trace('mix.throttle', `notches=${mixThrottleNotches} (released by harder)`);
+          }
+
           try {
             const currentLevel = user.proficiencyLevel || 'beginner';
             const levels = ['beginner', 'intermediate', 'advanced'];
@@ -915,16 +1022,20 @@ Correct the underlying pattern, not just the individual word.`;
               await db.update(users).set({ proficiencyLevel: newLevel }).where(eq(users.id, userId));
               user.proficiencyLevel = newLevel;
               console.log(`[Trigger] Difficulty: ${currentLevel} → ${newLevel}`);
-              supervisorNudge = `Adjusted difficulty to ${newLevel}. Adapt your teaching accordingly.`;
+              setNudge(`Adjusted difficulty to ${newLevel}. Adapt your teaching accordingly.`);
               await refreshInstructions();
             }
           } catch (err) {
             console.error(`[Trigger] Difficulty adjustment failed:`, err);
           }
+          // The throttle notch must reach the prompt even when the coarse
+          // proficiency level was already at its floor/ceiling (the branch
+          // above only refreshes on a level change).
+          await refreshInstructions();
         }
 
         if (trigger.type === 'goal_change' && trigger.value) {
-          supervisorNudge = `The user wants to focus on: ${trigger.value}. Adjust your teaching to cover this topic.`;
+          setNudge(`The user wants to focus on: ${trigger.value}. Adjust your teaching to cover this topic.`);
           await refreshInstructions();
           pendingSignals.push('goal_changed');
         }
@@ -948,6 +1059,13 @@ Correct the underlying pattern, not just the individual word.`;
 
         if (trigger.type === 'session_feedback') {
           pendingSignals.push('user_feedback');
+          // Signal-driven wrapup (§3): the only way into wrapup phase is
+          // explicit evidence the user is done — never turn count alone.
+          if (trigger.value === 'wants_to_end' && !forcedWrapup) {
+            forcedWrapup = true;
+            trace('session.wrapup.triggered', trigger.reason || 'wants_to_end');
+            await refreshInstructions();
+          }
         }
 
         // persona_update: user said "be more X" or similar — parse and apply
@@ -956,8 +1074,8 @@ Correct the underlying pattern, not just the individual word.`;
           if (personaPatch) {
             personaPatch.source = 'user_voice';
             await writePersona(userId, targetLang, personaPatch);
-            Object.assign(cachedPersona, personaPatch);
-            supervisorNudge = `The user asked to adjust the teaching style: "${trigger.value}". Acknowledge briefly and adapt.`;
+            invalidateLearnerView(userId, targetLang);
+            setNudge(`The user asked to adjust the teaching style: "${trigger.value}". Acknowledge briefly and adapt.`);
             await refreshInstructions();
             trace('trigger.persona_update', JSON.stringify(personaPatch));
           }
@@ -985,7 +1103,7 @@ Correct the underlying pattern, not just the individual word.`;
 
       // Skip LLM call on session_start if there's no vocab to plan from.
       if (reason === 'session_start' && !dbContext.trim()) {
-        supervisorNudge = 'Start simple. Find out what they know, then build from there.';
+        setNudge('Start simple. Find out what they know, then build from there.');
         lastPlanAt = now;
         trace('planner.update.skipped', 'reason=no_vocab');
         await refreshInstructions();
@@ -1001,31 +1119,32 @@ Correct the underlying pattern, not just the individual word.`;
       const notes = cachedNotes;
       const recentSessions = cachedSessions;
 
-      // Use Step 3.5 Flash (via OpenRouter) by default for deeper planning.
       const plannerUrl = process.env.SUPERVISOR_PLANNER_LLM_URL || process.env.SUPERVISOR_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1';
       const plannerModel = process.env.SUPERVISOR_PLANNER_LLM_MODEL || process.env.SUPERVISOR_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma4-26b';
       const plannerKey = process.env.SUPERVISOR_PLANNER_LLM_KEY || process.env.SUPERVISOR_LLM_KEY || process.env.LOCAL_LLM_KEY || '';
 
       const systemPrompt = PLANNER_SYSTEM_PROMPT;
 
-      // Collect recent user audio turns from history. 2026-06-25: the
-      // planner was returning empty responses because 3 base64 audio
-      // URLs (~1300 tokens each) plus max_tokens=4096 exceeded the model's
-      // 4096 context limit, SGLang returned 400, and the planner code
-      // saw no content field. The planner doesn't actually need to hear
-      // the audio — the processor scores pronunciation. Planner only
-      // needs the text transcripts. Force text mode.
-      const useAudioMessages = false;
+      // Planner is text-only by design (see role→model contract, spec §11) —
+      // it reads pre-aggregated text (DB state, engagement trends, history),
+      // it doesn't need audio itself.
+      const previousNudgeAgeTurns = nudgeIssuedAtTurn !== null ? totalUserTurns - nudgeIssuedAtTurn : null;
       const userPrompt = buildPlannerPrompt({
         dbContext,
         goalNote,
         recentHistory,
         previousNudge: supervisorNudge || null,
+        previousNudgeAgeTurns,
         runningSummary,
         reason,
         signals: pendingSignals,
         notes,
         recentSessions,
+        engagement: {
+          turnLengthTrend: computeTurnLengthTrend(),
+          pacing: computeEngagement(),
+          errorTrend: computeErrorTrend(),
+        },
       });
       const plannerMessages: any[] = [{ role: 'user', content: userPrompt }];
 
@@ -1103,7 +1222,7 @@ Correct the underlying pattern, not just the individual word.`;
               if (personaPatch) {
                 personaPatch.source = 'supervisor';
                 await writePersona(userId, targetLang, personaPatch);
-                Object.assign(cachedPersona, personaPatch);
+                invalidateLearnerView(userId, targetLang);
                 trace('planner.persona.updated', JSON.stringify(personaPatch));
               }
             }
@@ -1120,7 +1239,7 @@ Correct the underlying pattern, not just the individual word.`;
             if (Object.keys(patch).length > 0) {
               const personaPatch = { ...patch, source: 'supervisor' } as any;
               await writePersona(userId, targetLang, personaPatch);
-              Object.assign(cachedPersona, patch);
+              invalidateLearnerView(userId, targetLang);
               trace('planner.persona.patched', JSON.stringify(patch));
             }
           }
@@ -1162,7 +1281,13 @@ Correct the underlying pattern, not just the individual word.`;
       parsedNudge = nudgeLines.join(' ').trim();
       parsedSummary = summaryLines.join(' ').trim();
 
-      supervisorNudge = parsedNudge || supervisorNudge || 'Continue the conversation naturally.';
+      // Only bump the nudge's issue-turn when it actually changed — an
+      // unchanged nudge keeps aging toward its TTL (§5).
+      if (parsedNudge) {
+        setNudge(parsedNudge);
+      } else if (!supervisorNudge) {
+        setNudge('Continue the conversation naturally.');
+      }
       runningSummary = parsedSummary || runningSummary;
 
       lastPlannerRun = {
@@ -1200,7 +1325,14 @@ Correct the underlying pattern, not just the individual word.`;
       }
     }, PLAN_TICK_MS);
 
-    // Generate an initial plan quickly once we have session context.
+    // Generate an initial plan in the background — NOT awaited. Desired
+    // flow: the conversation agent greets immediately with a simple,
+    // low-latency opener; the planner pulls last-session context
+    // concurrently; once it lands, the next refreshInstructions() (already
+    // wired into updatePlanNow) picks up "Current angle" for the *next*
+    // turn. Blocking the greeting on an LLM round-trip added latency for
+    // no real benefit now that the conversation agent isn't trying to
+    // synthesize continuity itself (see computeOpeningLine).
     updatePlanNow('session_start').catch(() => {});
 
     await refreshInstructions();
@@ -1282,17 +1414,27 @@ Correct the underlying pattern, not just the individual word.`;
 
       const batchUtterance = pendingUserTurns.join('\n');
 
-      // For audio turns, hand the Processor the audio-aware history (recent
-      // audio kept as audio_url, older audio collapsed to text). For text-only
-      // turns, fall back to the legacy flat-string path.
-      const historyMessages = history.getContextAsMessages({ keepRecentAudioTurns: 3 });
+      // Minimal Processor context: previous tutor line + current user turn
+      // only — see getLatestTurnMessages for why a wider window is actively
+      // harmful here, not just wasteful.
+      const historyMessages = history.getLatestTurnMessages();
+      const lastExchange = history.getLastExchangeText();
 
-      runProcessor(userId, batchUtterance, history.getContext(), {
+      // Physical word ceiling for the hallucination guard: speech runs
+      // ~2-3 words/sec, so an analysis with more lexemes than duration*3
+      // transcribed sounds that weren't there. Text turns are bounded by
+      // their own word count (+2 margin for lemma splits).
+      const maxLexemes = audioAttachment
+        ? Math.max(2, Math.round(audioAttachment.durationSec * 3))
+        : batchUtterance.split(/\s+/).filter(w => w.length > 0).length + 2;
+
+      runProcessor(userId, batchUtterance, lastExchange, {
+        maxLexemes,
         useGemini: false,
         llmUrl: process.env.PROCESSOR_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1',
         llmModel: process.env.PROCESSOR_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma4-26b',
         llmKey: process.env.PROCESSOR_LLM_KEY || process.env.LOCAL_LLM_KEY || '',
-        recentHistory: history.getContext(),
+        recentHistory: lastExchange,
         historyMessages,
       }).then((result) => {
         lastProcessorRun = {
@@ -1303,7 +1445,26 @@ Correct the underlying pattern, not just the individual word.`;
           errors: result.errors,
           rawPrompt: result.rawPrompt,
           rawResponse: result.rawResponse,
+          // These three feed buildDynamicInstructions's tail lines directly —
+          // they must be here for the error/hint/pronunciation lines to work.
+          structuredErrors: result.structuredErrors,
+          grammarHints: result.grammarHints,
         };
+
+        // Give the text-only planner eyes on what the user said: swap the
+        // opaque audio placeholder for the words the processor extracted.
+        // (Only target-language words + substitutions are tagged now, so
+        // pure-native chatter keeps its placeholder — still better than
+        // nothing for the turns that matter.)
+        const heardForms = (result.analysis?.lexemes ?? [])
+          .map((l: any) => l.form || l.lemma)
+          .filter(Boolean);
+        if (audioAttachment && heardForms.length > 0) {
+          history.annotateUserTurnByAudioKey(
+            audioAttachment.audioId,
+            `(heard: ${heardForms.join(' ')})`,
+          );
+        }
 
         // Adaptive: track error count for error density computation
         const errorCount = (result.analysis?.lexemes ?? []).filter(
@@ -1312,12 +1473,19 @@ Correct the underlying pattern, not just the individual word.`;
         recentErrorCounts.push(errorCount);
         if (recentErrorCounts.length > MAX_RECENT) recentErrorCounts.shift();
 
-        // Adaptive: refresh style cache from supervisor's styleSignals
-        if (result.analysis?.styleSignals) {
-          for (const [k, v] of Object.entries(result.analysis.styleSignals)) {
-            if (typeof v === 'string' && v.length > 0) {
-              currentStyleCache[k] = v;
+        // Mix-throttle decay: a distress notch releases only after a run
+        // of clean turns — the learner has to re-earn immersion, it never
+        // snaps back the moment they stop complaining.
+        if (mixThrottleNotches > 0) {
+          if (errorCount === 0) {
+            cleanRunsSinceThrottle++;
+            if (cleanRunsSinceThrottle >= THROTTLE_DECAY_RUNS) {
+              mixThrottleNotches--;
+              cleanRunsSinceThrottle = 0;
+              trace('mix.throttle', `notches=${mixThrottleNotches} (decayed after ${THROTTLE_DECAY_RUNS} clean runs)`);
             }
+          } else {
+            cleanRunsSinceThrottle = 0;
           }
         }
 
@@ -1383,9 +1551,13 @@ Correct the underlying pattern, not just the individual word.`;
         }
 
         // Mark so supervisor considers a refresh on the next timer tick.
-        // Also refresh DB cache since SRS state has changed.
+        // Also refresh DB cache since SRS state has changed — and drop the
+        // learner-view cache so the frontier reflects it on the very next
+        // prompt build instead of waiting out the TTL (§2: "clearing the
+        // due queue mid-session changes tutor behavior within a turn").
         if ((result.srsUpdates?.length || 0) > 0) {
           refreshDbContext();
+          invalidateLearnerView(userId, targetLang);
         }
         writeRuntimeStateSoon();
         refreshInstructions().catch(() => {});
@@ -1414,54 +1586,27 @@ Correct the underlying pattern, not just the individual word.`;
       emitEvent('agent.state_change', { from: ev.oldState || 'unknown', to: String(ev.newState) });
     });
 
-    // Capture agent replies (LLM responses) for live chat view
+    // Capture agent replies (LLM responses) for live chat view.
+    // Onboarding completion is now driven by the submit_onboarding_verdict
+    // tool call (§10), not by scraping a JSON block out of spoken text —
+    // see the tool definition above.
     session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev: any) => {
       const item = ev.item;
       if (item?.role === 'assistant' && item?.textContent) {
         emitEvent('agent.reply', { text: item.textContent, source: item.source || 'unknown' });
         history.addAssistantTurn(item.textContent);
 
-        // Onboarding verdict detection — watch for the JSON block the intake
-        // prompt instructs the agent to emit when it has enough signal.
-        if (inOnboarding) {
-          const verdictMatch = item.textContent.match(/```onboarding_verdict\s*([\s\S]*?)```/);
-          if (verdictMatch) {
-            try {
-              const verdict = JSON.parse(verdictMatch[1].trim());
-              const level = verdict.anchoredLevel || verdict.selfRatedLevel || 'a1';
-              const confidence = typeof verdict.anchorConfidence === 'number' ? verdict.anchorConfidence : 0.6;
-              const evidence = verdict.anchorEvidence || 'Voice onboarding assessment';
-              console.log(`[Onboarding] Verdict received: level=${level} conf=${confidence} evidence="${evidence}"`);
-              trace('onboarding.verdict', `level=${level} conf=${confidence}`);
-
-              // Commit level anchor + mark onboarding complete
-              commitOnboardingLevel(userId, targetLang, level, confidence, evidence, 'voice')
-                .then(() => {
-                  // Save background/goals from verdict
-                  return saveOnboardingData(userId, targetLang, {
-                    priorStudy: verdict.priorStudy ?? undefined,
-                    studyDetails: verdict.studyDetails ?? undefined,
-                    goals: verdict.goals ?? undefined,
-                    goalDetails: verdict.goalDetails ?? undefined,
-                    selfRatedLevel: verdict.selfRatedLevel ?? undefined,
-                  });
-                })
-                .then(async () => {
-                  inOnboarding = false;
-                  // Refresh instructions to switch to normal tutoring
-                  await refreshDbContext();
-                  supervisorNudge = `Onboarding complete. The user's level is ${level}. Start the first real lesson — pick up naturally from the intake conversation.`;
-                  await refreshInstructions();
-                  pendingSignals.push('onboarding_complete');
-                  updatePlanNow('onboarding_complete').catch(() => {});
-                  console.log(`[Onboarding] Complete — switched to normal tutoring (${level})`);
-                })
-                .catch((err) => {
-                  console.error('[Onboarding] Failed to commit verdict:', err);
-                });
-            } catch (err) {
-              console.warn('[Onboarding] Failed to parse verdict JSON:', err);
-            }
+        // Comprehensible-input controller: measure how much of the reply
+        // was actually in the target language. On a bad overshoot, refresh
+        // instructions immediately so the corrective line is in place
+        // before the next reply, even if no processor run lands in between.
+        const measured = measureTargetShare(item.textContent, targetLang);
+        lastTutorMixShare = measured;
+        if (measured !== null) {
+          const levelTarget = targetShareForLevel(userLevel);
+          trace('mix.measured', `share=${measured.toFixed(2)} levelTarget=${levelTarget.toFixed(2)} throttle=${mixThrottleNotches}`);
+          if (measured > levelTarget + 0.25) {
+            refreshInstructions().catch(() => {});
           }
         }
       }
@@ -1601,24 +1746,17 @@ Correct the underlying pattern, not just the individual word.`;
     }
 
     // === OPENING MESSAGE ===
-    // 2026-06-25: was a hardcoded `session.say(langConfig.prompts.greeting)` —
-    // a fixed string that opened every session the same way. The agent
-    // would say "Olá, ready?" even when the previous session had a
-    // specific nextSessionHint waiting in the DB.
-    //
-    // Now: the LLM generates the opening itself based on the persona,
-    // the previous-session context (foregrounded in the system prompt
-    // right after the persona — QAT loses focus on context buried at
-    // the bottom of the prompt), and the frontier vocabulary. The
-    // agent decides how to say it — a Lisbon local would naturally
-    // say "E aí, vamos continuar com o pão?" when picking up from a
-    // previous session.
+    // 2026-07-02: greet immediately with a simple, low-latency opener — the
+    // planner is still working in the background (fired above, not
+    // awaited) and its "Current angle" lands in time for the *next* turn's
+    // refreshInstructions(), not this one. Deciding *how* to pick up from
+    // last session is the planner's job; the conversation agent's job here
+    // is just a fluent, fast greeting, not synthesizing continuity from
+    // raw session data (see computeOpeningLine).
     //
     // We trigger the LLM by sending a system-style user message that
     // the LLM reads as "the user has just connected." Plain "..." was
     // too vague and the LLM defaulted to a generic "Olá, tudo bem?"
-    // — explicit context cues the persona + previous-session hint to
-    // produce a real continuation message.
     console.log('[Tutor-ED] Sending initial greeting (LLM-generated)...');
     if (!isGemini) {
       trace('session.generateReply.opening');
@@ -1656,7 +1794,7 @@ Correct the underlying pattern, not just the individual word.`;
       console.log('[Tutor-ED] Session ended');
       clearInterval(planTimer);
       llmEvents.off('token', onLlmToken);
-      persistSessionSummary(userId, sessionStartedAt, runningSummary, sessionStats);
+      persistSessionSummary(userId, targetLang, sessionStartedAt, runningSummary, sessionStats);
     });
   },
 });

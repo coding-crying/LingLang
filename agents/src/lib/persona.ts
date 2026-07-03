@@ -222,7 +222,6 @@ export function parsePersonaRequest(text: string): PersonaPatch | null {
  */
 export function buildPersonaBlock(
   persona: ReturnType<typeof readPersona> extends Promise<infer T> ? T : never,
-  styleCache: Record<string, string>,
 ): string {
   const lines: string[] = [];
 
@@ -230,8 +229,8 @@ export function buildPersonaBlock(
   const personaLine = persona.personaOverride?.trim() || DEFAULT_PERSONA_LINE;
   lines.push(personaLine);
 
-  // 2. Tone (from persona table, fallback to style EMA)
-  const tone = persona.tone || (styleCache['humor'] === 'dry' ? 'roast' : null);
+  // 2. Tone
+  const tone = persona.tone;
   if (tone && TONE_LINES[tone]) {
     lines.push(TONE_LINES[tone]);
   }
@@ -262,15 +261,13 @@ export function buildPersonaBlockSync(
   correctionStyle: string | null,
   teachingMode: string | null,
   extraInstructions: string | null,
-  styleCache: Record<string, string>,
 ): string {
   const lines: string[] = [];
 
   const personaLine = personaOverride?.trim() || DEFAULT_PERSONA_LINE;
   lines.push(personaLine);
 
-  const effectiveTone = tone || (styleCache['humor'] === 'dry' ? 'roast' : null);
-  const toneLine = effectiveTone ? TONE_LINES[effectiveTone] : undefined;
+  const toneLine = tone ? TONE_LINES[tone] : undefined;
   if (toneLine) lines.push(toneLine);
 
   const corrLineSync = correctionStyle ? CORRECTION_LINES[correctionStyle] : undefined;

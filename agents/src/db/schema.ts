@@ -197,6 +197,13 @@ export const activeGoals = pgTable('active_goals', {
   id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
   userId: text('user_id').notNull().references(() => users.id),
 
+  // 2026-07-02: goals were unscoped by language, so a Portuguese remediation
+  // goal ("preservativo") surfaced in a Russian session's planner prompt
+  // (confirmed live). Nullable like session_summaries.language_code:
+  // existing rows are backfilled from their target lexeme's language where
+  // resolvable; unresolvable rows stay null and drop out of per-language
+  // queries.
+  languageCode: text('language_code'),
   type: text('type').notNull(), // 'vocab', 'grammar', 'remediation'
   targetId: text('target_id').notNull(), // lexemeId or ruleId
   status: text('status').notNull().default('active'), // 'active', 'completed', 'failed'
@@ -219,6 +226,14 @@ export const activeGoalsRelations = relations(activeGoals, ({ one }) => ({
 export const sessionSummaries = pgTable('session_summaries', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: text('user_id').notNull().references(() => users.id),
+  // 2026-07-02: nullable because pre-existing rows predate this column and
+  // have no recorded language — they're excluded from per-language queries
+  // rather than backfilled (unrecoverable which language they were in).
+  // Without this, a user who has ever tested/studied multiple target
+  // languages gets summaries from ALL of them mixed into one language's
+  // planner context (confirmed live: Russian vocabulary hints "use привет"
+  // bleeding into a Portuguese session).
+  languageCode: text('language_code'),
 
   startedAt: timestamp('started_at', { withTimezone: true }).notNull(),
   endedAt: timestamp('ended_at', { withTimezone: true }).notNull(),
@@ -233,6 +248,7 @@ export const sessionSummaries = pgTable('session_summaries', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index('session_summaries_user_idx').on(table.userId),
+  index('session_summaries_user_lang_idx').on(table.userId, table.languageCode),
 ]);
 
 export const sessionSummariesRelations = relations(sessionSummaries, ({ one }) => ({

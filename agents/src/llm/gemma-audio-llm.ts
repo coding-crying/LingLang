@@ -112,10 +112,17 @@ class GemmaAudioLLMStream extends llm.LLMStream {
           model: this._model,
           messages,
           stream: true,
-          // Disable chain-of-thought / reasoning mode for gemma-4 — otherwise
-          // the model emits "thought\n" as its first tokens before the real
-          // response, which the TTS speaks aloud.
+          // 2026-07-02: this was forcing enable_thinking:true on every
+          // conversational turn, overriding the server's no-think default
+          // template (see gemma4-qat-vllm) and causing full chain-of-thought
+          // reasoning ("Sharp/witty? Yes. Roast with charm? Yes...") to be
+          // generated as the actual reply, sometimes running long enough to
+          // read as a hang. The conversation agent is the low-latency path —
+          // only Processor/Planner should ever request thinking, and only
+          // deliberately. Explicit false here so the default is never
+          // ambiguous even if the server-side template changes again.
           chat_template_kwargs: { enable_thinking: false },
+          temperature: 0.6,
           ...(this._extraKwargs ?? {}),
         }),
         signal: this.abortController.signal,
@@ -330,10 +337,16 @@ class GemmaAudioLLMStream extends llm.LLMStream {
             role: msg.role,
             content: [
               { type: 'text', text: "Listen to the user's audio and respond in the same language they used." },
-              // SGLang's data: URI branch in load_audio is flaky for large base64 —
-              // strip the prefix and send raw base64. SGLang patches in
-              // utils/common.py:load_audio to decode raw base64 strings > 1KB.
-              { type: 'audio_url', audio_url: { url: entry.uri.replace(/^data:audio\/[^;]+;base64,/, '') } },
+              // 2026-07-02: the stripped-prefix workaround was SGLang-specific
+              // (its load_audio patch decoded raw base64 > 1KB directly).
+              // vLLM's OpenAI-compatible audio_url strictly validates the URL
+              // scheme and 400s on a bare base64 string ("The URL must be
+              // either a HTTP, data or file URL") — every conversational
+              // audio turn was silently failing since the vLLM migration.
+              // Send the full data: URI, same as the Processor's audio path
+              // (tutor-event-driven.ts ConversationHistory.getContextAsMessages),
+              // which never had this bug.
+              { type: 'audio_url', audio_url: { url: entry.uri } },
             ],
           });
         } else {

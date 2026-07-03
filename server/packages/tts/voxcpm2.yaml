@@ -1,0 +1,19 @@
+id: voxcpm2
+type: tts
+name: VoxCPM2
+languages: [zh, en]
+gpu: true
+vram_mb: 6242
+disk_mb: 4700
+service_dir: voxcpm2
+download:
+  repo_id: openbmb/VoxCPM2
+server:
+  type: openai-compatible
+  port: 8881
+  endpoint: /v1/audio/speech
+  format: pcm
+  sample_rate: 48000
+  health: /health
+  gpu_memory_utilization: 0.90
+  max_num_seqs: 8

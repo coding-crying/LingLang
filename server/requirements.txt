@@ -1,0 +1,14 @@
+# LingLang Server — Python dependencies
+huggingface_hub>=0.25.0
+pyyaml>=6.0
+fastapi>=0.115.0
+uvicorn>=0.30.0
+
+# TTS backends (installed per-service in production)
+# kokoro>=1.0       # kokoro service
+# nanovllm           # voxcpm2 service
+# transformers       # qwen3-asr service
+# torch              # all GPU services
+
+# ASR
+# transformers>=4.45.0

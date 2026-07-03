@@ -22,6 +22,8 @@ import { ContextManager } from '../lib/context.js';
 import { runProcessor, runSupervisor, analyzeUtteranceWithLocalLLM, type UtteranceAnalysis, type UtteranceAnalysisResult } from '../tools/supervisor-functions.js';
 import { getLanguageConfig, nativeLanguageName } from '../config/languages.js';
 import { buildInstructions } from '../config/prompts/base.js';
+import { readLearnerView } from '../lib/learner-view.js';
+import { buildFrontierInfo } from '../lib/frontier.js';
 
 // ============================================================================
 // CLI OPTIONS
@@ -118,15 +120,14 @@ async function generateTutorResponse(
 
   const grammarHints = processorResult?.analysis?.grammarHints?.join(' ') || 'None';
 
+  const view = await readLearnerView(opts.userId, opts.lang);
+
   const systemPrompt = buildInstructions({
     targetLanguage: langConfig.name,
-    nativeName: langConfig.nativeName,
     nativeLanguage: langConfig.nativeLanguage,
-    targetRatio: langConfig.pedagogy.targetLanguageRatio,
     userLevel: 'beginner',
     persona: langConfig.persona,
-    initialContext: context,
-    mode: 'text',
+    frontier: buildFrontierInfo(view.dueWords, view.newWords, view.dueBacklog, view.recentSuccess),
     recentErrors,
     grammarHints,
     goalUpdate: goalUpdate || undefined,

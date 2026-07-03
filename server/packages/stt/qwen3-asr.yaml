@@ -1,0 +1,15 @@
+id: qwen3-asr
+type: stt
+name: Qwen3-ASR
+languages: [zh, en, multi]
+gpu: true
+vram_mb: 1500
+disk_mb: 1800
+service_dir: qwen3-asr
+download:
+  repo_id: Qwen/Qwen3-Audio-0.6B
+server:
+  type: openai-compatible
+  port: 8001
+  endpoint: /v1/audio/transcriptions
+  health: /health

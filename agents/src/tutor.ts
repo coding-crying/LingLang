@@ -74,13 +74,10 @@ export default defineAgent({
 
     const instructions = buildInstructions({
       targetLanguage: langConfig.name,
-      nativeName: langConfig.nativeName,
       nativeLanguage: langConfig.nativeLanguage,
-      targetRatio: langConfig.pedagogy.targetLanguageRatio,
       userLevel: user.proficiencyLevel || 'beginner',
       persona: "You are a sharp, witty language tutor. Roast mistakes with charm — not cruelty. No cheerleading.",
-      initialContext,
-      mode: 'voice',
+      frontier: { state: 'balance', directive: 'Just react to what they say.', dueWords: '', newWords: '' },
     });
 
     // === CREATE AGENT ===

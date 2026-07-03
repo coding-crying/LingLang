@@ -74,13 +74,21 @@ export async function saveOnboardingData(
   languageCode: string,
   data: Partial<Omit<typeof userOnboarding.$inferInsert, 'userId' | 'languageCode'>>,
 ): Promise<void> {
-  await db
-    .insert(userOnboarding)
-    .values({ userId, languageCode, ...data })
-    .onConflictDoUpdate({
+  // Empty data means "ensure the row exists" (e.g. the entry() call that
+  // seeds an onboarding row before the intake flow runs) — with a real
+  // conflict, Drizzle's onConflictDoUpdate throws "No values to set" on an
+  // empty set, which crashed a live session (2026-07-02) the moment a
+  // second language's onboarding row already existed. Nothing to update
+  // means nothing to do, not an error.
+  const insert = db.insert(userOnboarding).values({ userId, languageCode, ...data });
+  if (Object.keys(data).length === 0) {
+    await insert.onConflictDoNothing();
+  } else {
+    await insert.onConflictDoUpdate({
       target: [userOnboarding.userId, userOnboarding.languageCode],
       set: data,
     });
+  }
 }
 
 /**

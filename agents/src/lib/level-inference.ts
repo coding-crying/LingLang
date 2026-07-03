@@ -290,8 +290,29 @@ export async function inferLevel(
   // Rationale: onboarding is a deliberate calibration — we trust it more
   // than a session-1 manual pin. 100 words ≈ 3-5 sessions of real use,
   // enough for the inference to have its own opinion.
+  //
+  // 2026-07-02: evidence is counted SINCE the pin, not lifetime. A pin set
+  // after 400+ reviews used to be dead on arrival — lifetime vocabSeen was
+  // already past every threshold, so the very next session start
+  // re-inferred over it. But a re-pin at that point means "the inference
+  // is wrong" (live case: inflated grades pushed Will to b1 while his
+  // actual speaking was A1), and it must hold until enough NEW evidence
+  // accumulates to earn back the override.
   const anchorThreshold = existing?.source === 'onboarding' ? 100 : 20;
-  const hasEnoughSignal = signals.vocabSeen >= anchorThreshold;
+  let anchorEvidence = signals.vocabSeen;
+  if ((existing?.source === 'manual' || existing?.source === 'onboarding') && existing.inferredAt) {
+    const sincePin = await db.execute(sql`
+      SELECT count(DISTINCT uv.lexeme_id)::int AS c
+      FROM review_logs rl
+      JOIN user_vocabulary uv ON rl.user_vocabulary_id = uv.id
+      JOIN lexemes l ON uv.lexeme_id = l.id
+      WHERE rl.user_id = ${userId}
+        AND l.language = ${languageCode}
+        AND rl.review_date > ${existing.inferredAt.toISOString()}
+    `);
+    anchorEvidence = Number((sincePin as any).rows?.[0]?.c ?? (sincePin as any)[0]?.c ?? 0);
+  }
+  const hasEnoughSignal = anchorEvidence >= anchorThreshold;
   if (!hasEnoughSignal) {
     // Manual or onboarding override for THIS language wins
     if (existing?.source === 'manual' || existing?.source === 'onboarding') {

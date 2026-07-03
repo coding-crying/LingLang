@@ -21,6 +21,7 @@ import { userVocabulary, lexemes, units, users, activeGoals, reviewLogs } from '
 import { ContextManager } from '../lib/context.js';
 import { fsrsReview, voiceToGrade, type FSRSGrade, type FSRSCard, type VoicePerformance } from '../lib/fsrs.js';
 import { embedText, lexemeEmbedText } from '../lib/embedding.js';
+import { passesDictionaryGate } from '../lib/dictionary.js';
 
 // ============================================================================
 // CONSTANTS
@@ -45,9 +46,10 @@ const FUNCTION_WORD_POS = new Set([
   'AUX',      // auxiliaries (do, have, will)
   'PART',     // particles (not, only, já, pois)
   'INTJ',     // interjections (yes, hi, oi)
-  'NUM',      // numerals (one, two, um, dois)
   'CCONJ',    // coordinating conjunctions
   'SCONJ',    // subordinating conjunctions
+  // NUM (numerals) intentionally excluded — numbers are core learnable
+  // vocabulary at pre-A1/A1 and were previously discarded as noise.
 ]);
 
 /**
@@ -78,63 +80,77 @@ export interface LexemeAnalysis {
   form: string;
   pos: string;
   /**
-   * ISO 639-1 code of the language this specific word is in. Critical for
-   * mixed utterances ("I want привет") where the LLM must tag "want" as
-   * the user's native language and "привет" as the target language. If
-   * omitted, the processor falls back to the utterance-level `language`
-   * field and the legacy `performance === 'native_substitution'` check.
+   * ISO 639-1 code of the language this specific word is in — always the
+   * user's target or native code, enforced by the JSON schema's enum
+   * (see buildUtteranceAnalysisSchema). Required, not inferred: an earlier
+   * version made this optional and fell back to guessing, which is exactly
+   * how ~half of a test account's "Portuguese" vocabulary ended up being
+   * English/Russian words filed under language='pt' (confirmed live,
+   * 2026-07-02) — the target/native branch in updateSRSFromAnalysis had no
+   * per-word language to check against. Mixed utterances ("I want привет")
+   * need this per-word, not just the utterance-level `language` field.
    */
-  language?: string;
-  performance: 'correct_use' | 'wrong_use' | 'recall_fail' | 'scaffolded' | 'native_substitution';
-  grammarRule?: { rule: string; example: string };
+  language: string;
   /**
-   * Pronunciation notes for the lexeme in this turn. Only present when the
-   * user spoke (audio available) AND the LLM observed something noteworthy
-   * (wrong stress, vowel quality, palatalization, devoicing, etc.).
-   * Use "clear" or omit for normal/correct pronunciation.
+   * ONE judgment per word — fluency folded into the correct_* variants
+   * (2026-07-02 slim-down; the separate `confidence` field and per-word
+   * pronunciation/grammarRule objects were cut). The processor is the
+   * memory-writer for the FSRS system, not a second live critic — the
+   * conversation agent hears the audio natively and corrects in the
+   * moment; the only thing that must persist is which words, how well.
+   *
+   * Legacy labels (correct_use, scaffolded) may appear in old stored
+   * analyses / the legacy supervisor.ts path — voiceToGrade still maps them.
    */
-  pronunciation?: {
-    stress: 'correct' | 'wrong' | 'unclear';
-    notes?: string;  // short human-readable observation
-  };
+  performance:
+    | 'correct' | 'correct_instant' | 'correct_struggled'
+    | 'wrong_use' | 'recall_fail' | 'native_substitution'
+    | 'correct_use' | 'scaffolded';
+  /** Legacy two-field shape — no longer requested from the model. */
+  confidence?: 'instant' | 'hesitant' | 'struggled';
+  /**
+   * Only for performance="native_substitution": the actual target-language
+   * word the learner should have used, in its dictionary/lemma form — only
+   * when you're confident of it from context (e.g. it was just taught, or
+   * it's an obvious everyday word). Omit if you don't know it. This lets
+   * the DB apply the FSRS penalty to a real target word instead of
+   * inventing a placeholder — the old placeholder mechanism ("store the
+   * native word under the target language, fix it later") never actually
+   * got fixed later and is why ~half of a test account's target vocabulary
+   * was contamination (confirmed live, 2026-07-02).
+   */
+  expectedTargetLemma?: string;
+  /** Legacy — no longer requested from the model; structuredErrors carries a synthetic rule instead. */
+  grammarRule?: { rule: string; example: string };
 }
 
 export interface UtteranceAnalysis {
   language: string;
   lexemes: LexemeAnalysis[];
-  grammarHints: string[];
   /**
-   * Per-turn pronunciation summary (only present when audio was available).
-   * Captures things that aren't tied to a specific lexeme — intonation,
-   * hesitation, sentence-level rhythm, vowel reduction, etc.
+   * ONE optional short sentence when something notable recurred this turn —
+   * a grammar pattern or a pronunciation issue worth deliberate practice.
+   * Replaces the old grammarHints[] + pronunciationNotes + per-word
+   * grammarRule trio: the conversation agent already corrects live, so the
+   * only consumer here is the planner/prompt-tail, which wants at most one
+   * line anyway.
    */
-  pronunciationNotes?: string;
+  note?: string;
+  /** Legacy field name — populated from `note` for old consumers. */
+  grammarHints?: string[];
   /**
    * Immediate-action triggers detected by the processor. When non-empty,
    * the pipeline dispatches the supervisor immediately (no waiting for
    * the timer cycle). Each trigger has a type and optional value/reason.
    */
   supervisorTriggers?: SupervisorTrigger[];
-  /**
-   * Style signals observed in this turn — used for personality mirroring.
-   * The LLM tags the user's style on each turn; the processor EMA's these
-   * into the user's `user_style` table.
-   *
-   * Keys:
-   * - humor: 'none' | 'dry' | 'sarcastic' | 'warm' | 'literal'
-   * - pacing: 'fast' | 'medium' | 'slow' (turn length, terseness, response rhythm)
-   * - register: 'formal' | 'casual' | 'profane' (slang, contractions, profanity)
-   * - profanity: 'no' | 'mild' | 'heavy' (count of swear words)
-   * - preamble: 'low' | 'medium' | 'high' (does the user tolerate or expect the tutor's intro lines?)
-   * - bsCallouts: 'tolerant' | 'neutral' | 'skeptical' (does the user push back on wrong info?)
-   */
-  styleSignals?: Record<string, string>;
 }
 
 export interface SupervisorTrigger {
   type: 'language_change' | 'difficulty_adjustment' | 'goal_change' | 'session_feedback' | 'persona_update' | 'onboarding_signal';
   /** For language_change: ISO code. For difficulty_adjustment: 'easier'|'harder'.
    *  For persona_update: natural-language description.
+   *  For session_feedback: "wants_to_end" when the user signals they're wrapping up (goodbye, gotta go).
    *  For onboarding_signal: JSON string with keys: priorStudy?, studyDetails?, goals?, goalDetails?, selfRatedLevel? */
   value?: string;
   /** Human-readable reason the trigger fired (for logging/dashboard). */
@@ -155,125 +171,136 @@ export interface SupervisorResult {
 // ============================================================================
 
 /**
- * Build the simplified analysis prompt for small local models.
- * Injects the target language hint so the LLM can verify its auto-detection.
- */
-function buildSimplePrompt(targetLanguage: string, nativeLanguage: string = 'English'): string {
-  // Now identical to buildFullPrompt — the full prompt is lean enough for all models
-  return buildFullPrompt(targetLanguage, nativeLanguage);
-}
-
-/**
- * Build the full analysis prompt for capable models (gemma4-26b and up).
- * Includes few-shot examples and function-word guidance.
+ * Build the analysis prompt. One prompt for all models — the 12B fills
+ * every role today (see spec §11); shrinking to smaller models later is a
+ * config + eval-fixture change, not a second prompt to maintain.
  * Exported so supervisor.ts can import it instead of duplicating.
  *
  * When the user provides audio (audio_url content in the user message), the
- * model is also asked to score pronunciation on each lexeme and emit a
- * sentence-level pronunciationNotes string. For text-only inputs the model
- * skips those fields.
+ * model is also asked to score pronunciation, tag recall confidence per
+ * lexeme, and emit a sentence-level pronunciationNotes string. For
+ * text-only inputs the model omits those fields.
  */
-export function buildFullPrompt(targetLanguage: string, nativeLanguage: string = 'English'): string {
-  return `Tag lexemes in a ${nativeLanguage}→${targetLanguage} learner's utterance. Return JSON only.
+export function buildFullPrompt(targetLanguage: string, nativeLanguage: string = 'English', targetIso: string = 'ru', nativeIso: string = 'en'): string {
+  return `Listen to a ${nativeLanguage}→${targetLanguage} learner's utterance. Identify the ${targetLanguage} words they actually said and grade each one. Return JSON only.
 
-Tag EACH word's language individually — a ${targetLanguage} word in an ${nativeLanguage} sentence gets "language":"${targetLanguage}". The top-level "language" is the dominant one.
+Your output becomes permanent spaced-repetition records. Precision beats coverage: if the audio is unclear, silent, or you can't make out real words, return an empty lexemes array. Never invent words you didn't clearly hear.
 
-Performance: correct_use | wrong_use | recall_fail | scaffolded | native_substitution
-- wrong_use: include grammarRule with rule + example
-- native_substitution: language = native code. Applies when learner uses native content word where target word was expected.
-- Function words default to correct_use. Only use these 5 labels.
+Tag ONLY these words:
+- ${targetLanguage} words the learner said: language="${targetIso}".
+- ${nativeLanguage} content words used IN PLACE of an expected ${targetLanguage} word: performance="native_substitution", language="${nativeIso}". If you're confident which ${targetLanguage} word they should have used (it was just taught, or it's an obvious everyday word), add expectedTargetLemma in dictionary form — omit if unsure, don't guess.
+Do NOT tag ${nativeLanguage} words otherwise. A learner just chatting in ${nativeLanguage} → empty lexemes array (triggers below still apply). Every "language" field is exactly "${targetIso}" or "${nativeIso}", nothing else.
+
+performance — one judgment per word:
+- correct_instant: fluent, immediate, clean
+- correct: produced correctly (default; always use this for text-only input)
+- correct_struggled: got it, but with hesitation, self-correction, stutter, or a long pause
+- wrong_use: wrong form or usage
+- recall_fail: tried and failed to produce it
+- native_substitution: see above
+
+note (optional): ONE short sentence if something notable recurred this turn — a grammar pattern or pronunciation issue worth deliberate practice later. Omit otherwise.
 
 supervisorTriggers (empty array if none):
-- language_change: user wants different language. value=ISO code.
-- difficulty_adjustment: too easy/hard. value="easier"|"harder"
+- language_change: user wants different language. value=ISO code of the language they are asking FOR (never the language they're already learning).
+- difficulty_adjustment: too easy/hard. Fire "easier" whenever the learner says they can't understand, feels overwhelmed, or asks for more ${nativeLanguage}. value="easier"|"harder"
 - goal_change: topic/skill focus within current language. value=topic.
-- session_feedback: frustration, want to stop. No value needed.
+- session_feedback: user signals they're wrapping up (goodbye, gotta go, that's enough for today). value="wants_to_end".
 - onboarding_signal: user reveals background or goals. value=JSON with any of: priorStudy ("none"|"self_taught"|"class"|"immersion"|"heritage"), studyDetails (free text), goals (array: "travel"|"work"|"heritage"|"media"|"academic"|"other"), goalDetails (free text), selfRatedLevel ("pre_a1"|"a1"|"a2"|"b1"|"b2"|"c1"|"c2"). Only fire when user explicitly states something — don't infer.
 
-Example 1 — correct with grammar note:
-"Я хочу пить воду"
-{"language":"ru","lexemes":[{"lemma":"я","form":"я","pos":"PRON","language":"ru","performance":"correct_use"},{"lemma":"хотеть","form":"хочу","pos":"VERB","language":"ru","performance":"correct_use"},{"lemma":"пить","form":"пить","pos":"VERB","language":"ru","performance":"correct_use"},{"lemma":"вода","form":"воду","pos":"NOUN","language":"ru","performance":"correct_use","grammarRule":{"rule":"accusative for direct objects","example":"вода → воду"}}],"grammarHints":[],"supervisorTriggers":[]}
+Example 1 — ${targetLanguage} speech with one substitution ("Я хочу пить water", said fluently except a pause before "пить"):
+{"language":"ru","lexemes":[{"lemma":"я","form":"я","pos":"PRON","language":"ru","performance":"correct_instant"},{"lemma":"хотеть","form":"хочу","pos":"VERB","language":"ru","performance":"correct_instant"},{"lemma":"пить","form":"пить","pos":"VERB","language":"ru","performance":"correct_struggled"},{"lemma":"water","form":"water","pos":"NOUN","language":"en","performance":"native_substitution","expectedTargetLemma":"вода"}],"supervisorTriggers":[]}
 
-Example 2 — mixed language + trigger:
-"I want to learn Portuguese"
-{"language":"en","lexemes":[{"lemma":"I","form":"I","pos":"PRON","language":"en","performance":"correct_use"},{"lemma":"want","form":"want","pos":"VERB","language":"en","performance":"correct_use"},{"lemma":"to","form":"to","pos":"PART","language":"en","performance":"correct_use"},{"lemma":"learn","form":"learn","pos":"VERB","language":"en","performance":"correct_use"},{"lemma":"Portuguese","form":"Portuguese","pos":"NOUN","language":"en","performance":"correct_use"}],"grammarHints":[],"supervisorTriggers":[{"type":"language_change","value":"pt","reason":"User wants to learn Portuguese"}]}
-
-If you observe the user's communication style in this turn, append a "styleSignals" object with at most these keys (omit any you can't observe — don't guess):
-- "humor": "none"|"dry"|"warm"  — jokes, irony, plain?
-- "pacing": "fast"|"slow"  — terse or long-winded?
-- "register": "formal"|"casual"  — slang, contractions?
-- "bsCallouts": "tolerant"|"skeptical"  — accepts your responses or pushes back?`;
+Example 2 — pure ${nativeLanguage} chatter with a request ("I want to learn Portuguese"): no lexemes, just the trigger:
+{"language":"en","lexemes":[],"supervisorTriggers":[{"type":"language_change","value":"pt","reason":"User wants to learn Portuguese"}]}`;
 }
 
-/** Backward-compatible alias: the full prompt template with a default language. */
-export const ANALYSIS_PROMPT_FULL = buildFullPrompt('Russian', 'English');
-
 /**
- * Attempt to clean and parse JSON from an LLM response.
- * Handles common formatting issues from smaller/quantized models.
- * Returns parsed object or null if unparseable.
+ * JSON schema for constrained decoding. Mirrors UtteranceAnalysis.
+ * Constrained decoding replaces the old ~55-line regex repair kit + retry
+ * loop: every parse failure used to silently drop FSRS grades, so making
+ * the shape structurally guaranteed is worth more than any amount of
+ * regex cleanup.
+ *
+ * Parameterized by targetIso/nativeIso so `language` (top-level and
+ * per-lexeme) is enum-constrained to exactly those two values — a plain
+ * `{type:'string'}` let the model emit anything, which is how ~half of a
+ * test account's "Portuguese" vocabulary ended up being English/Russian
+ * words filed under language='pt' (confirmed live, 2026-07-02). Making the
+ * field required (not just present-if-the-model-feels-like-it) closes the
+ * other half of that gap — see LexemeAnalysis.language.
  */
-function cleanAndParseJSON(raw: string): UtteranceAnalysis | null {
-  // Extract JSON from markdown code blocks
-  let jsonStr = raw;
-  if (raw.includes('```')) {
-    const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-    jsonStr = match?.[1] ?? raw;
+function buildUtteranceAnalysisSchema(targetIso: string, nativeIso: string) {
+  const languageEnum = [targetIso, nativeIso] as const;
+  return {
+    type: 'object',
+    properties: {
+      language: { type: 'string', enum: languageEnum },
+      lexemes: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            lemma: { type: 'string' },
+            form: { type: 'string' },
+            pos: { type: 'string' },
+            language: { type: 'string', enum: languageEnum },
+            performance: {
+              type: 'string',
+              enum: ['correct', 'correct_instant', 'correct_struggled', 'wrong_use', 'recall_fail', 'native_substitution'],
+            },
+            expectedTargetLemma: { type: 'string' },
+          },
+          required: ['lemma', 'form', 'pos', 'language', 'performance'],
+        },
+      },
+      note: { type: 'string' },
+      supervisorTriggers: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            type: {
+              type: 'string',
+              // persona_update deliberately absent: it was never documented in
+              // the prompt, so the model was never told when to emit it —
+              // an enum value with no semantics is just a hallucination slot.
+              enum: ['language_change', 'difficulty_adjustment', 'goal_change', 'session_feedback', 'onboarding_signal'],
+            },
+            value: { type: 'string' },
+            reason: { type: 'string' },
+          },
+          required: ['type'],
+        },
+      },
+    },
+    required: ['language', 'lexemes'],
+  } as const;
+}
+
+/**
+ * Extract JSON from a response that may be wrapped in a markdown code
+ * fence. No regex repair beyond fence-stripping — constrained decoding is
+ * what makes this reliable now, not string surgery.
+ */
+function parseJsonResponse(raw: string): UtteranceAnalysis | null {
+  let jsonStr = raw.trim();
+  if (jsonStr.includes('```')) {
+    const match = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+    jsonStr = match?.[1]?.trim() ?? jsonStr;
   }
-
-  const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) return null;
-
-  let cleanJson = jsonMatch[0]
-    .replace(/,(\s*[}\]])/g, '$1')           // Remove trailing commas
-    .replace(/([{,]\s*)(\w+):/g, '$1"$2":')  // Quote unquoted keys
-    .replace(/:\s*'([^']*)'/g, ': "$1"')     // Replace single quotes with double
-    .replace(/\}\s*\{/g, '},{')             // Missing commas between objects in arrays
-    .replace(/\]\s*\{/g, '],{')             // Missing commas between array elements (obj after array)
-    .replace(/\}\s*\]/g, '}]')              // Missing commas before closing array
-    .replace(/"\s*\n\s*"/g, '","')           // Missing commas between string values
-    .replace(/\\\n/g, '\\n')                // Fix escaped newlines in strings
-    // Fix missing commas between consecutive string array elements: "word1" "word2"
-    .replace(/"\s+"(?=[\wА-яЁё])/g, '","')
-    // Fix missing commas between consecutive object array elements: }{ or } {
-    .replace(/\}\s+,?\s*\{/g, '},{')
-    // Remove single-line comments (// ...) inside JSON
-    .replace(/\/\/[^\n"]*/g, '');
-
-  // Attempt balanced brace matching — sometimes the LLM generates extra closing braces
-  // Find the shortest valid JSON object by counting brace depth
-  let depth = 0;
-  let endIdx = -1;
-  for (let i = 0; i < cleanJson.length; i++) {
-    if (cleanJson[i] === '{') depth++;
-    else if (cleanJson[i] === '}') {
-      depth--;
-      if (depth === 0) { endIdx = i; break; }
-    }
-  }
-  if (endIdx >= 0) {
-    cleanJson = cleanJson.substring(0, endIdx + 1);
-  }
-
   try {
-    return JSON.parse(cleanJson) as UtteranceAnalysis;
+    return JSON.parse(jsonStr) as UtteranceAnalysis;
   } catch {
-    // Last resort: try to fix unescaped quotes inside strings by using JSON5-like approach
-    // Replace any inner double quotes that break parsing (rare but happens with examples)
-    try {
-      // Try progressively: remove grammarRule objects that might contain problematic quotes
-      const simplified = cleanJson.replace(/"grammarRule"\s*:\s*\{[^}]*\}/g, '"grammarRule":null');
-      return JSON.parse(simplified) as UtteranceAnalysis;
-    } catch {
-      return null;
-    }
+    return null;
   }
 }
 
 /**
- * Analyze an utterance using the local LLM (llama-swap)
- * Uses simplified prompt for small models like gemma3:4b
- * Retries with simplified prompt on JSON parse failure
+ * Analyze an utterance using the local LLM (SGLang). Single attempt —
+ * constrained decoding (response_format json_schema) makes retries
+ * unnecessary; a malformed response now means the endpoint itself is
+ * broken, which a retry with the same prompt wouldn't fix.
  */
 export async function analyzeUtteranceWithLocalLLM(
   utterance: string,
@@ -285,15 +312,11 @@ export async function analyzeUtteranceWithLocalLLM(
   llmKey?: string,
   historyMessages?: any[],
   nativeLanguage: string = 'English',
+  targetIso: string = 'ru',
+  nativeIso: string = 'en',
 ): Promise<UtteranceAnalysisResult> {
   const model = llmModel || process.env.LOCAL_LLM_MODEL || 'gemma4-26b';
-
-  // Use simple prompt for small models, full prompt for larger ones
-  // Models with <4B params or explicit :4b quant tags use simple prompt
-  const isSmallModel = model.includes(':4b') || model.includes(':1b') || model.includes(':0.5b') || model.includes('phi3:');
-  const prompt = isSmallModel
-    ? buildSimplePrompt(targetLanguage, nativeLanguage)
-    : buildFullPrompt(targetLanguage, nativeLanguage);
+  const sysPrompt = buildFullPrompt(targetLanguage, nativeLanguage, targetIso, nativeIso);
   const historyLine = recentHistory
     ? `\n\nRecent conversation (for scaffolded detection):\n${recentHistory}`
     : '';
@@ -301,100 +324,69 @@ export async function analyzeUtteranceWithLocalLLM(
 
   // If the caller passed audio-aware history (recent user audio as audio_url),
   // we send the audio turns as part of the prompt so the LLM can analyze
-  // pronunciation. The user message then becomes audio_url (when the latest
-  // turn is audio) or text (when it's text-only). Otherwise we fall back to
-  // the legacy flat-text path.
+  // pronunciation and confidence. Otherwise we fall back to the legacy
+  // flat-text path.
   const hasAudioMessages = !!historyMessages && historyMessages.some(
     (m: any) => Array.isArray(m.content) && m.content.some((c: any) => c?.type === 'audio_url'),
   );
 
   console.log(
-    `[Supervisor] Analyzing with ${model} (${isSmallModel ? 'simple' : 'full'} prompt, ` +
-    `${hasAudioMessages ? 'audio' : 'text'}-mode, native=${nativeLanguage})`,
+    `[Supervisor] Analyzing with ${model} (${hasAudioMessages ? 'audio' : 'text'}-mode, native=${nativeLanguage})`,
   );
 
-  // Try with full prompt first, then retry with simplified prompt if parse fails
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const useSimple = attempt > 0;
-    const sysPrompt = useSimple
-      ? buildSimplePrompt(targetLanguage, nativeLanguage)
-      : prompt;
+  try {
+    const startTime = Date.now();
 
-    try {
-      const startTime = Date.now();
+    const apiKey = llmKey || process.env.PROCESSOR_LLM_KEY || process.env.LOCAL_LLM_KEY || '';
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
-      const apiKey = llmKey || process.env.PROCESSOR_LLM_KEY || process.env.LOCAL_LLM_KEY || '';
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+    const messages: any[] = hasAudioMessages
+      ? [{ role: 'system', content: sysPrompt }, ...historyMessages!]
+      : [{ role: 'system', content: sysPrompt }, { role: 'user', content: userPrompt }];
 
-      // Build messages: prefer the audio-aware history if we have it, else legacy.
-      let messages: any[];
-      if (hasAudioMessages) {
-        // The history already includes the latest user turn as audio_url when
-        // applicable. Use it as-is and just prepend the system prompt.
-        messages = [
-          { role: 'system', content: sysPrompt },
-          ...historyMessages!,
-        ];
-      } else {
-        messages = [
-          { role: 'system', content: sysPrompt },
-          { role: 'user', content: userPrompt },
-        ];
-      }
+    const response = await fetch(`${llmUrl}/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature: 0.1,
+        max_tokens: 800,
+        response_format: {
+          type: 'json_schema',
+          json_schema: { name: 'utterance_analysis', schema: buildUtteranceAnalysisSchema(targetIso, nativeIso) },
+        },
+      }),
+    });
 
-      const response = await fetch(`${llmUrl}/chat/completions`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          model,
-          messages,
-          temperature: 0.1,
-          max_tokens: useSimple ? 400 : 800,
-          response_format: { type: 'json_object' },
-        }),
-      });
+    const elapsed = Date.now() - startTime;
 
-      const elapsed = Date.now() - startTime;
-
-      if (!response.ok) {
-        console.error(`[Supervisor] LLM request failed: ${response.status}`);
-        return { analysis: null, rawPrompt: sysPrompt + '\n' + userPrompt };
-      }
-
-      const data = await response.json() as any;
-      const content = data.choices?.[0]?.message?.content || '';
-
-      console.log(`[Supervisor] LLM responded in ${elapsed}ms (attempt ${attempt + 1})`);
-
-      const analysis = cleanAndParseJSON(content);
-      if (analysis) {
-        console.log(
-          `[Supervisor] Extracted ${analysis.lexemes?.length || 0} lexemes` +
-          (analysis.pronunciationNotes ? `, pronunciationNotes: "${analysis.pronunciationNotes.slice(0, 60)}"` : ''),
-        );
-        return { analysis, rawPrompt: sysPrompt + '\n' + userPrompt, rawResponse: content };
-      }
-
-      // Parse failed — log and retry with simpler prompt
-      if (attempt === 0) {
-        console.warn(`[Supervisor] JSON parse failed, retrying with simplified prompt. Raw: ${content.substring(0, 150)}`);
-      } else {
-        console.error(`[Supervisor] JSON parse failed on retry too. Raw: ${content.substring(0, 150)}`);
-        return { analysis: null, rawPrompt: sysPrompt + '\n' + userPrompt, rawResponse: content };
-      }
-
-    } catch (err) {
-      if (attempt === 0) {
-        console.warn(`[Supervisor] Analysis error (will retry): ${String(err).substring(0, 120)}`);
-      } else {
-        console.error('[Supervisor] Analysis error (retry also failed):', err);
-        return { analysis: null, rawPrompt: sysPrompt + '\n' + userPrompt };
-      }
+    if (!response.ok) {
+      console.error(`[Supervisor] LLM request failed: ${response.status}`);
+      return { analysis: null, rawPrompt: sysPrompt + '\n' + userPrompt };
     }
-  }
 
-  return { analysis: null };
+    const data = await response.json() as any;
+    const content = data.choices?.[0]?.message?.content || '';
+
+    console.log(`[Supervisor] LLM responded in ${elapsed}ms`);
+
+    const analysis = parseJsonResponse(content);
+    if (analysis) {
+      console.log(
+        `[Supervisor] Extracted ${analysis.lexemes?.length || 0} lexemes` +
+        (analysis.note ? `, note: "${analysis.note.slice(0, 60)}"` : ''),
+      );
+      return { analysis, rawPrompt: sysPrompt + '\n' + userPrompt, rawResponse: content };
+    }
+
+    console.error(`[Supervisor] JSON parse failed despite schema-constrained decoding. Raw: ${content.substring(0, 150)}`);
+    return { analysis: null, rawPrompt: sysPrompt + '\n' + userPrompt, rawResponse: content };
+  } catch (err) {
+    console.error('[Supervisor] Analysis error:', err);
+    return { analysis: null, rawPrompt: sysPrompt + '\n' + userPrompt };
+  }
 }
 
 /**
@@ -406,6 +398,8 @@ export async function analyzeUtteranceWithGemini(
   targetLanguage: string = 'Russian',
   recentHistory?: string,
   nativeLanguage: string = 'English',
+  targetIso: string = 'ru',
+  nativeIso: string = 'en',
 ): Promise<UtteranceAnalysisResult> {
   const apiKey = process.env.GOOGLE_API_KEY;
   if (!apiKey) {
@@ -417,7 +411,7 @@ export async function analyzeUtteranceWithGemini(
     ? `\n\nRecent conversation (for scaffolded detection):\n${recentHistory}`
     : '';
 
-  const promptText = `${buildFullPrompt(targetLanguage, nativeLanguage)}\n\nContext: ${context}${historyLine}\nUser said: "${utterance}"`;
+  const promptText = `${buildFullPrompt(targetLanguage, nativeLanguage, targetIso, nativeIso)}\n\nContext: ${context}${historyLine}\nUser said: "${utterance}"`;
 
   try {
     console.log('[Supervisor] Analyzing with Gemini...');
@@ -440,7 +434,7 @@ export async function analyzeUtteranceWithGemini(
 
     const responseText = result.text || '';
 
-    const analysis = cleanAndParseJSON(responseText);
+    const analysis = parseJsonResponse(responseText);
     if (analysis) {
       console.log(`[Supervisor] Extracted ${analysis.lexemes?.length || 0} lexemes`);
       return { analysis, rawPrompt: promptText, rawResponse: responseText };
@@ -487,13 +481,29 @@ function autoEmbedLexeme(lexemeId: string, lemma: string, language: string, tran
 // ============================================================================
 
 /**
- * When a user says an English word instead of the target word, we need to find
- * or create the target-language equivalent to apply the FSRS penalty.
+ * When a user says a native word instead of the target word, find or
+ * create the REAL target-language equivalent to apply the FSRS penalty.
  *
- * Strategy:
- * 1. Look for a target-language lexeme whose `nativeLemma` matches the English word
- * 2. Look for a target-language lexeme whose `translation` contains the English word
- * 3. Give up — no target equivalent known yet (returns null)
+ * 2026-07-02: this used to fall back to creating a placeholder lexeme
+ * that stored the *native* word's text under the target language (e.g.
+ * "this" filed as pt:this:DET) with a comment promising it would be
+ * "overwritten when the actual target word is learned" — nothing in the
+ * codebase ever did that overwrite, so these were permanent zombies.
+ * Confirmed live: ~half of a test account's "Portuguese" vocabulary was
+ * this pattern, surfacing as real vocabulary in scaffolding lines and
+ * skewing level inference. That fallback is gone. If we don't know the
+ * real target word, we don't invent one — the caller already handles a
+ * null return by tracking the native-language habit only, no fake DB row.
+ *
+ * Strategy (all against `expectedTargetLemma`, the model's stated guess at
+ * the real target word — see LexemeAnalysis.expectedTargetLemma):
+ * 1. Look up an existing target lexeme by that lemma+language (same
+ *    exact/GENERAL-pos/any-pos fallback chain as a normal target word).
+ * 2. Not found — create it for real, using the actual target-language
+ *    lemma, with nativeLemma linked back for cross-reference (safe now:
+ *    lemma !== nativeLemma, so this can never match the zombie pattern
+ *    lib/learner-view.ts filters on).
+ * 3. No expectedTargetLemma supplied at all — give up, return null.
  */
 async function findOrCreateTargetEquiv(
   _userId: string,
@@ -501,64 +511,46 @@ async function findOrCreateTargetEquiv(
   nativePos: string,
   targetLang: string,
   nativeLexemeId: string,
+  expectedTargetLemma?: string,
 ): Promise<typeof lexemes.$inferSelect | null | undefined> {
-  // 1. Check if any target-language lexeme already links to this native word
-  const linked = await db.query.lexemes.findFirst({
+  const targetLemma = (expectedTargetLemma || '').trim();
+  if (!targetLemma) return null;
+
+  let existing = await db.query.lexemes.findFirst({
     where: and(
+      eq(lexemes.lemma, targetLemma),
+      eq(lexemes.pos, nativePos),
       eq(lexemes.language, targetLang),
-      eq(lexemes.nativeLemma, nativeLemma),
     ),
   });
-
-  if (linked) return linked;
-
-  // 2. Check if any target-language lexeme has this native word as its translation
-  const byTranslation = await db.query.lexemes.findFirst({
-    where: and(
-      eq(lexemes.language, targetLang),
-      sql`${lexemes.translation} ILIKE ${'%' + nativeLemma + '%'}`,
-    ),
-  });
-
-  if (byTranslation) {
-    // Backfill the nativeLemma link
-    await db.update(lexemes)
-      .set({ nativeLemma })
-      .where(eq(lexemes.id, byTranslation.id));
-    return byTranslation;
+  if (!existing) {
+    existing = await db.query.lexemes.findFirst({
+      where: and(eq(lexemes.lemma, targetLemma), eq(lexemes.language, targetLang)),
+    });
   }
 
-  // 3. No target equivalent known. Create a placeholder target lexeme
-  //    with the nativeLemma link so we can track when the user DOES learn it.
-  const targetLexemeId = `${targetLang}:${nativeLemma.toLowerCase()}:${nativePos}`;
-  const exists = await db.query.lexemes.findFirst({
-    where: eq(lexemes.id, targetLexemeId),
-  });
-
-  if (exists) {
-    // Update the nativeLemma if not set
-    if (!exists.nativeLemma) {
-      await db.update(lexemes)
-        .set({ nativeLemma })
-        .where(eq(lexemes.id, exists.id));
+  if (existing) {
+    if (!existing.nativeLemma) {
+      await db.update(lexemes).set({ nativeLemma }).where(eq(lexemes.id, existing.id));
     }
-    return exists;
+    return existing;
   }
 
-  console.log(`[Processor] Creating placeholder target lexeme for native word "${nativeLemma}" → [${targetLang}]`);
+  const targetLexemeId = `${targetLang}:${targetLemma.toLowerCase()}:${nativePos}`;
+  console.log(`[Processor] Creating target lexeme "${targetLemma}" [${targetLang}] (expected word for native substitution "${nativeLemma}")`);
   await db.insert(lexemes).values({
     id: targetLexemeId,
-    lemma: nativeLemma, // temporary — will be overwritten when the actual target word is learned
+    lemma: targetLemma,
     pos: nativePos,
     language: targetLang,
-    translation: nativeLemma, // native word as "translation" placeholder
+    translation: nativeLemma,
     unitId: null,
     gender: null,
     morphFeatures: null,
-    nativeLemma: nativeLemma, // link to the native word
+    nativeLemma,
   }).onConflictDoNothing();
 
-  autoEmbedLexeme(targetLexemeId, nativeLemma, targetLang, nativeLemma);
+  autoEmbedLexeme(targetLexemeId, targetLemma, targetLang, nativeLemma);
 
   return await db.query.lexemes.findFirst({
     where: eq(lexemes.id, targetLexemeId),
@@ -625,6 +617,21 @@ export async function updateSRSFromAnalysis(
 
   for (let idx = 0; idx < analysis.lexemes.length; idx++) {
     const item = analysis.lexemes[idx]!;
+
+    // === DICTIONARY-EXISTENCE GATE (lib/dictionary.ts) ===
+    // The LLM provably invents words ("кост", "янный" written to FSRS as
+    // fluent nouns, live 2026-07-02). A word reaches spaced repetition
+    // only if hunspell recognizes its surface form or lemma. Languages
+    // without a bundled dictionary pass through ungated. Cost: legitimate
+    // proper nouns get dropped from SRS — acceptable, we don't schedule
+    // reviews for someone's name.
+    const wordLang = item.language || targetLang;
+    if (!(await passesDictionaryGate(item.form || item.lemma, item.lemma, wordLang))) {
+      console.log(`[Processor] Dictionary gate: dropping "${item.form || item.lemma}" (${wordLang}) — not a recognized word`);
+      tracking[idx] = 'analyzed';
+      continue;
+    }
+
     // Determine which language this word actually belongs to.
     // Priority: explicit `performance: "native_substitution"` label from
     // the LLM (per-word judgment — "the user said this English word INSTEAD
@@ -731,7 +738,7 @@ export async function updateSRSFromAnalysis(
 
       // Now find or create the TARGET language equivalent and apply a penalty
       // (native_substitution = grade 1 on the target word they should have used)
-      const targetLexeme = await findOrCreateTargetEquiv(userId, safeLemma, safePos, targetLang, nativeLexemeId);
+      const targetLexeme = await findOrCreateTargetEquiv(userId, safeLemma, safePos, targetLang, nativeLexemeId, item.expectedTargetLemma);
 
       if (targetLexeme) {
         const grade: FSRSGrade = 1; // Again — failed to produce target word
@@ -823,6 +830,26 @@ export async function updateSRSFromAnalysis(
       continue; // Skip the normal flow for native words
     }
 
+    // Safety net: the LLM sometimes tags a word's per-lexeme `language` as
+    // native while leaving `performance` as correct_use/wrong_use/etc
+    // instead of native_substitution — e.g. "how do you say 'this is' in
+    // Portuguese?" gets "this"/"is" filed as pt:this:DET, pt:is:VERB,
+    // polluting the target vocabulary table with English lemmas under a pt
+    // language tag. This is NOT the removed 2026-06-25 fallback (which
+    // reclassified every native word as native_substitution and tried to
+    // create target placeholders for it) — this only fires when the LLM's
+    // own per-word tag explicitly disagrees with the target language, and
+    // it skips tracking entirely rather than guessing a reclassification.
+    const itemLang = (item.language || '').toLowerCase();
+    if (itemLang && itemLang !== targetLang.toLowerCase() && itemLang === nativeLang.toLowerCase()) {
+      console.log(
+        `[Processor] Skipping mistagged word: "${item.lemma}" tagged language="${itemLang}" ` +
+        `(native) with performance="${item.performance}" (not native_substitution) — target is ${targetLang}. Not tracking.`,
+      );
+      tracking[idx] = 'analyzed';
+      continue;
+    }
+
     // === TARGET LANGUAGE WORD ===
     // Find matching lexeme in database - try exact POS first
     let existingLexeme = await db.query.lexemes.findFirst({
@@ -892,9 +919,11 @@ export async function updateSRSFromAnalysis(
       }
     }
 
-    // Map performance to FSRS grade
+    // Map performance to FSRS grade — confidence (audio-only) refines
+    // correct_use/scaffolded onto the full Again/Hard/Good/Easy scale.
     const grade = voiceToGrade({
       performance: item.performance,
+      confidence: item.confidence,
     });
 
     // Get current vocabulary state
@@ -1077,8 +1106,6 @@ export interface ProcessorResult {
   grammarHints?: string[];
   /** Immediate-action triggers from the processor (e.g. language change request). */
   supervisorTriggers?: SupervisorTrigger[];
-  /** Style signals observed in this turn (echoed for the dashboard / event log). */
-  styleSignals?: Record<string, string>;
 }
 
 /**
@@ -1105,6 +1132,16 @@ export async function runProcessor(
      * so it can critique pronunciation in addition to lexemes/grammar.
      */
     historyMessages?: any[];
+    /**
+     * Hard ceiling on how many lexemes this turn can physically contain
+     * (audio duration × ~3 words/sec, or the transcript's word count).
+     * An analysis exceeding it is a hallucination and is dropped wholesale —
+     * the prompt states the same ceiling, but prompt instructions have
+     * repeatedly failed to bind the 12B (confirmed live 2026-07-02: a 0.64s
+     * clip returned 4 invented lexemes despite a stated ~2-word ceiling),
+     * so the enforcement lives here in code.
+     */
+    maxLexemes?: number;
   } = {}
 ): Promise<ProcessorResult> {
   const result: ProcessorResult = {
@@ -1144,7 +1181,7 @@ export async function runProcessor(
   // 1) Analyze utterance
   let analysisResult: UtteranceAnalysisResult | null = null;
   if (options.useGemini !== false && process.env.GOOGLE_API_KEY) {
-    analysisResult = await analyzeUtteranceWithGemini(utterance, context, targetLanguage, options.recentHistory, nativeLanguage);
+    analysisResult = await analyzeUtteranceWithGemini(utterance, context, targetLanguage, options.recentHistory, nativeLanguage, targetIso, nativeIso);
   }
 
   if (!analysisResult?.analysis) {
@@ -1158,6 +1195,8 @@ export async function runProcessor(
       options.llmKey,
       options.historyMessages,
       nativeLanguage,
+      targetIso,
+      nativeIso,
     );
   }
 
@@ -1173,28 +1212,48 @@ export async function runProcessor(
     return result;
   }
 
-  // 1.5) Extract structured errors and grammar hints for goal system / tutor
-  result.structuredErrors = result.analysis.lexemes
-    .filter(l => l.performance === 'wrong_use' || l.performance === 'recall_fail')
-    .map(l => ({ lemma: l.lemma, grammarRule: l.grammarRule }));
+  // 1.2) Physical-plausibility gate: more lexemes than words that could fit
+  // in the clip means the model transcribed sounds that weren't there. Drop
+  // the whole lexeme set (a partial slice would keep hallucinated words too —
+  // there's no way to know which ones are real). Triggers are kept: they're
+  // suspect on a hallucinated turn, but dropping a real "switch to Spanish"
+  // request costs more than a spurious trigger the handler can survive.
+  if (
+    options.maxLexemes != null &&
+    result.analysis.lexemes.length > options.maxLexemes
+  ) {
+    console.warn(
+      `[Processor] Dropping ${result.analysis.lexemes.length} lexemes — exceeds physical ceiling ` +
+      `of ${options.maxLexemes} for this turn (hallucination guard). Triggers kept.`,
+    );
+    result.errors.push(`hallucination_guard: ${result.analysis.lexemes.length} lexemes > ceiling ${options.maxLexemes}`);
+    result.analysis.lexemes = [];
+  }
 
-  result.grammarHints = result.analysis.grammarHints || [];
+  // 1.5) Extract structured errors + the per-turn note for goal system / tutor.
+  // native_substitution included: falling back to a native word is a real
+  // error signal the goal-seeking system should see (e.g. "keeps saying
+  // 'this' instead of the Portuguese word"), not just wrong_use/recall_fail.
+  result.structuredErrors = result.analysis.lexemes
+    .filter(l => l.performance === 'wrong_use' || l.performance === 'recall_fail' || l.performance === 'native_substitution')
+    .map(l => ({
+      lemma: l.lemma,
+      grammarRule: l.grammarRule ?? (l.performance === 'native_substitution'
+        ? { rule: 'native_substitution', example: `used native word "${l.lemma}" instead of the target-language word` }
+        : undefined),
+    }));
+
+  // The single per-turn note replaced grammarHints[]/pronunciationNotes;
+  // downstream consumers (prompt tail, goal system, session stats) all take
+  // string[] so the note rides the existing grammarHints plumbing.
+  result.grammarHints = result.analysis.note
+    ? [result.analysis.note]
+    : (result.analysis.grammarHints || []);
 
   // Extract supervisor triggers for immediate pipeline action
   result.supervisorTriggers = result.analysis.supervisorTriggers || [];
   if (result.supervisorTriggers.length > 0) {
     console.log(`[Processor] ${result.supervisorTriggers.length} supervisor trigger(s): ${result.supervisorTriggers.map(t => `${t.type}${t.value ? '=' + t.value : ''}`).join(', ')}`);
-  }
-
-  // 2a) Update user style profile from this turn's styleSignals
-  if (result.analysis.styleSignals) {
-    try {
-      const { updateUserStyle } = await import('../lib/user-style.js');
-      await updateUserStyle(userId, result.analysis.styleSignals);
-      result.styleSignals = result.analysis.styleSignals;
-    } catch (err) {
-      console.warn(`[Processor] Style update failed: ${err}`);
-    }
   }
 
   // 2) Update SRS levels

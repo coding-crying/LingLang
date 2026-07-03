@@ -1,16 +1,30 @@
-// Conversation prompt — adaptive, signal-driven.
+// Conversation prompt — stable core + volatile tail.
 //
-// 2026-06-30: Replaced static level-only adaptation with a multi-signal
-// adaptive composition. The prompt is now built from:
-//   - Persona (per language, from languages.ts)
-//   - Level (CEFR) — sets response length/complexity
-//   - Adaptive signals (session phase, error density, user engagement,
-//     roast tolerance, register, pacing)
-//   - DB context (words due/new, level)
-//   - Recent turn analysis (errors, hints, planner's nudge)
+// 2026-07-02: Redesigned per docs/superpowers/specs/2026-07-02-adaptive-loop-redesign-design.md
 //
-// All signals are computed in tutor-event-driven.ts and passed in via
-// AdaptiveContext. The prompt builder is pure — no DB, no LLM, no I/O.
+// Layout (§7 of the spec): the prompt is a byte-stable CORE (persona,
+// learner identity, standing rules — changes only on persona patch or
+// level change) followed by a volatile TAIL rebuilt every turn (frontier
+// directive, word lists, error treatment, nudge, pronunciation, length).
+// This layout is what lets SGLang prefix-cache the core across turns.
+//
+// Prompt budget (hard rule): the tail carries at most ~8 short lines.
+// Anything that wants a new tail line must replace an existing one.
+//
+// The prompt builder is pure — no DB, no LLM, no I/O. All signals are
+// computed upstream (readLearnerView, tutor-event-driven.ts) and passed
+// in via PromptContext.
+
+export interface FrontierInfo {
+  /** Success-gated introduction state — see lib/frontier.ts */
+  state: 'consolidate' | 'balance' | 'expand'
+  /** One-line pedagogical directive for this state. */
+  directive: string
+  /** Formatted "lemma (translation), ..." — empty string if none. */
+  dueWords: string
+  /** Formatted "lemma (translation), ..." — empty string if none. */
+  newWords: string
+}
 
 export interface AdaptiveContext {
   /** What part of the session we're in. Affects scaffolding vs. flow. */
@@ -19,60 +33,31 @@ export interface AdaptiveContext {
   turnCount: number
   /** Errors per turn in last 3 turns, normalized 0-1. */
   errorDensity: number
-  /** Average words per user turn in last 3 turns. */
-  avgUserTurnWords: number
-  /** From user-style EMA — how much roast does the user tolerate? */
-  roastTolerance: 'tolerant' | 'neutral' | 'skeptical'
-  /** From user-style EMA — formality register. */
-  register: 'formal' | 'casual' | 'profane'
-  /** From user-style EMA — response rhythm. */
+  /** Response rhythm, derived from turn length trend. */
   pacing: 'fast' | 'medium' | 'slow'
 }
 
 export interface PromptContext {
   targetLanguage: string
-  nativeName: string
   nativeLanguage: string
   userLevel: string
+  /** Fully composed persona block (base line + tone + style profile). */
   persona: string
-  initialContext: string
-  mode?: 'voice' | 'text'
+  frontier: FrontierInfo
   recentErrors?: string
+  /** The processor's single per-turn note (grammar or pronunciation pattern worth practice). */
   grammarHints?: string
+  /** The planner's "current angle" nudge. */
   goalUpdate?: string
-  styleDirective?: string
-  wordsDue?: string
-  wordsNew?: string
-  targetRatio?: number
   previousSessionContext?: string | null
+  /**
+   * Comprehensible-input controller line (lib/language-mix.ts) — how much
+   * target vs native language to speak, escalated with the measured share
+   * of the previous reply when the tutor overshot.
+   */
+  mixLine?: string
   /** Optional: adaptive signals for prompt composition. */
   adaptive?: AdaptiveContext
-}
-
-const LEVEL_RATIOS: Record<string, number> = {
-  PRE_A1: 0.15,
-  ZERO: 0.15,
-  NONE: 0.15,
-  A1: 0.30,
-  A2: 0.50,
-  B1: 0.70,
-  B2: 0.85,
-  C1: 0.95,
-  C2: 1.00,
-  BEGINNER: 0.30,
-  INTERMEDIATE: 0.65,
-  ADVANCED: 0.95,
-}
-
-export function ratioForLevel(userLevel: string, baseRatio?: number): number {
-  const key = (userLevel || '').toUpperCase().trim()
-  const fromLevel = LEVEL_RATIOS[key]
-  if (fromLevel !== undefined) {
-    // Level ratio wins when lower (beginners get less target language),
-    // base ratio wins when higher (advanced default).
-    return baseRatio !== undefined ? Math.min(fromLevel, baseRatio) : fromLevel
-  }
-  return baseRatio ?? 0.5
 }
 
 /**
@@ -88,14 +73,16 @@ function computeLengthLine(
   if (phase === 'wrapup') {
     return '1 short sentence. Wrap naturally — no new content.'
   }
-  // Level-based baseline
+  // Level-based baseline — kept short across the board. This is a live
+  // back-and-forth, not a monologue; complexity at higher levels should
+  // show up in word choice and grammar, not turn length.
   let base: string
   if (level === 'pre_a1' || level === 'a1') {
     base = '1 short sentence'
   } else if (level === 'a2' || level === 'b1') {
-    base = '1-2 sentences with sub-clauses'
+    base = '1 sentence, occasionally 2'
   } else {
-    base = '2-4 sentences at full complexity'
+    base = '1-2 sentences at full complexity — save the second one for when it earns its place'
   }
   // Pacing modifier
   let modifier = ''
@@ -104,27 +91,7 @@ function computeLengthLine(
   } else if (pacing === 'slow') {
     modifier = ' Give them room — no rush to the next turn.'
   }
-  return `${base}.${modifier} React to what they actually said, not a template. No bullet lists, no emojis, no markdown.`
-}
-
-/**
- * Roast line: modulates how much wit/criticism the persona applies.
- * Tolerant users get the full roast. Skeptical users get calibrated
- * honesty without the bite. Default is "medium" roast.
- */
-function computeRoastLine(
-  tolerance: AdaptiveContext['roastTolerance'],
-  basePersona: string,
-): string {
-  // Persona already encodes roast level (e.g. PT persona is "sharp Lisbon roast").
-  // The adaptive line nudges the model to calibrate based on user feedback.
-  if (tolerance === 'tolerant') {
-    return 'Roast freely — they can take it. If they push back, you\'ll hear it.'
-  }
-  if (tolerance === 'skeptical') {
-    return 'Calibrate honesty: be sharp, but earn trust first. Don\'t lead with the roast.'
-  }
-  return 'Roast with charm. Read the room — if they got quiet, soften.'
+  return `${base}.${modifier} Snappy back-and-forth — leave room for them to jump back in, don't hold the floor. React to what they actually said, not a template. No bullet lists, no emojis, no markdown.`
 }
 
 /**
@@ -144,26 +111,15 @@ function computeErrorTreatment(errorDensity: number, errors: string): string {
 }
 
 /**
- * Register line: how formal to be in the target language.
- * 'formal' → no contractions, full forms. 'casual' → everyday grammar.
- * 'profane' → mirror the user's tone without forcing it.
- */
-function computeRegisterLine(
-  register: AdaptiveContext['register'],
-  targetLanguage: string,
-): string {
-  if (register === 'formal') {
-    return `In ${targetLanguage}, use formal grammar — no contractions, full forms.`
-  }
-  if (register === 'profane') {
-    return `Mirror their register — if they swear, you can too, sparingly. Don't force it.`
-  }
-  return `In ${targetLanguage}, use everyday grammar and contractions.`
-}
-
-/**
- * Opening line: only rendered in 'opening' phase. Lighter scaffolding,
- * sets the tone. Different from "Current angle" (planner's mid-session guidance).
+ * Opening line: only rendered in 'opening' phase, and only mechanical
+ * scaffolding — never continuity content. Deciding *how* to pick up from
+ * last session (what to reference, what tone) is the planner's job: it
+ * already reads the session-gap + nextSessionHint data and puts the result
+ * in "Current angle" before the opening fires (see tutor-event-driven.ts's
+ * sessionStartPlan await). Asking the conversation agent to synthesize
+ * continuity itself from raw session data is what produced visible
+ * "let me think about this" narration instead of a fluent reply — the
+ * conversation agent's job is flow, not strategy.
  */
 function computeOpeningLine(
   phase: AdaptiveContext['sessionPhase'],
@@ -171,102 +127,13 @@ function computeOpeningLine(
   level: string,
 ): string {
   if (phase !== 'opening') return ''
-  if (previousSessionContext) {
-    return `Opening: pick up from last session naturally — they know what they were working on.`
-  }
+  // A previous session exists — the planner's "Current angle" already
+  // carries the pick-up guidance. Nothing more to add here.
+  if (previousSessionContext) return ''
   if (level === 'pre_a1' || level === 'a1') {
     return `Opening: start with something they can answer in one word. Don't ask "how are you" in the target — use it to model the first exchange.`
   }
   return `Opening: ask one simple question in the target language to set the scene.`
-}
-
-/**
- * Build the conversation agent's system prompt.
- *
- * Design:
- *   - Persona line 0 (highest attention).
- *   - Level + adaptive length line.
- *   - Frontier mechanic (known words vs. new).
- *   - Adaptive context (phase, engagement, error treatment, register, roast).
- *   - DB signals (words due/new, errors, hints, planner angle).
- *
- * The prompt is composed dynamically. No two users get the same prompt —
- * the level, phase, error density, and style all shape it.
- */
-export function buildInstructions(context: PromptContext): string {
-  const levelKey = (context.userLevel || '').toLowerCase()
-  const adaptive = context.adaptive ?? defaultAdaptive()
-
-  // ── Frontier ratio ─────────────────────────────────────────────
-  const dueCount = (context.wordsDue?.split(',').filter(s => s.trim()).length ?? 0)
-  const newCount = (context.wordsNew?.split(',').filter(s => s.trim()).length ?? 0)
-  const fallbackRatio = ratioForLevel(context.userLevel, context.targetRatio)
-  const frontierRatio = (dueCount + newCount) > 0
-    ? dueCount / (dueCount + newCount)
-    : fallbackRatio
-
-  const frontierPct = Math.round(frontierRatio * 100)
-  let frontierLine: string
-  if ((dueCount + newCount) > 0) {
-    if (frontierPct >= 70) {
-      frontierLine = `Stick to words they already know (${dueCount}). Save new ones for when the user needs them.`
-    } else if (frontierPct >= 40) {
-      frontierLine = `Mix known (${dueCount}) and new (${newCount}). Each new word should be reachable from a known word in the same sentence.`
-    } else {
-      frontierLine = `Lead with new words (${newCount}) — they have enough known (${dueCount}) to scaffold. Build every new sentence on a known base.`
-    }
-  } else {
-    frontierLine = `No due/new vocabulary yet — just react to what they said.`
-  }
-
-  // ── Adaptive lines ─────────────────────────────────────────────
-  const lengthLine = computeLengthLine(levelKey, adaptive.sessionPhase, adaptive.pacing)
-  const roastLine = computeRoastLine(adaptive.roastTolerance, context.persona)
-  const errorLine = computeErrorTreatment(adaptive.errorDensity, context.recentErrors?.trim() || '')
-  const registerLine = computeRegisterLine(adaptive.register, context.targetLanguage)
-  const openingLine = computeOpeningLine(adaptive.sessionPhase, context.previousSessionContext, levelKey)
-
-  // ── Compose ────────────────────────────────────────────────────
-  const lines: string[] = [
-    context.persona,
-    '',
-    `You're chatting with a learner of ${context.targetLanguage}. Level: ${context.userLevel || 'beginner'}. They speak ${context.nativeLanguage} natively.`,
-    roastLine,
-    registerLine,
-  ]
-
-  if (openingLine) {
-    lines.push('', openingLine)
-  }
-
-  lines.push('', frontierLine)
-
-  if (context.wordsDue?.trim()) {
-    lines.push('', `Words they already know — your scaffolding: ${context.wordsDue}`)
-  }
-  if (context.wordsNew?.trim()) {
-    lines.push(`New words to reach for when they're ready: ${context.wordsNew}`)
-  }
-  if (context.goalUpdate?.trim()) {
-    lines.push('', `Current angle: ${context.goalUpdate}`)
-  }
-  if (errorLine) {
-    lines.push('', errorLine)
-  }
-  if (context.grammarHints?.trim() && context.grammarHints !== 'None') {
-    lines.push(`If relevant, drop in: ${context.grammarHints}`)
-  }
-  if (context.styleDirective?.trim()) {
-    lines.push('', `Style: ${context.styleDirective}`)
-  }
-
-  if (context.previousSessionContext && !openingLine) {
-    // Fold into persona line for high-attention pickup
-    lines[0] = `${context.persona} ${context.previousSessionContext}`
-  }
-
-  lines.push('', lengthLine)
-  return lines.join('\n')
 }
 
 function defaultAdaptive(): AdaptiveContext {
@@ -274,24 +141,79 @@ function defaultAdaptive(): AdaptiveContext {
     sessionPhase: 'flow',
     turnCount: 0,
     errorDensity: 0,
-    avgUserTurnWords: 5,
-    roastTolerance: 'neutral',
-    register: 'casual',
     pacing: 'medium',
   }
+}
+
+/**
+ * Build the conversation agent's system prompt: stable core + volatile tail.
+ *
+ * The core substring is byte-identical between calls as long as persona
+ * and level haven't changed — this is what SGLang prefix-caches. Nothing
+ * that changes every turn belongs in the core.
+ */
+export function buildInstructions(context: PromptContext): string {
+  const levelKey = (context.userLevel || '').toLowerCase()
+  const adaptive = context.adaptive ?? defaultAdaptive()
+
+  // ── Stable core ────────────────────────────────────────────────
+  const core = [
+    context.persona,
+    '',
+    `You're chatting with a learner of ${context.targetLanguage}. Level: ${context.userLevel || 'beginner'}. They speak ${context.nativeLanguage} natively.`,
+    '',
+    `You have tools to look up words and check the learner's progress. Use them when you need to — not every turn.`,
+    `Correct the underlying pattern, not just the individual word.`,
+    `Follow the learner's topic. Any vocabulary guidance below is about which words to reach for, never what to talk about.`,
+  ].join('\n')
+
+  // ── Volatile tail (hard budget: ~8 short lines) ──────────────────
+  const tail: string[] = []
+
+  const openingLine = computeOpeningLine(adaptive.sessionPhase, context.previousSessionContext, levelKey)
+  if (openingLine) tail.push(openingLine)
+
+  tail.push(context.frontier.directive)
+  if (context.frontier.dueWords) {
+    tail.push(`Words they already know — your scaffolding: ${context.frontier.dueWords}`)
+  }
+  if (context.frontier.newWords) {
+    tail.push(`New words to reach for when they're ready: ${context.frontier.newWords}`)
+  }
+
+  if (context.goalUpdate?.trim()) {
+    tail.push(`Current angle: ${context.goalUpdate}`)
+  }
+
+  const errorLine = computeErrorTreatment(adaptive.errorDensity, context.recentErrors?.trim() || '')
+  if (errorLine) tail.push(errorLine)
+
+  // The processor's one per-turn note — grammar or pronunciation pattern.
+  // Model it in your own speech, don't lecture about it.
+  if (context.grammarHints?.trim() && context.grammarHints !== 'None') {
+    tail.push(`Worth weaving in (model it, don't lecture): ${context.grammarHints}`)
+  }
+
+  // Language-mix line sits second-to-last: the tail's end is the
+  // strongest position, and mix is the most-violated constraint.
+  if (context.mixLine) tail.push(context.mixLine)
+
+  tail.push(computeLengthLine(levelKey, adaptive.sessionPhase, adaptive.pacing))
+
+  return `${core}\n\n${tail.filter(Boolean).join('\n')}`
 }
 
 // ── Onboarding prompt ────────────────────────────────────────────────────────
 // Used instead of buildInstructions() when the user hasn't completed
 // onboarding for this language. The agent runs a warm intake conversation,
-// then emits a JSON verdict that the session handler parses to commit the
-// level anchor and switch to normal tutoring.
+// then calls the submit_onboarding_verdict tool to commit the level anchor
+// and switch to normal tutoring.
 //
 // Design principles:
 //   - Feels like a conversation, not a form or a test
 //   - Three things to capture: background, goals, level probe
 //   - Level probe is optional — if the user says "I know zero X", skip it
-//   - Ends with a JSON block the session handler can parse
+//   - Ends with a tool call, not text the TTS could read aloud
 //   - Short — 5-8 turns max, then hand off
 
 export interface OnboardingPromptContext {
@@ -308,7 +230,7 @@ export interface OnboardingPromptContext {
 }
 
 export function buildOnboardingInstructions(ctx: OnboardingPromptContext): string {
-  const { targetLanguage, nativeName, nativeLanguage, existingData } = ctx;
+  const { targetLanguage, nativeLanguage, existingData } = ctx;
 
   const alreadyKnow: string[] = [];
   if (existingData?.priorStudy && existingData.priorStudy !== 'none') {
@@ -337,22 +259,7 @@ Tone: warm, curious, zero pressure. This is a conversation, not a form. Ask one 
 
 Language: speak in ${nativeLanguage} for this intake. You can sprinkle in a word or two of ${targetLanguage} if it feels natural, but don't teach yet.
 
-When you have enough to make a good assessment (background + goals + at least a sense of level), end the conversation naturally — something like "Great, I've got a good picture of where you're at. Let's get started!" — then on the very next line emit this JSON block and nothing else after it:
+When you have enough to make a good assessment (background + goals + at least a sense of level), end the conversation naturally — something like "Great, I've got a good picture of where you're at. Let's get started!" — then call the submit_onboarding_verdict tool with your assessment. Do NOT call the tool until you have enough signal, and do NOT call it mid-conversation.
 
-\`\`\`onboarding_verdict
-{
-  "priorStudy": "none|self_taught|class|immersion|heritage",
-  "studyDetails": "free text or null",
-  "goals": ["travel","work","heritage","media","academic","other"],
-  "goalDetails": "free text or null",
-  "selfRatedLevel": "pre_a1|a1|a2|b1|b2|c1|c2",
-  "anchoredLevel": "pre_a1|a1|a2|b1|b2|c1|c2",
-  "anchorConfidence": 0.0,
-  "anchorEvidence": "one sentence explaining your level estimate"
-}
-\`\`\`
-
-anchoredLevel is YOUR assessment based on the conversation — it may differ from selfRatedLevel if you probed them and got evidence. anchorConfidence: 0.9 if you heard them speak, 0.6 if self-report only, 0.4 if you had to guess.
-
-Do NOT emit the JSON until you have enough signal. Do NOT emit it mid-conversation.`;
+anchoredLevel is YOUR assessment based on the conversation — it may differ from selfRatedLevel if you probed them and got evidence. anchorConfidence: 0.9 if you heard them speak, 0.6 if self-report only, 0.4 if you had to guess.`;
 }

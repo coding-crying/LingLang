@@ -204,13 +204,11 @@ Do not teach. Do not explain. Do not add anything else.`,
 
     const instructions = buildInstructions({
       targetLanguage: langConfig.name,
-      nativeName: langConfig.nativeName,
       nativeLanguage: langConfig.nativeLanguage,
-      targetRatio: langConfig.pedagogy.targetLanguageRatio,
       userLevel: isNew ? 'beginner' : 'intermediate',
       persona: "You are a sharp, witty language tutor. Roast mistakes with charm — not cruelty. No cheerleading.",
-      initialContext: `Language: ${langConfig.name}\nUser: ${userId}\n${levelNote}`,
-      mode: 'voice',
+      frontier: { state: 'balance', directive: 'Just react to what they say.', dueWords: '', newWords: '' },
+      goalUpdate: levelNote,
     });
 
     console.log(`[Demo] Starting tutor: ${langConfig.name} (${isNew ? 'beginner' : 'experienced'})`);

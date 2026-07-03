@@ -1,0 +1,19 @@
+id: kokoro-v1.0
+type: tts
+name: Kokoro v1.0
+languages: [en]
+gpu: false
+vram_mb: 0
+disk_mb: 313
+service_dir: kokoro
+download:
+  repo_id: hexgrad/Kokoro-82M
+  files:
+    - kokoro-v1_0.pth
+server:
+  type: openai-compatible
+  port: 8880
+  endpoint: /v1/audio/speech
+  format: pcm
+  sample_rate: 24000
+  health: /health

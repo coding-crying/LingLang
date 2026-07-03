@@ -1,0 +1,19 @@
+id: moss-tts
+type: tts
+name: MossTTS Realtime
+languages: [zh, en, multi]
+gpu: true
+vram_mb: 12122
+disk_mb: 11100
+service_dir: moss-tts
+download:
+  repo_ids:
+    - OpenMOSS-Team/MOSS-TTS-Realtime
+    - OpenMOSS-Team/MOSS-Audio-Tokenizer
+server:
+  type: openai-compatible
+  port: 8880
+  endpoint: /v1/audio/speech
+  format: pcm
+  sample_rate: 24000
+  health: /health

@@ -4,6 +4,9 @@ agents/dist-*-backup.tar.gz
 agents/data/
 .playwright-mcp/
 
+# Unrelated vendored experiment (Google AI Edge Gallery clone) - not part of this project
+linglangedge/
+
 # Based on https://raw.githubusercontent.com/github/gitignore/main/Node.gitignore
 
 # Logs
