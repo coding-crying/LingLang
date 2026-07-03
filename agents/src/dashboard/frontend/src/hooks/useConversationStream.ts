@@ -54,6 +54,24 @@
  * plain (unanalyzed) bubbles. That's a pre-existing ambiguity in the
  * pipeline, not something this task introduces, and the default
  * configuration (interval = 1) has no ambiguity at all.
+ *
+ * Second caveat, added after review (also not a blocker): the backend now
+ * captures the turnSeq for an exchange's `llm.token`/`agent.reply` pair
+ * exactly once, at that exchange's own token-stream start (its first
+ * `isStart` delta), and holds it steady through to `isEnd` — this is what
+ * keeps a barge-in/interruption on a *later* turn from bumping the turnSeq
+ * stamped on an *earlier*, still-streaming exchange's remaining deltas
+ * (see tutor-event-driven.ts, `currentExchangeTurnSeq`). One narrow gap
+ * remains, unclosed, because there is no clean signal for it: if an
+ * exchange is interrupted before its stream's `isEnd`, and its
+ * `ConversationItemAdded` (i.e. `agent.reply`) is somehow still emitted
+ * *after* a subsequent exchange's token stream has already started, the
+ * shared `currentExchangeTurnSeq` will have already advanced to that next
+ * exchange's turnSeq, and the stale `agent.reply` will misattach to it.
+ * In this codebase's normal flow, replies are generated one at a time and
+ * an interrupted exchange typically never reaches `ConversationItemAdded`
+ * at all, so this ordering has not been observed — but it is not
+ * structurally impossible, and no test in this file exercises it.
  */
 
 import { useCallback, useEffect, useReducer } from 'react';

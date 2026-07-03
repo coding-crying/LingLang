@@ -193,12 +193,110 @@ function testFallbackFifoMatchingWithoutTurnSeq() {
 }
 
 // ============================================================================
+// Test 4: overlapping/interrupted turn — turnSeq must stay stable for the
+// FULL lifetime of one agent exchange (review finding on Task 4a)
+//
+// Backend bug being regression-tested: `agent.reply` and `llm.token` used to
+// stamp `turnSeq: totalUserTurns`, read LIVE at each emit, instead of a
+// value captured once per exchange. If a new user turn (barge-in) landed
+// while a prior agent reply's token stream was still open (before isEnd),
+// the stream's tail + its agent.reply would get stamped with the NEW,
+// higher turnSeq — even though they belong to the FIRST exchange. The fix
+// (tutor-event-driven.ts's `currentExchangeTurnSeq`, captured once at the
+// stream's `isStart`) makes every event of one exchange carry the SAME
+// turnSeq, no matter what happens on later turns before isEnd.
+//
+// Part A below replays events as the FIXED backend actually emits them
+// (turnSeq stable at 1 throughout exchange 1, despite turn 2 interleaving)
+// and asserts the hook produces exactly one turn-1 agent bubble, correctly
+// separate from turn 2's.
+//
+// Part B replays the SAME scenario but with the tail of exchange 1's events
+// stamped turnSeq: 2 — i.e. exactly what the PRE-FIX backend would have
+// produced (a live read of totalUserTurns after it had already bumped to
+// 2). This half is what makes the test meaningful as a regression check:
+// it demonstrates the hook (unchanged, correct, turnSeq-keyed logic) still
+// produces the duplicate-bubble bug when fed pre-fix-shaped events, proving
+// the bug lived in the backend's turnSeq stamping, not in this hook, and
+// that this test would have been RED before the tutor-event-driven.ts fix
+// (because production events would have looked like Part B, not Part A).
+// ============================================================================
+
+function testOverlappingTurnKeepsStableTurnSeq() {
+  // --- Part A: fixed-backend shape — turnSeq stays 1 for all of exchange 1 ---
+  const fixedEvents: RawStreamEvent[] = [
+    // Exchange 1 begins: user turn 1, agent reply starts streaming.
+    { type: 'user.transcript', ts: 1000, data: { text: 'Расскажи о погоде', isFinal: true, turnSeq: 1 } },
+    { type: 'llm.token', ts: 1010, data: { text: 'Сегодня ', isStart: true, isEnd: false, turnSeq: 1 } },
+
+    // Turn 2 (barge-in) arrives WHILE exchange 1's stream is still open
+    // (no isEnd yet for turnSeq 1's stream).
+    { type: 'user.transcript', ts: 1015, data: { text: 'Подожди', isFinal: true, turnSeq: 2 } },
+    { type: 'processor.analysis', ts: 1300, data: { turnSeq: 2, lexemes: [], srsUpdates: [] } },
+
+    // Exchange 1's stream resumes/finishes — FIXED backend holds turnSeq at
+    // 1 for these, even though totalUserTurns is now 2 in the backend.
+    { type: 'llm.token', ts: 1020, data: { text: 'солнечно', isStart: false, isEnd: false, turnSeq: 1 } },
+    { type: 'llm.token', ts: 1030, data: { text: '', isStart: false, isEnd: true, turnSeq: 1 } },
+    { type: 'agent.reply', ts: 1040, data: { text: 'Сегодня солнечно', turnSeq: 1 } },
+  ];
+
+  const fixedState = replay(fixedEvents);
+  const fixedAgentTurns = fixedState.turns.filter((t) => t.kind === 'agent') as AgentTurn[];
+
+  assert(
+    fixedAgentTurns.length === 1,
+    `[stable turnSeq] expected exactly ONE agent bubble for exchange 1, got ${fixedAgentTurns.length}`,
+  );
+  assert(
+    fixedAgentTurns[0]?.turnSeq === 1,
+    `[stable turnSeq] the single agent bubble must belong to turn 1, got turnSeq=${fixedAgentTurns[0]?.turnSeq}`,
+  );
+  assert(
+    fixedAgentTurns[0]?.text === 'Сегодня солнечно',
+    `[stable turnSeq] expected exchange 1's final text, got "${fixedAgentTurns[0]?.text}"`,
+  );
+  assert(fixedAgentTurns[0]?.finalized === true, '[stable turnSeq] exchange 1 bubble should be finalized');
+
+  // --- Part B: pre-fix backend shape — tail of exchange 1 mis-stamped 2 ---
+  const buggyEvents: RawStreamEvent[] = [
+    { type: 'user.transcript', ts: 1000, data: { text: 'Расскажи о погоде', isFinal: true, turnSeq: 1 } },
+    { type: 'llm.token', ts: 1010, data: { text: 'Сегодня ', isStart: true, isEnd: false, turnSeq: 1 } },
+    { type: 'user.transcript', ts: 1015, data: { text: 'Подожди', isFinal: true, turnSeq: 2 } },
+    { type: 'processor.analysis', ts: 1300, data: { turnSeq: 2, lexemes: [], srsUpdates: [] } },
+    // PRE-FIX bug: totalUserTurns already bumped to 2 by the time these
+    // fire, so the (buggy) live read stamps them turnSeq: 2 even though
+    // they're still exchange 1's own stream tail / reply.
+    { type: 'llm.token', ts: 1020, data: { text: 'солнечно', isStart: false, isEnd: false, turnSeq: 2 } },
+    { type: 'llm.token', ts: 1030, data: { text: '', isStart: false, isEnd: true, turnSeq: 2 } },
+    { type: 'agent.reply', ts: 1040, data: { text: 'Сегодня солнечно', turnSeq: 2 } },
+  ];
+
+  const buggyState = replay(buggyEvents);
+  const buggyAgentTurns = buggyState.turns.filter((t) => t.kind === 'agent') as AgentTurn[];
+
+  // This documents the bug this task fixes: fed pre-fix-shaped events, the
+  // (unmodified, correct) hook creates a SECOND agent bubble under turnSeq 2
+  // — a phantom exchange-1-shaped reply with no turn-1 user turn of its own
+  // and no exchange-2 reply reaching it either. This is the exact
+  // duplicate-bubble failure mode the review flagged; it's why the fix had
+  // to be in tutor-event-driven.ts (stamp correctly) rather than in this
+  // hook (which already trusts turnSeq as ground truth).
+  assert(
+    buggyAgentTurns.length === 2,
+    `[pre-fix shape demonstrates the bug] expected the mis-stamped events to produce TWO agent bubbles ` +
+    `(proving the hook can't recover from a backend that mis-stamps turnSeq mid-stream), got ${buggyAgentTurns.length}`,
+  );
+}
+
+// ============================================================================
 // Run
 // ============================================================================
 
 testNoDuplicateAgentReply();
 testDelayedProcessorAnalysisOrdering();
 testFallbackFifoMatchingWithoutTurnSeq();
+testOverlappingTurnKeepsStableTurnSeq();
 
 console.log(`\n${passes} passed, ${failures} failed`);
 if (failures > 0) {

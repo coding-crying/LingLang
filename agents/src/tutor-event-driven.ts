@@ -515,6 +515,17 @@ export default defineAgent({
     // closure runs. Keep all state captured by buildDynamicInstructions
     // declared above its definition.
     let totalUserTurns = 0;
+    // turnSeq of the exchange currently streaming/replying, captured ONCE at
+    // the start of that exchange's token stream (see onLlmToken's isStart
+    // branch below) and reused by every later `llm.token` delta AND by the
+    // `agent.reply` emit for the same exchange. Do NOT read `totalUserTurns`
+    // live from either of those emit sites — a new/interrupting user turn
+    // can land (and bump totalUserTurns) before this exchange's stream
+    // reaches isEnd, and a live read would mis-stamp the tail of an
+    // in-flight exchange with the newer turn's id, reproducing the
+    // duplicate-bubble bug fixed in Task 4a (see review notes on
+    // tutor-event-driven.ts:1611/:1807).
+    let currentExchangeTurnSeq = 0;
     const recentErrorCounts: number[] = []    // errors per processor run, last 3
     const MAX_RECENT = 3
 
@@ -1605,10 +1616,13 @@ export default defineAgent({
     session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev: any) => {
       const item = ev.item;
       if (item?.role === 'assistant' && item?.textContent) {
-        // turnSeq: the most recent user turn this reply responds to. Lets
-        // the frontend replace/finalize the matching streamed bubble
+        // turnSeq: the turn this reply responds to, captured once at this
+        // exchange's token-stream start (currentExchangeTurnSeq) rather than
+        // read live from totalUserTurns — see the declaration comment above
+        // for why a live read is unsafe across an in-flight interruption.
+        // Lets the frontend replace/finalize the matching streamed bubble
         // instead of appending a duplicate (see Task 4a).
-        emitEvent('agent.reply', { text: item.textContent, source: item.source || 'unknown', turnSeq: totalUserTurns });
+        emitEvent('agent.reply', { text: item.textContent, source: item.source || 'unknown', turnSeq: currentExchangeTurnSeq });
         history.addAssistantTurn(item.textContent);
 
         // Comprehensible-input controller: measure how much of the reply
@@ -1793,6 +1807,20 @@ export default defineAgent({
     // the dashboard to filter.
     const roomName = ctx.room.name;
     const onLlmToken = (ev: { text: string; index: number; isStart: boolean; isEnd: boolean }) => {
+      // Capture turnSeq ONCE per exchange, at the first delta of a new
+      // response (isStart) — then hold it steady for every later delta of
+      // the SAME stream, all the way to isEnd. Do not re-read
+      // totalUserTurns on every delta: if a new/interrupting user turn
+      // lands mid-stream (a real, supported feature — see the
+      // speechHandle.interrupted tracing elsewhere in this file),
+      // totalUserTurns bumps before this stream's isEnd, and a live read
+      // would stamp the stream's tail with the wrong (newer) turnSeq,
+      // breaking the frontend's `agent-${turnSeq}` bubble lookup (Task 4a
+      // review finding). currentExchangeTurnSeq is also what `agent.reply`
+      // above reads, so both events for one exchange always agree.
+      if (ev.isStart) {
+        currentExchangeTurnSeq = totalUserTurns;
+      }
       emitEvent('llm.token', {
         userId,
         roomName,
@@ -1800,11 +1828,7 @@ export default defineAgent({
         index: ev.index,
         isStart: ev.isStart,
         isEnd: ev.isEnd,
-        // turnSeq: most recent user turn at token-emission time — same
-        // value `agent.reply` for this exchange will carry, so the
-        // frontend can key the streaming bubble by turnSeq up front
-        // instead of only by a random per-stream id (Task 4a).
-        turnSeq: totalUserTurns,
+        turnSeq: currentExchangeTurnSeq,
       });
     };
     llmEvents.on('token', onLlmToken);
