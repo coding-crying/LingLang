@@ -4,9 +4,21 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LingLang</title>
-  <link rel="stylesheet" href="/css/design-tokens.css" />
   <!-- 2026-06-25: removed /css/app.css — stale reference to a Vite template
        file that was never created. Returns 404 in production. -->
+  <!-- 2026-07-03: removed the /css/design-tokens.css link — that path never
+       existed in the repo (404). design-tokens.css now lives at
+       src/design-tokens.css and is imported from src/main.tsx so Vite
+       bundles it. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <!-- Golos Text's css2 embed automatically includes the Cyrillic subset
+       (via unicode-range @font-face blocks) alongside Latin — needed for
+       Russian target-language UI text. -->
+  <link
+    href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=Golos+Text:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap"
+    rel="stylesheet"
+  />
 </head>
 <body>
   <div id="root"></div>
