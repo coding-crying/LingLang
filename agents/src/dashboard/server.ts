@@ -18,11 +18,13 @@ import { fileURLToPath } from 'node:url';
 import { AccessToken, AgentDispatchClient } from 'livekit-server-sdk';
 import { watchEvents, type AgentEvent } from '../lib/trace.js';
 import { db } from '../db/index.js';
-import { users, lexemes, userVocabulary, activeGoals, units, userPersona } from '../db/schema.js';
-import { eq, desc, sql, gte, and } from 'drizzle-orm';
+import { users, lexemes, userVocabulary, activeGoals, units, userPersona, userLanguageLevels, reviewLogs, sessionSummaries } from '../db/schema.js';
+import { eq, desc, sql, gte, lte, and } from 'drizzle-orm';
 import { execFileSync } from 'child_process';
 import { authenticateByUsername, createUser, hashPassword } from '../lib/user-auth.js';
 import { writePersona } from '../lib/persona.js';
+import { LANGUAGES } from '../config/languages.js';
+import { computeStreak, bucketVocabHistory } from './stats.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -373,6 +375,89 @@ app.get('/api/users/:userId/vocabulary', requireAuth, async (req, res) => {
   }
 });
 
+// Get per-language proficiency levels
+app.get('/api/users/:userId/language-levels', requireAuth, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (req.user!.id !== userId && req.user!.id !== 'will') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const rows = await db.query.userLanguageLevels.findMany({
+      where: eq(userLanguageLevels.userId, userId),
+    });
+
+    res.json(rows.map(r => ({
+      languageCode: r.languageCode,
+      proficiencyLevel: r.proficiencyLevel,
+      confidence: r.confidence,
+      source: r.source,
+    })));
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// Dashboard summary: streak, talk time, words due
+app.get('/api/users/:userId/summary', requireAuth, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (req.user!.id !== userId && req.user!.id !== 'will') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const reviewDateRows = await db.select({ reviewDate: reviewLogs.reviewDate })
+      .from(reviewLogs)
+      .where(eq(reviewLogs.userId, userId));
+    const streak = computeStreak(reviewDateRows.map(r => r.reviewDate));
+
+    const talkTimeRows = await db.select({
+      totalMinutes: sql<number>`coalesce(sum(${sessionSummaries.durationMinutes}), 0)`,
+    })
+      .from(sessionSummaries)
+      .where(eq(sessionSummaries.userId, userId));
+    const totalMinutes = Number(talkTimeRows[0]?.totalMinutes ?? 0);
+    const talkTimeHours = Math.round((totalMinutes / 60) * 10) / 10;
+
+    // Uses the user_vocabulary_due_idx (userId, due) composite index —
+    // an equality match on userId plus a range match on due is exactly
+    // what that index is built for.
+    const wordsDueRows = await db.select({ count: sql<number>`count(*)` })
+      .from(userVocabulary)
+      .where(and(eq(userVocabulary.userId, userId), lte(userVocabulary.due, new Date())));
+    const wordsDue = Number(wordsDueRows[0]?.count ?? 0);
+
+    res.json({ streak, talkTimeHours, wordsDue });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// Weekly vocab-growth history for a stacked-area chart
+app.get('/api/users/:userId/vocab-history', requireAuth, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (req.user!.id !== userId && req.user!.id !== 'will') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const weeksParam = parseInt((req.query.weeks as string) || '12', 10);
+    const weeks = Number.isFinite(weeksParam) && weeksParam > 0 ? weeksParam : 12;
+
+    const logs = await db.select({
+      userVocabularyId: reviewLogs.userVocabularyId,
+      reviewDate: reviewLogs.reviewDate,
+      state: reviewLogs.state,
+    })
+      .from(reviewLogs)
+      .where(eq(reviewLogs.userId, userId));
+
+    const result = bucketVocabHistory(logs, weeks);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
 // Get curriculum units
 app.get('/api/curriculum', async (req, res) => {
   try {
@@ -467,7 +552,11 @@ app.get('/api/db/:table', async (req, res) => {
 // ============================================================================
 
 app.get('/api/vocabulary', async (req, res) => {
-  const userId = (req as any).user?.userId || 'will';
+  // 2026-07-03: was `(req as any).user?.userId` — that property never
+  // existed (requireAuth sets `req.user = { id: session.userId }`), so
+  // this always fell through to the 'will' fallback regardless of who was
+  // logged in. Every user's vocabulary page silently showed Will's data.
+  const userId = req.user?.id || 'will';
   const lang = req.query.lang as string | undefined;
   const sort = req.query.sort as string || 'due';
 
@@ -524,6 +613,17 @@ app.get('/api/vocabulary', async (req, res) => {
     console.error('[Dashboard] Vocabulary query failed:', err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// Supported languages + their TTS voice — static config, no DB query.
+// Gated behind requireAuth for consistency with the rest of /api/* even
+// though the data isn't user-specific.
+app.get('/api/languages/voices', requireAuth, async (_req, res) => {
+  res.json(Object.values(LANGUAGES).map(lang => ({
+    code: lang.code,
+    name: lang.name,
+    voiceName: lang.tts.voice,
+  })));
 });
 
 // ============================================================================
