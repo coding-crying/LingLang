@@ -342,22 +342,40 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
   // Task 5 item 5: attribute the just-measured PTT-hold duration to the
   // next pending user turn that appears, so its waveform bubble shows the
   // real recording length instead of the ticking since-arrival proxy.
-  // `pendingHoldMsRef` holds a hold duration "waiting to be claimed" by
-  // the next new pending turn; `pttHoldFor` is the claimed { id, ms) pair
-  // actually handed to the Transcript/UserBubble. This is a best-effort,
-  // order-based correlation (no turnSeq round-trip exists for this
-  // client-only value) — sound for the single-mic-at-a-time flow this app
-  // has, same class of heuristic as useConversationStream's existing
-  // FIFO/arrival-order fallbacks.
-  const pendingHoldMsRef = useRef<number | null>(null);
+  // `pendingHoldMsQueueRef` holds hold durations "waiting to be claimed" by
+  // the next new pending turn(s), oldest first; `pttHoldFor` is the most
+  // recently claimed { id, ms } pair actually handed to the
+  // Transcript/UserBubble. This is a best-effort, order-based correlation
+  // (no turnSeq round-trip exists for this client-only value) — sound for
+  // the single-mic-at-a-time flow this app has, same class of heuristic as
+  // useConversationStream's existing FIFO/arrival-order fallbacks.
+  //
+  // Review fix (task-5, Low/cosmetic finding): this used to be a single
+  // `useRef<number | null>` slot, not a queue — if two PTT presses/releases
+  // happened back-to-back before the first turn's STT round-trip produced
+  // a pending turn to attach to, the second release's duration would
+  // silently clobber the first's before either was claimed, so the FIRST
+  // turn's waveform bubble could end up showing the SECOND press's
+  // duration. A FIFO queue (push on release, shift on claim) fixes this
+  // cheaply: each release gets its own slot and is claimed in the same
+  // order presses happened, so no duration is ever overwritten before
+  // being attached to a turn. (Only the single most-recently-claimed turn
+  // is tracked in `pttHoldFor` at a time — once a later turn claims the
+  // slot, an earlier still-pending turn falls back to the ticking-elapsed
+  // proxy rather than showing a stale real duration. That's an accepted,
+  // cosmetic-only limitation: once a turn resolves (`hasAnalysis`), its
+  // duration display is irrelevant anyway, so this only matters for the
+  // rare case of 3+ concurrently-pending turns, which was already an edge
+  // case before this fix.)
+  const pendingHoldMsQueueRef = useRef<number[]>([]);
   const [pttHoldFor, setPttHoldFor] = useState<{ id: string; ms: number } | null>(null);
 
   const handlePttRelease = (durationMs: number) => {
-    pendingHoldMsRef.current = durationMs;
+    pendingHoldMsQueueRef.current.push(durationMs);
   };
 
   useEffect(() => {
-    if (pendingHoldMsRef.current === null) return;
+    if (pendingHoldMsQueueRef.current.length === 0) return;
     const last = turns[turns.length - 1];
     if (
       last &&
@@ -365,8 +383,8 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
       !last.hasAnalysis &&
       (!pttHoldFor || pttHoldFor.id !== last.id)
     ) {
-      setPttHoldFor({ id: last.id, ms: pendingHoldMsRef.current });
-      pendingHoldMsRef.current = null;
+      const ms = pendingHoldMsQueueRef.current.shift();
+      if (ms !== undefined) setPttHoldFor({ id: last.id, ms });
     }
   }, [turns, pttHoldFor]);
 
@@ -456,7 +474,20 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
           {error && <div className="error-msg">{error}</div>}
         </div>
       ) : (
-        <LiveKitRoom token={token} serverUrl={url} connect={true} audio={true} onDisconnected={disconnect}>
+        // NOTE: deliberately no `audio` prop here (task-5 review fix). LiveKitRoom
+        // independently listens for its own `SignalConnected` event and calls
+        // `localParticipant.setMicrophoneEnabled(!!audioProp)` whenever the room
+        // finishes connecting — completely independent of VoiceControl's own
+        // mode-driven mic logic below. With `audio={true}` this silently
+        // re-enabled the mic on every connect, defeating PTT's "starts muted"
+        // guarantee. VoiceControl (via its `connectionState`-gated effect) is now
+        // the SOLE authority over mic-enabled state; omitting `audio` here (or
+        // passing `audio={false}`, the library default) means LiveKitRoom's own
+        // listener applies `setMicrophoneEnabled(false)`, which is harmless in
+        // PTT mode and gets superseded by VoiceControl's effect (which fires
+        // later, once `useConnectionState` flips to `connected`) in hands-free
+        // mode. See VoiceControl.tsx and task-5-report.md for the full trace.
+        <LiveKitRoom token={token} serverUrl={url} connect={true} onDisconnected={disconnect}>
           <RoomAudioRenderer />
           <ConnectionStateToast />
           <VoiceControl

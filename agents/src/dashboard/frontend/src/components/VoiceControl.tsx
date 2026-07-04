@@ -22,7 +22,8 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useRoomContext, useVoiceAssistant } from '@livekit/components-react';
+import { useConnectionState, useRoomContext, useVoiceAssistant } from '@livekit/components-react';
+import { ConnectionState } from 'livekit-client';
 
 export type VoiceControlMode = 'ptt' | 'handsFree';
 
@@ -194,19 +195,40 @@ function HandsFreeOrb() {
 
 export default function VoiceControl({ mode, onModeChange, onDisconnect, onPttRelease }: VoiceControlProps) {
   const room = useRoomContext();
+  // `room` (the Room instance from context) is a stable reference for the
+  // lifetime of this component — it does NOT change when the room finishes
+  // connecting. So an effect keyed only on `[mode, room]` runs exactly once
+  // at mount (before the room has connected) and then only again on mode
+  // switches — it would NEVER re-run just because the connection completed.
+  // That was the bug: LiveKitRoom (in VoiceTab.tsx) used to independently
+  // re-enable the mic itself when its own `SignalConnected` listener fired
+  // post-connect, with nothing here to re-assert the mode's intended state
+  // afterward. Now that VoiceTab.tsx no longer passes `audio={true}` (so
+  // nothing auto-enables the mic), this effect must instead be the thing
+  // that (re)applies mic state once the room actually finishes connecting —
+  // so it's keyed on `connectionState` too, gated to only act once
+  // `Connected`, guaranteeing it fires (at least once) strictly after
+  // signaling/track-publish machinery is ready, superseding any leftover
+  // pre-connect state.
+  const connectionState = useConnectionState(room);
 
-  // On mount AND on every mode switch: force the mic into the correct
-  // starting state for the new mode. This is what makes "switch FROM
-  // hands-free TO PTT" mute immediately (rather than leaving the mic open
-  // until the next press), and what makes PTT always start muted rather
-  // than inheriting whatever state the previous mode left the mic in.
+  // On mount AND on every mode switch AND once the room finishes connecting:
+  // force the mic into the correct starting state for the new mode. This is
+  // what makes "switch FROM hands-free TO PTT" mute immediately (rather than
+  // leaving the mic open until the next press), what makes PTT always start
+  // muted rather than inheriting whatever state the previous mode left the
+  // mic in, and — critically — what makes hands-free mode's mic actually end
+  // up ON once the room is connected (calling setMicrophoneEnabled before
+  // the room has a live connection is unreliable; LiveKit's own LiveKitRoom
+  // internals wait for `SignalConnected` for exactly this reason).
   useEffect(() => {
+    if (connectionState !== ConnectionState.Connected) return;
     if (mode === 'ptt') {
       void room.localParticipant.setMicrophoneEnabled(false);
     } else {
       void room.localParticipant.setMicrophoneEnabled(true);
     }
-  }, [mode, room]);
+  }, [mode, room, connectionState]);
 
   return (
     <div className="voicectl">
