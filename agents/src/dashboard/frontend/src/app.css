@@ -342,6 +342,23 @@ pre,
   min-height: 0;
 }
 
+/* @livekit/components-styles ships `.lk-room-container { height: 100% }`
+ * (a normal block element, not a flex item, by design — LiveKit expects
+ * to own the full page). Here it's a flex sibling of `.voice-transcript`
+ * inside `.voice-tab`'s column, so that height:100% makes it compete
+ * with the transcript for the whole column's height the instant
+ * <LiveKitRoom> mounts on connect, instead of sizing to its actual
+ * content (VoiceControl's PTT stage) — visible as the controls jumping
+ * up and covering the transcript right when you connect. Override it to
+ * behave like the plain pre-connect `.voice-controls` div: content-sized
+ * and pinned to the bottom of the column. */
+.voice-tab .lk-room-container {
+  position: static;
+  width: auto;
+  height: auto;
+  flex: 0 0 auto;
+}
+
 .voice-pill {
   display: inline-flex;
   align-items: center;
