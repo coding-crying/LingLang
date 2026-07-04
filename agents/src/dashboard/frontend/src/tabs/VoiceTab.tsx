@@ -1,18 +1,21 @@
 /**
- * VoiceTab — the Voice tab screen (Task 4b).
+ * VoiceTab — the Voice tab screen (Task 4b, PTT/hands-free control by
+ * Task 5).
  *
  * This is a reskin + hook-extraction pass on top of VoiceRoom.tsx's
  * already-working connection logic — NOT a connection-logic change:
  *   - Same `POST /api/token` fetch, same `LiveKitRoom`/`useVoiceAssistant()`
  *     wiring as VoiceRoom.tsx uses today.
- *   - Same always-on mic toggle behavior as VoiceRoom.tsx's `CallControls`
- *     (extracted near-verbatim below as `BottomControls`) — the PTT/
- *     hands-free redesign is deliberately deferred to Task 5.
+ *   - Bottom mic control is now `../components/VoiceControl` (Task 5):
+ *     push-to-talk (mic muted between presses) / hands-free (mic
+ *     continuously on, same behavior VoiceRoom.tsx's `CallControls` always
+ *     had), switched by a local mode toggle — see VoiceControl.tsx for the
+ *     full design and the pointer-event trace in task-5-report.md.
  *   - Conversation data comes from the NEW `useConversationStream` hook
  *     (Task 4a), not the old buggy copy that still lives inside
  *     VoiceRoom.tsx.
  *
- * New in this task: the chat-style transcript re-skin (tutor avatar
+ * New in Task 4b: the chat-style transcript re-skin (tutor avatar
  * bubbles, user audio-waveform-bubble morphing in place into a
  * tappable-colored-word text bubble via `lib/wordChips.ts`, 3-dot typing
  * indicator), plus the TopBar pills (language/curriculum/streak) and the
@@ -22,12 +25,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   LiveKitRoom,
-  useRoomContext,
   RoomAudioRenderer,
   ConnectionStateToast,
 } from '@livekit/components-react';
 import '@livekit/components-styles';
 import TopBar from '../components/TopBar';
+import VoiceControl, { type VoiceControlMode } from '../components/VoiceControl';
 import { useAppState } from '../state/AppState';
 import { useConversationStream, type ConversationTurn, type UserTurn, type AgentTurn } from '../hooks/useConversationStream';
 import { getChipClass, isNeutralChip, resolveWordId } from '../lib/wordChips';
@@ -180,7 +183,10 @@ function barHeights(seed: string, count: number): number[] {
 /** Live "how long has this been transcribing" clock, ticking only while
  *  the turn is still pending analysis. Not a recorded-audio-duration value
  *  (no such field is available from useConversationStream) — an elapsed-
- *  since-transcript-arrived proxy, formatted mm:ss. */
+ *  since-transcript-arrived proxy, formatted mm:ss. This remains the
+ *  fallback display in hands-free mode (no discrete recording duration
+ *  exists there — see Task 5 brief item 5) and for any pending turn that
+ *  a PTT hold duration wasn't attributed to. */
 function useElapsed(sinceTs: number, active: boolean): string {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -194,15 +200,32 @@ function useElapsed(sinceTs: number, active: boolean): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+function formatHeldMs(ms: number): string {
+  const secs = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
 function UserBubble({
   turn,
   onWordTap,
+  heldMs,
 }: {
   turn: UserTurn;
   onWordTap: (wordId: string) => void;
+  /** Real PTT-hold duration (ms) for this specific turn, when known (Task
+   *  5) — see VoiceTab's `pttHoldByTurnId` wiring below. When present,
+   *  this replaces the ticking elapsed-since-arrival proxy with the
+   *  actual measured recording length, which is a strictly better number
+   *  now that PTT mode makes it available; hands-free mode has no such
+   *  signal (there's no interim STT event, per the brief), so it keeps
+   *  the Task 4b ticking-proxy behavior unchanged. */
+  heldMs?: number;
 }) {
   const bars = useMemo(() => barHeights(turn.id, 24), [turn.id]);
-  const elapsed = useElapsed(turn.ts, !turn.hasAnalysis);
+  const ticking = useElapsed(turn.ts, !turn.hasAnalysis);
+  const elapsed = heldMs !== undefined ? formatHeldMs(heldMs) : ticking;
 
   if (!turn.hasAnalysis) {
     // Pending: audio-waveform bubble with shimmer + duration + caption.
@@ -253,7 +276,17 @@ function UserBubble({
   );
 }
 
-function Transcript({ turns, onWordTap }: { turns: ConversationTurn[]; onWordTap: (wordId: string) => void }) {
+function Transcript({
+  turns,
+  onWordTap,
+  pttHoldForTurnId,
+}: {
+  turns: ConversationTurn[];
+  onWordTap: (wordId: string) => void;
+  /** { id, ms } of the one pending user turn a just-completed PTT hold's
+   *  duration should be attributed to — see VoiceTab's `pttHoldFor` state. */
+  pttHoldForTurnId?: { id: string; ms: number } | null;
+}) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const last = turns[turns.length - 1];
   // "Tutor is about to reply" proxy: the most recent turn is a user turn
@@ -276,35 +309,15 @@ function Transcript({ turns, onWordTap }: { turns: ConversationTurn[]; onWordTap
         turn.kind === 'agent' ? (
           <AgentBubble key={turn.id} turn={turn} />
         ) : (
-          <UserBubble key={turn.id} turn={turn} onWordTap={onWordTap} />
+          <UserBubble
+            key={turn.id}
+            turn={turn}
+            onWordTap={onWordTap}
+            heldMs={pttHoldForTurnId && pttHoldForTurnId.id === turn.id ? pttHoldForTurnId.ms : undefined}
+          />
         ),
       )}
       {showTyping && <TypingIndicator />}
-    </div>
-  );
-}
-
-// ─── Bottom controls: existing always-on mic toggle, extracted as-is from
-// VoiceRoom.tsx's CallControls (Task 5 owns the PTT/hands-free redesign) ───
-
-function BottomControls({ onDisconnect }: { onDisconnect: () => void }) {
-  const room = useRoomContext();
-  const [micOn, setMicOn] = useState(true);
-
-  const toggleMic = async () => {
-    const next = !micOn;
-    await room.localParticipant.setMicrophoneEnabled(next);
-    setMicOn(next);
-  };
-
-  return (
-    <div className="voice-controls">
-      <button type="button" className={`btn-toggle ${micOn ? 'active' : ''}`} onClick={toggleMic}>
-        {micOn ? '🎙 On' : '🔇 Off'}
-      </button>
-      <button type="button" className="btn-danger" onClick={onDisconnect}>
-        Disconnect
-      </button>
     </div>
   );
 }
@@ -321,6 +334,41 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
   const [unitTitle, setUnitTitle] = useState('');
   const [summary, setSummary] = useState<UserSummary | null>(null);
   const [goals, setGoals] = useState<ActiveGoal[]>([]);
+
+  // PTT / hands-free mode — local to this tab, not global AppState
+  // (Task 5 brief item 4).
+  const [voiceMode, setVoiceMode] = useState<VoiceControlMode>('ptt');
+
+  // Task 5 item 5: attribute the just-measured PTT-hold duration to the
+  // next pending user turn that appears, so its waveform bubble shows the
+  // real recording length instead of the ticking since-arrival proxy.
+  // `pendingHoldMsRef` holds a hold duration "waiting to be claimed" by
+  // the next new pending turn; `pttHoldFor` is the claimed { id, ms) pair
+  // actually handed to the Transcript/UserBubble. This is a best-effort,
+  // order-based correlation (no turnSeq round-trip exists for this
+  // client-only value) — sound for the single-mic-at-a-time flow this app
+  // has, same class of heuristic as useConversationStream's existing
+  // FIFO/arrival-order fallbacks.
+  const pendingHoldMsRef = useRef<number | null>(null);
+  const [pttHoldFor, setPttHoldFor] = useState<{ id: string; ms: number } | null>(null);
+
+  const handlePttRelease = (durationMs: number) => {
+    pendingHoldMsRef.current = durationMs;
+  };
+
+  useEffect(() => {
+    if (pendingHoldMsRef.current === null) return;
+    const last = turns[turns.length - 1];
+    if (
+      last &&
+      last.kind === 'user' &&
+      !last.hasAnalysis &&
+      (!pttHoldFor || pttHoldFor.id !== last.id)
+    ) {
+      setPttHoldFor({ id: last.id, ms: pendingHoldMsRef.current });
+      pendingHoldMsRef.current = null;
+    }
+  }, [turns, pttHoldFor]);
 
   // Curriculum pill — existing /api/curriculum endpoint; Task 3's
   // "current unit" concept isn't wired up yet, so this picks the
@@ -398,7 +446,7 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
       />
       <GoalChip text={goalText} wordsDue={summary?.wordsDue ?? null} />
 
-      <Transcript turns={turns} onWordTap={handleWordTap} />
+      <Transcript turns={turns} onWordTap={handleWordTap} pttHoldForTurnId={pttHoldFor} />
 
       {!connected ? (
         <div className="voice-controls">
@@ -411,7 +459,12 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
         <LiveKitRoom token={token} serverUrl={url} connect={true} audio={true} onDisconnected={disconnect}>
           <RoomAudioRenderer />
           <ConnectionStateToast />
-          <BottomControls onDisconnect={disconnect} />
+          <VoiceControl
+            mode={voiceMode}
+            onModeChange={setVoiceMode}
+            onDisconnect={disconnect}
+            onPttRelease={handlePttRelease}
+          />
         </LiveKitRoom>
       )}
     </div>

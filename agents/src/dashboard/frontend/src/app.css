@@ -549,3 +549,187 @@ pre,
   padding: 14px 20px calc(14px + env(safe-area-inset-bottom));
   background: var(--scrim);
 }
+
+/* ── VoiceControl: PTT / hands-free (Task 5) ───────────────────────── */
+
+.voicectl {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 20px calc(14px + env(safe-area-inset-bottom));
+  background: var(--scrim);
+}
+
+.voicectl-modeswitch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.voicectl-modelabel {
+  font-size: 12px;
+  color: var(--text-faint);
+  transition: color .15s ease;
+}
+
+.voicectl-modelabel.active {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.voicectl-switch {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  line-height: 0;
+}
+
+.voicectl-switch-track {
+  display: inline-block;
+  position: relative;
+  width: 42px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--surface2);
+  transition: background .18s ease;
+}
+
+.voicectl-switch-track[data-on="true"] {
+  background: var(--accent);
+}
+
+.voicectl-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--text);
+  transition: left .18s ease;
+}
+
+.voicectl-switch-knob[data-on="true"] {
+  left: 21px;
+}
+
+.voicectl-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 108px;
+}
+
+/* PTT button */
+
+.voicectl-ptt-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.voicectl-pulse-ring {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 84px;
+  height: 84px;
+  margin-top: -42px;
+  margin-left: -42px;
+  border-radius: 50%;
+  border: 1px solid var(--accent-border);
+  animation: llPulse 1.4s ease-out infinite;
+  pointer-events: none;
+}
+
+.voicectl-ptt-btn {
+  position: relative;
+  width: 84px;
+  height: 84px;
+  border-radius: 50%;
+  border: 1px solid var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  transition: background .12s ease, transform .12s ease;
+}
+
+.voicectl-ptt-btn.held {
+  background: var(--accent);
+  color: var(--surface);
+  transform: scale(1.03);
+}
+
+.voicectl-ptt-bars {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+}
+
+.voicectl-ptt-bar {
+  display: inline-block;
+  width: 4px;
+  height: 100%;
+  border-radius: 2px;
+  background: currentColor;
+  transform: scaleY(.4);
+  transform-origin: center;
+}
+
+.voicectl-ptt-btn.held .voicectl-ptt-bar {
+  animation: llBar .6s ease-in-out infinite;
+}
+
+.voicectl-hint {
+  font-size: 12px;
+  color: var(--text-dim);
+  min-height: 16px;
+}
+
+/* Hands-free orb */
+
+.voicectl-handsfree-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.voicectl-orb {
+  width: 84px;
+  height: 84px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 38% 32%, var(--accent-soft), rgba(0, 0, 0, 0) 70%);
+  border: 1px solid var(--accent-border);
+  animation: llBreathe 2.6s ease-in-out infinite;
+}
+
+.voicectl-orb-listening {
+  animation-duration: 2.2s;
+}
+
+.voicectl-orb-thinking {
+  animation-duration: 1.4s;
+  border-color: var(--teal-border);
+  background: radial-gradient(circle at 38% 32%, var(--teal-soft), rgba(0, 0, 0, 0) 70%);
+}
+
+.voicectl-orb-speaking {
+  animation-duration: 0.9s;
+}
+
+.voicectl-disconnect {
+  margin-top: 2px;
+}
