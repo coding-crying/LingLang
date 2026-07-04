@@ -475,9 +475,12 @@ pre,
   cursor: pointer;
 }
 
-.chip-correct,
 .chip-mastered {
   color: var(--text);
+}
+
+.chip-new {
+  color: var(--new);
 }
 
 .chip-scaffolded {

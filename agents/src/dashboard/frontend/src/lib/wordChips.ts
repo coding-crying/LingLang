@@ -44,8 +44,9 @@ export function getChipClass(lex: LexemeChip, srsUpdates: SrsUpdate[]): string {
   const isMastered = srs && srs.newState === 2 && srs.grade >= 3;
 
   if (lex.performance === 'correct' || lex.performance === 'correct_instant' || lex.performance === 'correct_use') {
-    // Green for new words used correctly, grey for mastered
-    return isMastered ? 'chip-mastered' : 'chip-correct';
+    // --new (amber) for not-yet-mastered words used correctly, default/no
+    // color for mastered ones.
+    return isMastered ? 'chip-mastered' : 'chip-new';
   }
   if (lex.performance === 'correct_struggled') return 'chip-scaffolded'; // reuse blue "effortful" styling
   return `chip-${lex.performance}`;
@@ -66,12 +67,14 @@ export function resolveWordId(lex: LexemeChip, srsUpdates: SrsUpdate[]): string 
 }
 
 /**
- * NEW (Task 4b): is this chip class "neutral" (fully correct / mastered,
- * no error or scaffolding signal)? Neutral words are rendered inert — no
- * pointer cursor, no tap handler, no `openSheet` call. Every other chip
- * class (scaffolded/struggled, wrong use, recall failure, native
- * substitution) is considered non-neutral and tappable.
+ * NEW (Task 4b): is this chip class "neutral" (fully correct AND mastered,
+ * no error, scaffolding, or new-word signal)? Neutral words are rendered
+ * inert — no pointer cursor, no tap handler, no `openSheet` call. Every
+ * other chip class (newly-introduced correct word, scaffolded/struggled,
+ * wrong use, recall failure, native substitution) is considered
+ * non-neutral and tappable — a newly-introduced word is exactly the kind
+ * of word a learner would want to tap into for more detail.
  */
 export function isNeutralChip(chipClass: string): boolean {
-  return chipClass === 'chip-correct' || chipClass === 'chip-mastered';
+  return chipClass === 'chip-mastered';
 }

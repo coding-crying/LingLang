@@ -22,7 +22,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   LiveKitRoom,
-  useVoiceAssistant,
   useRoomContext,
   RoomAudioRenderer,
   ConnectionStateToast,
@@ -412,23 +411,9 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
         <LiveKitRoom token={token} serverUrl={url} connect={true} audio={true} onDisconnected={disconnect}>
           <RoomAudioRenderer />
           <ConnectionStateToast />
-          <VoiceAssistantKeepAlive />
           <BottomControls onDisconnect={disconnect} />
         </LiveKitRoom>
       )}
     </div>
   );
-}
-
-/**
- * useVoiceAssistant() must be called from inside <LiveKitRoom>. This task
- * doesn't render the old BarVisualizer panel (that debug-style visualizer
- * doesn't fit the chat-first reskin — the typing indicator now covers "is
- * the tutor about to reply"), but we still invoke the hook to preserve the
- * exact same `@livekit/components-react` wiring the brief asks to keep
- * (VoiceRoom.tsx's AgentVisualizer called it the same way).
- */
-function VoiceAssistantKeepAlive() {
-  useVoiceAssistant();
-  return null;
 }
