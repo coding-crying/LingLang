@@ -179,3 +179,370 @@ pre,
   background: var(--border);
   margin: 0 auto 16px;
 }
+
+/* ── Generic buttons / states (shared by OnboardingGate, VoiceTab, login) ─ */
+.loading-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-dim);
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--bg);
+  border: none;
+  border-radius: 12px;
+  padding: 12px 20px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn-text {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 6px 8px;
+}
+
+.btn-danger {
+  background: var(--bad-soft);
+  color: var(--bad);
+  border: 1px solid var(--bad);
+  border-radius: 12px;
+  padding: 10px 16px;
+  cursor: pointer;
+}
+
+.btn-toggle {
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 16px;
+  cursor: pointer;
+}
+
+.btn-toggle.active {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.error-msg {
+  color: var(--bad);
+  font-size: 13px;
+  margin-top: 8px;
+}
+
+/* ── Onboarding gate ─────────────────────────────────────────────────── */
+.onboarding-wrap {
+  height: 100%;
+  overflow-y: auto;
+  display: flex;
+  justify-content: center;
+  padding: 24px 16px calc(24px + env(safe-area-inset-bottom));
+  background: radial-gradient(120% 90% at 50% 0%, var(--bg-radial) 0%, var(--bg) 60%);
+}
+
+.onboarding-card {
+  width: 100%;
+  max-width: 430px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 24px 20px;
+  box-shadow: var(--shadow);
+}
+
+.onboarding-header h2 {
+  color: var(--text);
+  font-size: 20px;
+  margin-bottom: 8px;
+}
+
+.onboarding-header p {
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.onboarding-form fieldset {
+  border: none;
+  padding: 0;
+  margin: 20px 0 0;
+}
+
+.onboarding-form legend {
+  color: var(--text);
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 10px;
+  padding: 0;
+}
+
+.radio-group,
+.checkbox-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.radio-option,
+.checkbox-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 14px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.radio-option.selected,
+.checkbox-option.selected {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.text-input {
+  width: 100%;
+  margin-top: 8px;
+  background: var(--surface3);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.onboarding-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-top: 24px;
+}
+
+/* ── Voice tab ──────────────────────────────────────────────────────── */
+.voice-tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.voice-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 12px;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.voice-pill-lang {
+  flex: 0 0 auto;
+}
+
+.voice-pill-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  display: inline-block;
+}
+
+.voice-pill-curriculum {
+  width: 100%;
+  justify-content: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voice-pill-streak {
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  color: var(--accent);
+  cursor: default;
+}
+
+.voice-goal-chip {
+  align-self: center;
+  background: var(--teal-soft);
+  border: 1px solid var(--teal-border);
+  color: var(--teal);
+  border-radius: 999px;
+  padding: 6px 16px;
+  font-size: 12.5px;
+  margin: 0 0 10px;
+}
+
+.voice-transcript {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.voice-transcript-empty {
+  color: var(--text-faint);
+  text-align: center;
+  margin-top: 30%;
+  font-size: 14px;
+}
+
+.voice-bubble-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.voice-bubble-row-agent {
+  justify-content: flex-start;
+}
+
+.voice-bubble-row-user {
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.voice-avatar {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--teal-soft);
+  border: 1px solid var(--teal-border);
+  color: var(--teal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.voice-bubble {
+  border-radius: 16px;
+  padding: 10px 14px;
+  font-size: 14.5px;
+  line-height: 1.45;
+}
+
+.voice-bubble-agent {
+  max-width: 88%;
+  background: var(--surface2);
+  color: var(--text);
+  border-bottom-left-radius: 4px;
+}
+
+.voice-bubble-user {
+  max-width: 88%;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  color: var(--text);
+  border-bottom-right-radius: 4px;
+}
+
+.voice-bubble-caption {
+  color: var(--text-faint);
+  font-size: 11.5px;
+  margin-top: 2px;
+}
+
+.voice-word {
+  color: var(--text);
+}
+
+.voice-word-tappable {
+  cursor: pointer;
+}
+
+.chip-correct,
+.chip-mastered {
+  color: var(--text);
+}
+
+.chip-scaffolded {
+  color: var(--good);
+  border-bottom: 1px dotted var(--good);
+}
+
+.chip-wrong_use,
+.chip-recall_fail,
+.chip-native_substitution {
+  color: var(--bad);
+  border-bottom: 1px dotted var(--bad);
+}
+
+.voice-bubble-waveform {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.voice-waveform {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 22px;
+}
+
+.voice-waveform-bar {
+  display: inline-block;
+  width: 3px;
+  background: var(--accent);
+  border-radius: 2px;
+  animation: llShimmer 1s ease-in-out infinite;
+  transform-origin: bottom;
+}
+
+.voice-waveform-duration {
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.voice-typing-dots {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--surface2);
+  border-radius: 16px;
+  padding: 10px 14px;
+}
+
+.voice-typing-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  display: inline-block;
+  animation: llDot 1.2s ease-in-out infinite;
+}
+
+.voice-controls {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 14px 20px calc(14px + env(safe-area-inset-bottom));
+  background: var(--scrim);
+}
