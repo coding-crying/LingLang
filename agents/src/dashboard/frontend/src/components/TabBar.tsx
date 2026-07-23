@@ -3,10 +3,13 @@
  *
  * DOM order is Library / Voice / Profile (per the design prototype) so
  * Voice sits visually centered. Reads/writes `activeTab` via
- * `useAppState()`.
+ * `useAppState()`. Built on HeroUI's ToggleButton — its built-in
+ * `[data-selected="true"]` state handles the active/inactive accent
+ * color, so no manual color logic is needed here.
  */
 
 import type { ReactElement } from 'react';
+import { ToggleButton } from '@heroui/react';
 import { useAppState, type Tab } from '../state/AppState';
 
 interface TabDef {
@@ -59,17 +62,18 @@ export default function TabBar() {
       {TABS.map(({ tab, label, glyph: Glyph }) => {
         const active = tab === activeTab;
         return (
-          <button
+          <ToggleButton
             key={tab}
-            type="button"
-            className="tab-bar-item"
-            aria-current={active ? 'page' : undefined}
-            onClick={() => setTab(tab)}
-            style={{ color: active ? 'var(--accent)' : 'var(--text-faint)' }}
+            variant="ghost"
+            isSelected={active}
+            onChange={(isSelected) => isSelected && setTab(tab)}
+            className="flex-1 flex-col gap-1 rounded-none h-auto bg-transparent py-2 data-[hovered=true]:bg-transparent data-[pressed=true]:bg-transparent"
+            style={{ color: active ? 'var(--accent)' : 'var(--muted)' }}
+            aria-label={label}
           >
             <Glyph />
-            <span className="tab-bar-label">{label}</span>
-          </button>
+            <span className="text-xs font-medium">{label}</span>
+          </ToggleButton>
         );
       })}
     </nav>

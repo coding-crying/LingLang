@@ -35,6 +35,7 @@ export const perfColors: Record<string, { bg: string; text: string; label: strin
   recall_fail:      { bg: '#5a3a1a', text: '#fbbf24', label: '? forgot' },
   scaffolded:       { bg: '#1a3a5a', text: '#60a5fa', label: '↻ scaffolded' }, // legacy
   native_substitution: { bg: '#5a4a1a', text: '#facc15', label: '⚠ native' },
+  wrong_tone:       { bg: '#5a1a1a', text: '#f87171', label: '♪ wrong tone' },
 };
 
 // SRS state colors for mastered vs new

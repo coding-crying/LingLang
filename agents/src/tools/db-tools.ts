@@ -285,6 +285,7 @@ export async function getActiveGoalsQuery(
 // ============================================================================
 
 export const lookupLexemeTool = llm.tool({
+  name: 'lookup_lexeme',
   description:
     'Look up a word (lemma) in the vocabulary database. Returns the translation, part of speech, and the learner\'s current FSRS memory state (stability, difficulty, due date, etc.). Use this to check if a word exists and how well the learner knows it.',
   parameters: z.object({
@@ -301,6 +302,7 @@ export const lookupLexemeTool = llm.tool({
 });
 
 export const getDueReviewsTool = llm.tool({
+  name: 'get_due_reviews',
   description:
     'Get the learner\'s vocabulary words that are due for spaced repetition review right now. These are words the learner has seen before that need practice. Returns up to 10 due words with their FSRS state (stability, difficulty, state).',
   parameters: z.object({
@@ -314,6 +316,7 @@ export const getDueReviewsTool = llm.tool({
 });
 
 export const getVocabularyOverviewTool = llm.tool({
+  name: 'get_vocab_overview',
   description:
     'Get a summary of the learner\'s vocabulary progress. Returns total words, breakdown by FSRS state (New/Learning/Review/Relearning), average stability, weakest words, and next curriculum words to introduce.',
   parameters: z.object({}),
@@ -324,6 +327,7 @@ export const getVocabularyOverviewTool = llm.tool({
 });
 
 export const getSemanticNeighborsTool = llm.tool({
+  name: 'get_semantic_neighbors',
   description:
     'Find semantically related words to a given word using vector similarity (pgvector). Useful for finding words that could reinforce or confuse the learner. Returns neighbor words with their distance (lower = more similar).',
   parameters: z.object({
@@ -337,6 +341,7 @@ export const getSemanticNeighborsTool = llm.tool({
 });
 
 export const getActiveGoalsTool = llm.tool({
+  name: 'get_active_goals',
   description:
     'Get the learner\'s current active teaching goals. These are words the system has identified as needing remediation (struggling) or new vocabulary to introduce. Each goal has a priority and optional grammar context.',
   parameters: z.object({}),
@@ -347,13 +352,14 @@ export const getActiveGoalsTool = llm.tool({
 });
 
 /**
- * All DB tools registered as a ToolContext for use with voice.Agent({ tools }).
- * Import and spread: `tools: { ...dbTools }`
+ * All DB tools for use with voice.Agent({ tools }). @livekit/agents 1.5.0
+ * broke the old `Record<string, FunctionTool>` map shape — Agent({ tools })
+ * now takes a flat array. Import and spread: `tools: [...dbTools]`
  */
-export const dbTools = {
-  lookup_lexeme: lookupLexemeTool,
-  get_due_reviews: getDueReviewsTool,
-  get_vocab_overview: getVocabularyOverviewTool,
-  get_semantic_neighbors: getSemanticNeighborsTool,
-  get_active_goals: getActiveGoalsTool,
-} as const;
+export const dbTools = [
+  lookupLexemeTool,
+  getDueReviewsTool,
+  getVocabularyOverviewTool,
+  getSemanticNeighborsTool,
+  getActiveGoalsTool,
+] as const;

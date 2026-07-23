@@ -104,7 +104,7 @@ export interface LexemeAnalysis {
    */
   performance:
     | 'correct' | 'correct_instant' | 'correct_struggled'
-    | 'wrong_use' | 'recall_fail' | 'native_substitution'
+    | 'wrong_use' | 'recall_fail' | 'native_substitution' | 'wrong_tone'
     | 'correct_use' | 'scaffolded';
   /** Legacy two-field shape — no longer requested from the model. */
   confidence?: 'instant' | 'hesitant' | 'struggled';
@@ -147,11 +147,13 @@ export interface UtteranceAnalysis {
 }
 
 export interface SupervisorTrigger {
-  type: 'language_change' | 'difficulty_adjustment' | 'goal_change' | 'session_feedback' | 'persona_update' | 'onboarding_signal';
+  type: 'language_change' | 'difficulty_adjustment' | 'goal_change' | 'session_feedback' | 'persona_update' | 'onboarding_signal' | 'curriculum_advance' | 'session_mode_change';
   /** For language_change: ISO code. For difficulty_adjustment: 'easier'|'harder'.
    *  For persona_update: natural-language description.
    *  For session_feedback: "wants_to_end" when the user signals they're wrapping up (goodbye, gotta go).
-   *  For onboarding_signal: JSON string with keys: priorStudy?, studyDetails?, goals?, goalDetails?, selfRatedLevel? */
+   *  For onboarding_signal: JSON string with keys: priorStudy?, studyDetails?, goals?, goalDetails?, selfRatedLevel?
+   *  For curriculum_advance: unused — presence of the trigger is the signal.
+   *  For session_mode_change: 'review'|'new'|'mixed' — see design doc §10. */
   value?: string;
   /** Human-readable reason the trigger fired (for logging/dashboard). */
   reason?: string;
@@ -181,7 +183,15 @@ export interface SupervisorResult {
  * lexeme, and emit a sentence-level pronunciationNotes string. For
  * text-only inputs the model omits those fields.
  */
+// Languages where tone is phonemic — the same segmental sounds mean
+// different words depending on pitch contour (Mandarin's mā/má/mǎ/mà).
+// Gates the tone-grading category below so non-tonal languages never see
+// tone language in their grading prompt — a `wrong_tone` option with no
+// tones to judge would just be a hallucination slot.
+const TONAL_LANGUAGE_ISOS = new Set(['zh']);
+
 export function buildFullPrompt(targetLanguage: string, nativeLanguage: string = 'English', targetIso: string = 'ru', nativeIso: string = 'en'): string {
+  const tonal = TONAL_LANGUAGE_ISOS.has(targetIso);
   return `Listen to a ${nativeLanguage}→${targetLanguage} learner's utterance. Identify the ${targetLanguage} words they actually said and grade each one. Return JSON only.
 
 Your output becomes permanent spaced-repetition records. Precision beats coverage: if the audio is unclear, silent, or you can't make out real words, return an empty lexemes array. Never invent words you didn't clearly hear.
@@ -197,7 +207,10 @@ performance — one judgment per word:
 - correct_struggled: got it, but with hesitation, self-correction, stutter, or a long pause
 - wrong_use: wrong form or usage
 - recall_fail: tried and failed to produce it
-- native_substitution: see above
+- native_substitution: see above${tonal ? `
+- wrong_tone: the word/lemma choice was RIGHT but the tone was wrong (e.g. said "mǎ" (horse) when "mā" (mother) was meant) — this is a pronunciation error, not a recall failure, so don't use wrong_use/recall_fail for a tone-only mistake` : ''}
+${tonal ? `\nThis is Mandarin — tone is phonemic. Judge tone separately from word choice: right word + wrong tone = wrong_tone, not wrong_use. Only mark wrong_tone when you can actually hear a tone that doesn't match the intended word, not as a default guess.\n` : ''}
+Meta-language is not performance: when the learner talks ABOUT words — "I don't know that word", "what does X mean?", "your words are strange" — the words INSIDE that meta-comment are being used correctly, not failed. "Я не знаю это слово" is a correct use of знать and слово, not a recall_fail on them. Only the word they're asking about (if they name one) failed — and only if they actually attempted it.
 
 note (optional): ONE short sentence if something notable recurred this turn — a grammar pattern or pronunciation issue worth deliberate practice later. Omit otherwise.
 
@@ -207,12 +220,17 @@ supervisorTriggers (empty array if none):
 - goal_change: topic/skill focus within current language. value=topic.
 - session_feedback: user signals they're wrapping up (goodbye, gotta go, that's enough for today). value="wants_to_end".
 - onboarding_signal: user reveals background or goals. value=JSON with any of: priorStudy ("none"|"self_taught"|"class"|"immersion"|"heritage"), studyDetails (free text), goals (array: "travel"|"work"|"heritage"|"media"|"academic"|"other"), goalDetails (free text), selfRatedLevel ("pre_a1"|"a1"|"a2"|"b1"|"b2"|"c1"|"c2"). Only fire when user explicitly states something — don't infer.
+- curriculum_advance: user explicitly asks to move to the next chapter/lesson, says they already know this material, or asks to skip ahead. Only on a clear, explicit request — never inferred from them just doing well.
+- session_mode_change: user explicitly asks to focus on review/practice ("let's just review", "quiz me on old words") → value="review". User explicitly asks for new material/vocabulary ("teach me something new", "I want new words today") → value="new". User asks to go back to normal → value="mixed". Only on an explicit request — never inferred from performance.
 
 Example 1 — ${targetLanguage} speech with one substitution ("Я хочу пить water", said fluently except a pause before "пить"):
 {"language":"ru","lexemes":[{"lemma":"я","form":"я","pos":"PRON","language":"ru","performance":"correct_instant"},{"lemma":"хотеть","form":"хочу","pos":"VERB","language":"ru","performance":"correct_instant"},{"lemma":"пить","form":"пить","pos":"VERB","language":"ru","performance":"correct_struggled"},{"lemma":"water","form":"water","pos":"NOUN","language":"en","performance":"native_substitution","expectedTargetLemma":"вода"}],"supervisorTriggers":[]}
 
 Example 2 — pure ${nativeLanguage} chatter with a request ("I want to learn Portuguese"): no lexemes, just the trigger:
-{"language":"en","lexemes":[],"supervisorTriggers":[{"type":"language_change","value":"pt","reason":"User wants to learn Portuguese"}]}`;
+{"language":"en","lexemes":[],"supervisorTriggers":[{"type":"language_change","value":"pt","reason":"User wants to learn Portuguese"}]}${tonal ? `
+
+Example 3 — Mandarin with a tone error ("我要买马" meant as "我要买妈" — wanted "mā" (mother/a term of address here) but said "mǎ" (horse)):
+{"language":"zh","lexemes":[{"lemma":"我","form":"我","pos":"PRON","language":"zh","performance":"correct_instant"},{"lemma":"要","form":"要","pos":"VERB","language":"zh","performance":"correct_instant"},{"lemma":"买","form":"买","pos":"VERB","language":"zh","performance":"correct_instant"},{"lemma":"妈","form":"马","pos":"NOUN","language":"zh","performance":"wrong_tone"}],"supervisorTriggers":[]}` : ''}`;
 }
 
 /**
@@ -232,6 +250,12 @@ Example 2 — pure ${nativeLanguage} chatter with a request ("I want to learn Po
  */
 function buildUtteranceAnalysisSchema(targetIso: string, nativeIso: string) {
   const languageEnum = [targetIso, nativeIso] as const;
+  // wrong_tone is only offered for tonal target languages — an enum value
+  // with no tones to judge is just a hallucination slot for every other
+  // language (same reasoning as the persona_update omission below).
+  const performanceEnum = TONAL_LANGUAGE_ISOS.has(targetIso)
+    ? ['correct', 'correct_instant', 'correct_struggled', 'wrong_use', 'recall_fail', 'native_substitution', 'wrong_tone']
+    : ['correct', 'correct_instant', 'correct_struggled', 'wrong_use', 'recall_fail', 'native_substitution'];
   return {
     type: 'object',
     properties: {
@@ -247,7 +271,7 @@ function buildUtteranceAnalysisSchema(targetIso: string, nativeIso: string) {
             language: { type: 'string', enum: languageEnum },
             performance: {
               type: 'string',
-              enum: ['correct', 'correct_instant', 'correct_struggled', 'wrong_use', 'recall_fail', 'native_substitution'],
+              enum: performanceEnum,
             },
             expectedTargetLemma: { type: 'string' },
           },
@@ -265,7 +289,7 @@ function buildUtteranceAnalysisSchema(targetIso: string, nativeIso: string) {
               // persona_update deliberately absent: it was never documented in
               // the prompt, so the model was never told when to emit it —
               // an enum value with no semantics is just a hallucination slot.
-              enum: ['language_change', 'difficulty_adjustment', 'goal_change', 'session_feedback', 'onboarding_signal'],
+              enum: ['language_change', 'difficulty_adjustment', 'goal_change', 'session_feedback', 'onboarding_signal', 'curriculum_advance', 'session_mode_change'],
             },
             value: { type: 'string' },
             reason: { type: 'string' },
@@ -296,11 +320,179 @@ function parseJsonResponse(raw: string): UtteranceAnalysis | null {
   }
 }
 
+// Minimal ASR-only system prompt, per Gemma 4's documented audio guidance
+// (google/gemma-4-12B-it model card): output the transcription only, no
+// other text, no line breaks, numerals as digits not spelled out. A lean
+// prompt here matters — Gemma 4 12B's audio attention degrades once the
+// system prompt gets large (r/LocalLLaMA reports of ~18-27k-token agent
+// prompts causing the model to stop attending to audio and hallucinate a
+// generic reply instead). Keeping this pass's prompt tiny is what makes it
+// fast AND keeps audio attention intact, unlike the much larger grading
+// prompt in buildFullPrompt().
+export function buildTranscriptionOnlyPrompt(targetLanguage: string, nativeLanguage: string): string {
+  // 2026-07-10: the "whichever language(s)" phrasing left the model free to
+  // decide it heard a THIRD language — live zh session, Mandarin audio,
+  // transcript came back in Thai script. The languages are now stated as a
+  // closed set. (A deterministic foreign-script rejection also backs this
+  // up at the call site — prompts don't bind.)
+  //
+  // 2026-07-10 later, REVISED AGAIN: the first closed-set wording said
+  // "if a word sounds like some other language, it is imperfectly-
+  // pronounced ${targetLanguage} — transcribe it as the closest
+  // ${targetLanguage}". On the 12B that coercion tipped EVERYTHING toward
+  // the target language: a user speaking plain English got their sentence
+  // TRANSLATED into fluent Chinese ("Why do you think I just said a bunch
+  // of Chinese..." → "为什么你觉得我刚才说了一堆中文..."), confirmed live.
+  // The rule must be symmetric between the two allowed languages and
+  // explicitly anti-translation, with no "when in doubt, pick the target"
+  // bias in either direction.
+  // 2026-07-12: restructured to mirror the documented Gemma 4 12B ASR
+  // template ("Transcribe the following speech segment..." +
+  // "Follow these specific instructions for formatting the answer:" +
+  // bullet list) as closely as possible, instead of one free-form
+  // paragraph — the model card has no template for bilingual code-switch
+  // ASR (only monolingual ASR and single-direction AST), so this smuggles
+  // the closed-two-language requirement in as one more bullet rather than
+  // reframing the whole instruction. A/B'd against 6 real dumped clips
+  // (3 known-hard: silent/noisy/refusal-prone, 3 known-good) at temp=0: on
+  // the hard clips, prompt structure made no difference at all — this
+  // version, the old paragraph version, and the model card's prompt
+  // verbatim all failed identically, so those failures are an audio/model
+  // ceiling, not a prompt bug. On the good clips, THIS structure won on
+  // the merits: the old paragraph prompt was reliably violating its own
+  // "never translate" rule (appending English glosses after the Russian
+  // transcript on a clean clip — "Один кофе... Small coffee, please, with
+  // milk... I want honey"), and got a real word wrong (холодет, not a
+  // word) where this version got it right (холодец, an actual dish) on
+  // the same clip.
+  return `Transcribe the following speech segment. The speaker may switch between ${nativeLanguage} and ${targetLanguage} mid-sentence; transcribe each word into whichever of these two languages it was actually spoken in.
+Follow these specific instructions for formatting the answer:
+* Only output the transcription, with no newlines.
+* When transcribing numbers, write the digits, i.e. write 1.7 and not one point seven, and write 3 instead of three.
+* Do not translate between ${nativeLanguage} and ${targetLanguage} — transcribe only, in the language actually spoken. If they spoke ${nativeLanguage}, the transcript is ${nativeLanguage}, even in a ${targetLanguage} lesson.
+* Never output any language or script other than ${nativeLanguage} or ${targetLanguage}.
+* Do not repeat a word or phrase more times than it was actually said.
+* If the audio is silent or unintelligible, output nothing.`;
+}
+
+/**
+ * Cascade pass 1: a fast, minimal-prompt transcription-only call. Returns
+ * the transcript so pass 2 (grading) can use it as a known anchor for
+ * "what was said" instead of re-deriving word identity from scratch while
+ * also judging pronunciation/tone/hesitation in the same breath — see
+ * analyzeUtteranceWithLocalLLM's cascade comment for why this split exists.
+ */
+export async function transcribeAudioWithLocalLLM(
+  historyMessages: any[],
+  llmUrl: string,
+  llmModel: string,
+  llmKey: string,
+  targetLanguage: string,
+  nativeLanguage: string,
+): Promise<string | null> {
+  const sysPrompt = buildTranscriptionOnlyPrompt(targetLanguage, nativeLanguage);
+  const messages = [{ role: 'system', content: sysPrompt }, ...historyMessages];
+  const timeoutMs = 8000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (llmKey) headers['Authorization'] = `Bearer ${llmKey}`;
+    const startTime = Date.now();
+    const response = await fetch(`${llmUrl}/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: llmModel,
+        messages,
+        temperature: 0.0,
+        max_tokens: 150,
+      }),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      console.error(`[Supervisor] Transcription pass failed: ${response.status}`);
+      return null;
+    }
+    const data = await response.json() as any;
+    // 2026-07-06: this checkpoint's chat template leaks a literal "thought"
+    // line before the real content even with the no-think template and
+    // reasoning=null in the response — not a proper reasoning_content field,
+    // just a stray token. It repeats once per audio turn in the history
+    // (confirmed: two audio turns → "thought\nthought\n<real text>"), so a
+    // leading-only strip isn't enough — strip every standalone "thought"
+    // line, wherever it falls, so a fake extra "word" never corrupts the
+    // ground-truth anchor handed to the grading pass.
+    // 2026-07-08: found live — when "thought" is the ENTIRE response (no
+    // real content followed, e.g. silent/unclear audio), the old regex's
+    // required trailing `\n+` never matched, so "thought" itself leaked
+    // through as if it were a real one-word transcript. Now matches a
+    // trailing newline OR end-of-string.
+    let transcript = (data.choices?.[0]?.message?.content || '').trim();
+    transcript = transcript.replace(/^\s*thought\s*(\n+|$)/gim, '').trim();
+
+    // Degenerate-loop guard (2026-07-10, live: a clipping-loud clip came
+    // back as "快点" repeated 25 times over 5.9s of decode). A phrase
+    // looping ≥5 times consecutively means the decoder fell into
+    // repetition, not that the user said it 25 times — the whole
+    // transcript is untrustworthy at that point, so reject it (null →
+    // placeholder-only fallback) rather than trying to salvage a prefix.
+    const chunks = transcript.split(/[\s,，。.!！?？;；]+/).filter((c: string) => c.length >= 2);
+    let runLength = 1;
+    for (let i = 1; i < chunks.length; i++) {
+      runLength = chunks[i] === chunks[i - 1] ? runLength + 1 : 1;
+      if (runLength >= 5) {
+        console.warn(`[Supervisor] Transcription rejected — degenerate repetition of "${chunks[i]}" (${Date.now() - startTime}ms)`);
+        return null;
+      }
+    }
+
+    // Refusal/meta-commentary guard (2026-07-11, live on FP8: 3 clips came
+    // back as "I'm sorry, but I cannot fulfill this request. I am unable
+    // to process or transcribe audio files." / "I'm not sure what you're
+    // trying to say." — the model dropping out of ASR mode into its
+    // assistant persona). Undetectable by the degenerate-loop guard (no
+    // repetition) or the foreign-script guard (pure English) — this is
+    // English prose that LOOKS like a valid transcript but is the model
+    // talking about the task instead of doing it. Worse than empty: it
+    // got spliced into a real turn's text ("...transcribe it for you.
+    // [audio key=X] Я"), corrupting a legitimate second segment. A short
+    // first-person prefix naming the task itself is the tell — real
+    // Russian/English speech doesn't self-describe as an inability to
+    // transcribe.
+    const REFUSAL_PATTERN = /^(i'?m (sorry|not sure)|i (can'?t|cannot|am unable to|don'?t)\b.{0,40}\b(hear|understand|process|transcribe|fulfill))/i;
+    if (REFUSAL_PATTERN.test(transcript)) {
+      console.warn(`[Supervisor] Transcription rejected — looks like a refusal, not a transcript: "${transcript.slice(0, 100)}"`);
+      return null;
+    }
+
+    console.log(`[Supervisor] Transcription pass (${Date.now() - startTime}ms): "${transcript.slice(0, 80)}"`);
+    return transcript || null;
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      console.error(`[Supervisor] Transcription pass timed out after ${timeoutMs}ms`);
+    } else {
+      console.error('[Supervisor] Transcription pass error:', err);
+    }
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Analyze an utterance using the local LLM (SGLang). Single attempt —
  * constrained decoding (response_format json_schema) makes retries
  * unnecessary; a malformed response now means the endpoint itself is
  * broken, which a retry with the same prompt wouldn't fix.
+ *
+ * Cascading two-pass design for audio input (2026-07-06): pass 1
+ * (transcribeAudioWithLocalLLM) transcribes with a minimal prompt so audio
+ * attention stays intact; pass 2 (this function's own grading call) then
+ * gets the transcript as a known anchor for word identity, so it only has
+ * to judge performance (pronunciation, tone, hesitation, correctness)
+ * against audio it's already been told the words for, instead of solving
+ * transcription and grading simultaneously in one overloaded call.
  */
 export async function analyzeUtteranceWithLocalLLM(
   utterance: string,
@@ -314,9 +506,9 @@ export async function analyzeUtteranceWithLocalLLM(
   nativeLanguage: string = 'English',
   targetIso: string = 'ru',
   nativeIso: string = 'en',
+  knownTranscript?: string,
 ): Promise<UtteranceAnalysisResult> {
   const model = llmModel || process.env.LOCAL_LLM_MODEL || 'gemma4-26b';
-  const sysPrompt = buildFullPrompt(targetLanguage, nativeLanguage, targetIso, nativeIso);
   const historyLine = recentHistory
     ? `\n\nRecent conversation (for scaffolded detection):\n${recentHistory}`
     : '';
@@ -334,10 +526,29 @@ export async function analyzeUtteranceWithLocalLLM(
     `[Supervisor] Analyzing with ${model} (${hasAudioMessages ? 'audio' : 'text'}-mode, native=${nativeLanguage})`,
   );
 
+  const apiKey = llmKey || process.env.PROCESSOR_LLM_KEY || process.env.LOCAL_LLM_KEY || '';
+
+  // Cascade pass 1 — transcribe first with a minimal prompt (see
+  // buildTranscriptionOnlyPrompt), then hand pass 2 the transcript as a
+  // known anchor so it grades performance instead of also solving "what
+  // were the words" from scratch. Only worth the extra round-trip for
+  // audio turns — text-mode input already has ground-truth words.
+  // 2026-07-10: skipped entirely when the caller already has a transcript
+  // (the STT node's inline transcription) — same anchor, one less call.
+  let transcript: string | null = knownTranscript?.trim() || null;
+  if (!transcript && hasAudioMessages) {
+    transcript = await transcribeAudioWithLocalLLM(historyMessages!, llmUrl, model, apiKey, targetLanguage, nativeLanguage);
+  }
+
+  const sysPrompt = buildFullPrompt(targetLanguage, nativeLanguage, targetIso, nativeIso)
+    + (transcript
+      ? `\n\nThe most recent audio has already been transcribed as: "${transcript}". Treat this as the verified ground truth for which words were said — your job is to judge performance (pronunciation, tone, hesitation, correctness) from the audio, not to re-derive the words.`
+      : '');
+
+  const timeoutMs = 15000;
   try {
     const startTime = Date.now();
 
-    const apiKey = llmKey || process.env.PROCESSOR_LLM_KEY || process.env.LOCAL_LLM_KEY || '';
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
@@ -345,26 +556,45 @@ export async function analyzeUtteranceWithLocalLLM(
       ? [{ role: 'system', content: sysPrompt }, ...historyMessages!]
       : [{ role: 'system', content: sysPrompt }, { role: 'user', content: userPrompt }];
 
-    const response = await fetch(`${llmUrl}/chat/completions`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature: 0.1,
-        max_tokens: 800,
-        response_format: {
-          type: 'json_schema',
-          json_schema: { name: 'utterance_analysis', schema: buildUtteranceAnalysisSchema(targetIso, nativeIso) },
-        },
-      }),
-    });
+    // 2026-07-04: a live session hit a 32s processor response that came back
+    // truncated mid-JSON (schema-constrained decoding notwithstanding) —
+    // the processor's own prompt is minimal (getLatestTurnMessages caps it
+    // at one audio clip), so this reads as vLLM-side contention/latency
+    // (the conversational agent's own, much larger call hits the same
+    // vLLM instance) rather than this call's own context growing too large.
+    // A hard timeout turns a silent multi-second hang + garbage output into
+    // a fast, loud failure instead — doesn't fix the underlying GPU/vLLM
+    // contention, but stops one slow request from quietly eating a turn's
+    // grading with no clear signal in the logs.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    let response: Response;
+    try {
+      response = await fetch(`${llmUrl}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature: 0.1,
+          max_tokens: 800,
+          response_format: {
+            type: 'json_schema',
+            json_schema: { name: 'utterance_analysis', schema: buildUtteranceAnalysisSchema(targetIso, nativeIso) },
+          },
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
 
     const elapsed = Date.now() - startTime;
 
     if (!response.ok) {
       console.error(`[Supervisor] LLM request failed: ${response.status}`);
-      return { analysis: null, rawPrompt: sysPrompt + '\n' + userPrompt };
+      return { analysis: null, rawPrompt: sysPrompt + '\n' + userPrompt, transcript: transcript ?? undefined };
     }
 
     const data = await response.json() as any;
@@ -378,14 +608,18 @@ export async function analyzeUtteranceWithLocalLLM(
         `[Supervisor] Extracted ${analysis.lexemes?.length || 0} lexemes` +
         (analysis.note ? `, note: "${analysis.note.slice(0, 60)}"` : ''),
       );
-      return { analysis, rawPrompt: sysPrompt + '\n' + userPrompt, rawResponse: content };
+      return { analysis, rawPrompt: sysPrompt + '\n' + userPrompt, rawResponse: content, transcript: transcript ?? undefined };
     }
 
     console.error(`[Supervisor] JSON parse failed despite schema-constrained decoding. Raw: ${content.substring(0, 150)}`);
-    return { analysis: null, rawPrompt: sysPrompt + '\n' + userPrompt, rawResponse: content };
+    return { analysis: null, rawPrompt: sysPrompt + '\n' + userPrompt, rawResponse: content, transcript: transcript ?? undefined };
   } catch (err) {
-    console.error('[Supervisor] Analysis error:', err);
-    return { analysis: null, rawPrompt: sysPrompt + '\n' + userPrompt };
+    if (err instanceof Error && err.name === 'AbortError') {
+      console.error(`[Supervisor] LLM request timed out after ${timeoutMs}ms — skipping this turn's grading`);
+    } else {
+      console.error('[Supervisor] Analysis error:', err);
+    }
+    return { analysis: null, rawPrompt: sysPrompt + '\n' + userPrompt, transcript: transcript ?? undefined };
   }
 }
 
@@ -585,7 +819,7 @@ async function findOrCreateTargetEquiv(
  *
  * The list is parallel to `analysis.lexemes` — tracking[i] corresponds to lexeme i.
  */
-export type LexemeTrackingStatus = 'tracked' | 'analyzed' | 'noop';
+export type LexemeTrackingStatus = 'tracked' | 'analyzed' | 'noop' | 'exposed';
 
 export interface SRSUpdate {
   lexemeId: string;
@@ -596,9 +830,37 @@ export interface SRSUpdate {
   lexemeIndex: number;
 }
 
+/**
+ * Deterministic echo test — learner-field spec §3.3. Word-boundary,
+ * case-insensitive containment of the lemma OR surface form in the tutor's
+ * recent text. Deliberately simple (no stemming/fuzzy match): a false
+ * negative just means the word grades normally (safe — spontaneous use is
+ * supposed to grade), a false positive costs one exposure-only turn instead
+ * of a grade (also safe — it'll grade on the next genuine production).
+ */
+function wasEchoed(lemma: string, form: string, tutorRecentText: string | undefined): boolean {
+  if (!tutorRecentText) return false;
+  const haystack = tutorRecentText.toLowerCase();
+  for (const needle of [form, lemma]) {
+    const w = (needle || '').trim().toLowerCase();
+    if (!w) continue;
+    // \b doesn't understand Cyrillic/CJK word boundaries reliably, so use a
+    // simple non-alphanumeric-neighbor check instead of a \b regex.
+    const idx = haystack.indexOf(w);
+    if (idx === -1) continue;
+    const before = idx === 0 ? '' : haystack[idx - 1];
+    const after = idx + w.length >= haystack.length ? '' : haystack[idx + w.length];
+    const isBoundary = (ch: string | undefined) => !ch || !/[\p{L}\p{N}]/u.test(ch);
+    if (isBoundary(before) && isBoundary(after)) return true;
+  }
+  return false;
+}
+
 export async function updateSRSFromAnalysis(
   userId: string,
-  analysis: UtteranceAnalysis
+  analysis: UtteranceAnalysis,
+  tutorRecentText?: string,
+  provenance: 'probe' | 'conversation' = 'conversation',
 ): Promise<{
   updates: SRSUpdate[];
   /** Parallel to analysis.lexemes — tracking status per lexeme for the UI. */
@@ -810,6 +1072,7 @@ export async function updateSRSFromAnalysis(
           difficulty: card.difficulty,
           elapsedDays: card.elapsedDays,
           scheduledDays: card.scheduledDays,
+          provenance,
         });
 
         updates.push({
@@ -919,13 +1182,6 @@ export async function updateSRSFromAnalysis(
       }
     }
 
-    // Map performance to FSRS grade — confidence (audio-only) refines
-    // correct_use/scaffolded onto the full Again/Hard/Good/Easy scale.
-    const grade = voiceToGrade({
-      performance: item.performance,
-      confidence: item.confidence,
-    });
-
     // Get current vocabulary state
     const currentVocab = await db.query.userVocabulary.findFirst({
       where: and(
@@ -933,6 +1189,59 @@ export async function updateSRSFromAnalysis(
         eq(userVocabulary.lexemeId, existingLexeme.id)
       )
     });
+
+    // === ECHO GATE (learner-field spec §3.3) ===
+    // A word's FIRST-EVER record grades normally UNLESS it was just spoken
+    // by the tutor — parroting the tutor's own word is not production
+    // evidence. Spontaneous first use (not echoed) grades normally: it's
+    // real evidence of knowledge acquired outside this conversation.
+    // Deterministic and code-only — this is what actually protects the
+    // data; prompt instructions alone don't bind (confirmed repeatedly in
+    // this codebase's history).
+    if (!currentVocab && wasEchoed(item.lemma, item.form || item.lemma, tutorRecentText)) {
+      console.log(`[Processor] Echo gate: "${item.form || item.lemma}" just said by tutor — exposure only, not graded`);
+      await db.insert(userVocabulary).values({
+        userId,
+        lexemeId: existingLexeme.id,
+        state: 0,
+        due: new Date(),
+        stability: 0,
+        difficulty: 0,
+        scheduledDays: 0,
+        reps: 0,
+        lapses: 0,
+        receptiveExposures: 1,
+        lastExposure: new Date(),
+      }).onConflictDoUpdate({
+        target: [userVocabulary.userId, userVocabulary.lexemeId],
+        set: {
+          receptiveExposures: sql`${userVocabulary.receptiveExposures} + 1`,
+          lastExposure: new Date(),
+        },
+      });
+      tracking[idx] = 'exposed';
+      continue;
+    }
+
+    // Map performance to FSRS grade — confidence (audio-only) refines
+    // correct_use/scaffolded onto the full Again/Hard/Good/Easy scale.
+    let grade = voiceToGrade({
+      performance: item.performance,
+      confidence: item.confidence,
+    });
+
+    // Echo cap for KNOWN words (spec §3.3's second half, 2026-07-11): the
+    // echo gate above only protects a word's FIRST record — repeating a
+    // known word right after the tutor said it ("say Я хочу место" →
+    // parroted → three grade-4s) still counted as fluent independent
+    // production. Confirmed live as the main source of grade-4 volume
+    // inflation. Echoed production of a known word is scaffolded imitation
+    // at best — cap at Hard (2). Failures (grade 1) pass through: failing
+    // even WITH the tutor's model just spoken is real signal.
+    if (grade > 2 && wasEchoed(item.lemma, item.form || item.lemma, tutorRecentText)) {
+      console.log(`[Processor] Echo cap: "${item.form || item.lemma}" just said by tutor — grade ${grade}→2 (scaffolded)`);
+      grade = 2;
+    }
 
     const oldState = currentVocab?.state ?? 0;
 
@@ -1014,6 +1323,7 @@ export async function updateSRSFromAnalysis(
       difficulty: card.difficulty,
       elapsedDays: card.elapsedDays,
       scheduledDays: card.scheduledDays,
+      provenance,
     });
 
     // Apply semantic ripple effect
@@ -1094,12 +1404,16 @@ export interface UtteranceAnalysisResult {
   analysis: UtteranceAnalysis | null;
   rawPrompt?: string;
   rawResponse?: string;
+  /** Cascade pass 1's transcript, when audio was analyzed — see analyzeUtteranceWithLocalLLM. */
+  transcript?: string;
 }
 
 export interface ProcessorResult {
   analysis: UtteranceAnalysis | null;
   rawPrompt?: string;
   rawResponse?: string;
+  /** Cascade pass 1's transcript, when audio was analyzed — see analyzeUtteranceWithLocalLLM. */
+  transcript?: string;
   srsUpdates: { lexemeId: string; oldState: number; newState: number; grade: number }[];
   errors: string[];
   structuredErrors?: { lemma: string; grammarRule?: { rule: string; example: string } }[];
@@ -1142,6 +1456,26 @@ export async function runProcessor(
      * so the enforcement lives here in code.
      */
     maxLexemes?: number;
+    /**
+     * Plain text of the tutor's last 1-2 turns — for the deterministic echo
+     * gate in updateSRSFromAnalysis (learner-field spec §3.3). Matched in
+     * code only, never placed in the grading LLM's prompt.
+     */
+    tutorRecentText?: string;
+    /**
+     * Evidence weight tag for this call's graded lexemes (spec §3.2).
+     * 'probe': deliberate elicitation (onboarding staircase) — highest
+     * trust. 'conversation' (default): passive inference from open dialogue.
+     */
+    provenance?: 'probe' | 'conversation';
+    /**
+     * 2026-07-10: transcript already produced by the STT node's inline
+     * transcription (GemmaAudioSTT.configureTranscription). When present,
+     * the grading pass uses it as the verified word-identity anchor and
+     * skips its own pass-1 transcription call — one less GPU round-trip,
+     * and grading stays anchored to the SAME text the conversation saw.
+     */
+    knownTranscript?: string;
   } = {}
 ): Promise<ProcessorResult> {
   const result: ProcessorResult = {
@@ -1197,6 +1531,7 @@ export async function runProcessor(
       nativeLanguage,
       targetIso,
       nativeIso,
+      options.knownTranscript,
     );
   }
 
@@ -1204,6 +1539,7 @@ export async function runProcessor(
     result.analysis = analysisResult.analysis;
     result.rawPrompt = analysisResult.rawPrompt;
     result.rawResponse = analysisResult.rawResponse;
+    result.transcript = analysisResult.transcript;
   }
 
   if (!result.analysis) {
@@ -1235,11 +1571,13 @@ export async function runProcessor(
   // error signal the goal-seeking system should see (e.g. "keeps saying
   // 'this' instead of the Portuguese word"), not just wrong_use/recall_fail.
   result.structuredErrors = result.analysis.lexemes
-    .filter(l => l.performance === 'wrong_use' || l.performance === 'recall_fail' || l.performance === 'native_substitution')
+    .filter(l => l.performance === 'wrong_use' || l.performance === 'recall_fail' || l.performance === 'native_substitution' || l.performance === 'wrong_tone')
     .map(l => ({
       lemma: l.lemma,
       grammarRule: l.grammarRule ?? (l.performance === 'native_substitution'
         ? { rule: 'native_substitution', example: `used native word "${l.lemma}" instead of the target-language word` }
+        : l.performance === 'wrong_tone'
+        ? { rule: 'wrong_tone', example: `right word, wrong tone on "${l.lemma}"` }
         : undefined),
     }));
 
@@ -1258,7 +1596,7 @@ export async function runProcessor(
 
   // 2) Update SRS levels
   try {
-    const srsResult = await updateSRSFromAnalysis(userId, result.analysis);
+    const srsResult = await updateSRSFromAnalysis(userId, result.analysis, options.tutorRecentText, options.provenance);
     result.srsUpdates = srsResult.updates;
     // tracking[i] tells the dashboard which lexemes were stored vs just displayed;
     // expose it on the analysis for the UI emit in tutor-event-driven.ts.

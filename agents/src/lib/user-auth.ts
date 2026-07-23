@@ -60,6 +60,7 @@ export interface CreateUserOpts {
   id: string;
   username: string;
   password: string;
+  email?: string;
   targetLanguage?: string;
   nativeLanguage?: string;
   proficiencyLevel?: string;
@@ -71,6 +72,7 @@ export async function createUser(opts: CreateUserOpts): Promise<void> {
     id: opts.id,
     username: opts.username,
     passwordHash,
+    email: opts.email || null,
     targetLanguage: opts.targetLanguage || 'ru',
     nativeLanguage: opts.nativeLanguage || 'en',
     proficiencyLevel: opts.proficiencyLevel || 'beginner',

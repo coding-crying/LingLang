@@ -146,6 +146,7 @@ export async function analyzeTurn({ userId, userUtterance, context }: TurnInput)
 
 /** llm.tool wrapper — registers analyzeTurn as an agent-callable tool. */
 export const analyzeConversationTurn = llm.tool({
+  name: 'analyze_conversation_turn',
   description: "Analyzes the user's last utterance for grammatical accuracy and updates their learning progress.",
   parameters: z.object({
     userId: z.string().describe('The ID of the user'),

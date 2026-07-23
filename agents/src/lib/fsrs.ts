@@ -231,14 +231,15 @@ export interface VoicePerformance {
    *
    * Current labels: correct (clean production; also the text-only default) |
    * correct_instant (fluent, immediate) | correct_struggled (hesitation,
-   * self-correction, stutter) | wrong_use | recall_fail | native_substitution.
+   * self-correction, stutter) | wrong_use | recall_fail | native_substitution |
+   * wrong_tone (tonal languages only — right word, wrong pitch contour).
    *
    * Legacy labels (correct_use, scaffolded) still grade correctly — old code
    * paths (supervisor.ts / tutor.ts) and stored raw analyses emit them.
    */
   performance:
     | 'correct' | 'correct_instant' | 'correct_struggled'
-    | 'wrong_use' | 'recall_fail' | 'native_substitution'
+    | 'wrong_use' | 'recall_fail' | 'native_substitution' | 'wrong_tone'
     | 'correct_use' | 'scaffolded';
   /** Legacy audio-confidence signal — only consulted for legacy correct_use/scaffolded labels. */
   confidence?: 'instant' | 'hesitant' | 'struggled';
@@ -258,6 +259,9 @@ export interface VoicePerformance {
  * Grade 1 (Again): Completely wrong, or failed even after direct correction.
  * Grade 2 (Hard):  Got it but only after nudge, with poor pronunciation/long
  *                   latency, or hesitantly (scaffolded) / with a struggle.
+ *                   Also wrong_tone: they recalled the right word — the
+ *                   failure is pronunciation, not memory, so it shouldn't
+ *                   tank the word's SRS state the way a total miss does.
  * Grade 3 (Good):  Natural use at escalation level 1, or hesitant-but-correct
  *                   production — the default pass.
  * Grade 4 (Easy):  Unprompted use with fluent pronunciation, or instant
@@ -281,7 +285,9 @@ export function voiceToGrade(perf: VoicePerformance): FSRSGrade {
       return 4; // Easy — fluent, immediate production
 
     case 'correct_struggled':
+    case 'wrong_tone':
       return 2; // Hard — got there, but hesitation/self-correction/stutter
+                // (or, for wrong_tone, the right word with the wrong pitch)
 
     case 'scaffolded': // legacy
       if (perf.confidence === 'instant') return 3; // got it fast even though scaffolded

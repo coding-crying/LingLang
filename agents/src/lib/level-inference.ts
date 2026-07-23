@@ -196,6 +196,90 @@ export function signalsToScore(s: LevelSignals): number {
   return (vocabScore + grammarScore + stabilityScore + engagementScore) * recencyWeight;
 }
 
+/**
+ * Coverage-curve level estimate — learner-field spec §4.3/§4.4
+ * (docs/plans/2026-07-09-learner-field-design.md), v1-scoped: a plain
+ * per-frequency-band GROUP BY, no kernel/embedding estimator.
+ *
+ * Replaces "level = row count" (signalsToScore) with "level = how deep into
+ * the frequency-ranked vocabulary the user has SOLID coverage" — 150
+ * top-frequency words and 150 random words no longer score identically.
+ *
+ * Honest scope limitation: coverage is measured against lexemes we've
+ * actually tracked for this user (auto-created as encountered), not the
+ * full language vocabulary — we do not seed placeholder rows for
+ * never-encountered words. So this detects gaps WITHIN what the user has
+ * been exposed to, not gaps from words never introduced at all. A true
+ * population-wide field estimator (spec §4.1) is deferred (§10) precisely
+ * because it needs that fuller machinery; this is the honest, achievable
+ * v1 slice.
+ *
+ * Returns null when there's insufficient ranked data to trust the result
+ * (language not frequency-backfilled yet, or too little vocab) — callers
+ * fall back to the row-count method in that case, so es/pt/fr/ar (not yet
+ * backfilled per spec §9) are unaffected until their turn.
+ */
+// Band upper bound paired with the Level it unlocks once covered — single
+// source of truth, no separate threshold table to keep in sync by hand.
+const FREQUENCY_BANDS: Array<{ hi: number; unlocks: Level }> = [
+  { hi: 100, unlocks: 'a1' },
+  { hi: 300, unlocks: 'a2' },
+  { hi: 600, unlocks: 'b1' },
+  { hi: 1200, unlocks: 'b2' },
+  { hi: 2500, unlocks: 'c1' },
+  { hi: 5000, unlocks: 'c2' },
+];
+const MIN_BAND_SAMPLE = 3; // need at least this many ranked+tracked words in a band to trust its coverage
+const BAND_COVERAGE_THRESHOLD = 0.7;
+
+function stateKnownProbability(state: number, lapses: number, reps: number): number {
+  const lapseRate = reps > 0 ? lapses / reps : 0;
+  if (state === 2) return lapseRate > 0.3 ? 0.6 : 0.9;
+  if (state === 1) return 0.4;
+  if (state === 3) return 0.3;
+  return 0; // state 0 (new/exposure-only) — not yet productive knowledge
+}
+
+export async function computeCoverageDepth(
+  userId: string,
+  languageCode: string,
+): Promise<{ level: Level; depthReached: number } | null> {
+  const rows = await db
+    .select({
+      frequencyRank: lexemes.frequencyRank,
+      state: userVocabulary.state,
+      lapses: userVocabulary.lapses,
+      reps: userVocabulary.reps,
+    })
+    .from(userVocabulary)
+    .innerJoin(lexemes, eq(userVocabulary.lexemeId, lexemes.id))
+    .where(and(
+      eq(userVocabulary.userId, userId),
+      eq(lexemes.language, languageCode),
+    ));
+
+  const ranked = rows.filter((r) => r.frequencyRank != null) as Array<{
+    frequencyRank: number; state: number; lapses: number; reps: number;
+  }>;
+
+  if (ranked.length < MIN_BAND_SAMPLE) return null; // no/insufficient frequency data for this language
+
+  let depthReached = 0;
+  let level: Level = 'pre_a1';
+  let lo = 0;
+  for (const band of FREQUENCY_BANDS) {
+    const inBand = ranked.filter((r) => r.frequencyRank > lo && r.frequencyRank <= band.hi);
+    if (inBand.length < MIN_BAND_SAMPLE) break; // not enough sample in this band to trust it — stop here
+    const coverage = inBand.reduce((sum, r) => sum + stateKnownProbability(r.state, r.lapses, r.reps), 0) / inBand.length;
+    if (coverage < BAND_COVERAGE_THRESHOLD) break;
+    depthReached = band.hi;
+    level = band.unlocks;
+    lo = band.hi;
+  }
+
+  return { level, depthReached };
+}
+
 // CEFR ordinal — used to take the max across languages when borrowing
 // a prior. Higher number = more advanced.
 const LEVEL_ORDINAL: Record<Level, number> = {
@@ -239,7 +323,10 @@ export async function inferPriorFromOtherLanguages(
  * writes back to userLanguageLevels (unless a manual override is set).
  *
  * Returns the estimate AND the source of the level. The tutor uses
- * source='manual' or 'onboarding' with high confidence as a hard override.
+ * source='manual' with high confidence as a hard override — see the
+ * anchorThreshold note below. 'onboarding' is a legacy source value that
+ * may still exist on old rows; it's no longer written and is treated as a
+ * regular inferred estimate (falls through immediately, spec §6.5).
  */
 export async function inferLevel(
   userId: string,
@@ -254,8 +341,15 @@ export async function inferLevel(
   });
 
   const signals = await readLevelSignals(userId, languageCode);
+  // 2026-07-10: coverage-curve scoring (spec §4.3) is the primary method —
+  // it distinguishes "150 top-frequency words" from "150 random words",
+  // which raw row-count-based signalsToScore could not. Falls back to the
+  // row-count method when the language has no frequency backfill yet
+  // (spec §9 — only ru/zh backfilled so far) or the user has too little
+  // ranked vocab to trust a coverage read.
+  const coverageResult = await computeCoverageDepth(userId, languageCode);
   const score = signalsToScore(signals);
-  const level = scoreToLevel(score);
+  const level = coverageResult?.level ?? scoreToLevel(score);
   // Confidence scales with how much signal we have. 50+ vocab seen = high confidence.
   const confidence = Math.min(1, signals.vocabSeen / 50);
 
@@ -285,11 +379,17 @@ export async function inferLevel(
   // start (pre-A1) is wrong — they have a real-world L2 acquisition
   // track record. We borrow their highest inferred level from any
   // other language as a sanity floor.
-  // Onboarding anchor: holds until 100 vocab items, then decays.
-  // Manual override: holds until 20 vocab items (legacy behaviour).
-  // Rationale: onboarding is a deliberate calibration — we trust it more
-  // than a session-1 manual pin. 100 words ≈ 3-5 sessions of real use,
-  // enough for the inference to have its own opinion.
+  // Manual override: holds until 20 vocab items reviewed SINCE the pin,
+  // then decays (legacy behaviour, still load-bearing — this is the exact
+  // mechanism used to correct the 2026-07-09 B2 mis-inference live).
+  //
+  // 2026-07-10, learner-field spec §6.5: the 'onboarding' anchor tier is
+  // GONE — onboarding no longer writes a level override at all (see
+  // completeOnboarding in lib/onboarding.ts). Onboarding's job now is
+  // purely to generate real graded evidence (target-language elicitation,
+  // graded by the same processor pipeline as normal conversation,
+  // provenance='probe') and let this same coverage-curve inference read
+  // it — no separate anchor/threshold machinery to maintain for it.
   //
   // 2026-07-02: evidence is counted SINCE the pin, not lifetime. A pin set
   // after 400+ reviews used to be dead on arrival — lifetime vocabSeen was
@@ -298,9 +398,9 @@ export async function inferLevel(
   // is wrong" (live case: inflated grades pushed Will to b1 while his
   // actual speaking was A1), and it must hold until enough NEW evidence
   // accumulates to earn back the override.
-  const anchorThreshold = existing?.source === 'onboarding' ? 100 : 20;
+  const anchorThreshold = 20;
   let anchorEvidence = signals.vocabSeen;
-  if ((existing?.source === 'manual' || existing?.source === 'onboarding') && existing.inferredAt) {
+  if (existing?.source === 'manual' && existing.inferredAt) {
     const sincePin = await db.execute(sql`
       SELECT count(DISTINCT uv.lexeme_id)::int AS c
       FROM review_logs rl
@@ -312,10 +412,10 @@ export async function inferLevel(
     `);
     anchorEvidence = Number((sincePin as any).rows?.[0]?.c ?? (sincePin as any)[0]?.c ?? 0);
   }
-  const hasEnoughSignal = anchorEvidence >= anchorThreshold;
+  const hasEnoughSignal = existing?.source !== 'manual' || anchorEvidence >= anchorThreshold;
   if (!hasEnoughSignal) {
-    // Manual or onboarding override for THIS language wins
-    if (existing?.source === 'manual' || existing?.source === 'onboarding') {
+    // Manual override for THIS language wins
+    if (existing?.source === 'manual') {
       return {
         level: existing.proficiencyLevel as Level,
         score,

@@ -2,39 +2,31 @@
  * OnboardingGate — shown before the voice room if the user hasn't completed
  * onboarding for their target language.
  *
+ * 2026-07-16: cut down from a 3-question form (prior study / goals /
+ * self-rated level) to just the one question the tutor can't easily infer
+ * from a few turns of conversation. Prior study and goals are gathered
+ * conversationally instead — the agent already extracts them via
+ * onboarding_signal supervisor triggers (see server.ts's relaxed
+ * validation on this endpoint, priorStudy/goals are optional now).
+ *
  * Two paths:
- *   1. Fill the form → POST /api/users/:id/onboarding/:lang → done
- *   2. "Talk to the tutor instead" → skip form, connect to voice room
- *      (the agent will run the onboarding conversation itself)
+ *   1. Pick a level → POST /api/users/:id/onboarding/:lang → done
+ *   2. "Talk to the tutor instead" → skip the question, connect to voice
+ *      room (the agent runs the onboarding conversation itself)
  */
 
 import { useState } from 'react';
-
-const GOAL_OPTIONS = [
-  { value: 'travel', label: '✈️ Travel' },
-  { value: 'work', label: '💼 Work / Business' },
-  { value: 'heritage', label: '🏠 Heritage / Family' },
-  { value: 'media', label: '🎬 Media (shows, music, books)' },
-  { value: 'academic', label: '🎓 Academic' },
-  { value: 'other', label: '✨ Other' },
-];
-
-const PRIOR_STUDY_OPTIONS = [
-  { value: 'none', label: "I'm a complete beginner" },
-  { value: 'self_taught', label: 'Self-taught (apps, YouTube, etc.)' },
-  { value: 'class', label: 'Formal classes / school' },
-  { value: 'immersion', label: 'Lived in a country / immersion' },
-  { value: 'heritage', label: 'Heritage speaker (grew up hearing it)' },
-];
+import { Button, Description, Radio, RadioGroup, Typography } from '@heroui/react';
+import { apiFetch } from './lib/api';
 
 const LEVEL_OPTIONS = [
-  { value: 'pre_a1', label: 'Zero — I know nothing' },
-  { value: 'a1', label: 'A1 — A few words and phrases' },
-  { value: 'a2', label: 'A2 — Basic conversations' },
-  { value: 'b1', label: 'B1 — Can get by in most situations' },
-  { value: 'b2', label: 'B2 — Comfortable, some gaps' },
-  { value: 'c1', label: 'C1 — Fluent, near-native' },
-  { value: 'c2', label: 'C2 — Native / bilingual' },
+  { value: 'pre_a1', label: 'Zero', description: 'I know nothing yet' },
+  { value: 'a1', label: 'A1', description: 'A few words and phrases' },
+  { value: 'a2', label: 'A2', description: 'Basic conversations' },
+  { value: 'b1', label: 'B1', description: 'Can get by in most situations' },
+  { value: 'b2', label: 'B2', description: 'Comfortable, some gaps' },
+  { value: 'c1', label: 'C1', description: 'Fluent, near-native' },
+  { value: 'c2', label: 'C2', description: 'Native / bilingual' },
 ];
 
 interface Props {
@@ -52,38 +44,20 @@ export default function OnboardingGate({
   onComplete,
   onSkipToVoice,
 }: Props) {
-  const [priorStudy, setPriorStudy] = useState('');
-  const [studyDetails, setStudyDetails] = useState('');
-  const [goals, setGoals] = useState<string[]>([]);
-  const [goalDetails, setGoalDetails] = useState('');
   const [selfRatedLevel, setSelfRatedLevel] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const toggleGoal = (val: string) => {
-    setGoals((prev) =>
-      prev.includes(val) ? prev.filter((g) => g !== val) : [...prev, val]
-    );
-  };
-
-  const canSubmit = priorStudy && goals.length > 0 && selfRatedLevel;
-
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canSubmit) return;
+    if (!selfRatedLevel) return;
     setSubmitting(true);
     setError(null);
     try {
-      const res = await fetch(`/api/users/${userId}/onboarding/${targetLanguage}`, {
+      const res = await apiFetch(`/api/users/${userId}/onboarding/${targetLanguage}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          priorStudy,
-          studyDetails: studyDetails || undefined,
-          goals,
-          goalDetails: goalDetails || undefined,
-          selfRatedLevel,
-        }),
+        body: JSON.stringify({ selfRatedLevel }),
       });
       if (!res.ok) {
         const err = await res.json();
@@ -101,105 +75,45 @@ export default function OnboardingGate({
     <div className="onboarding-wrap">
       <div className="onboarding-card">
         <div className="onboarding-header">
-          <h2>Welcome to LingLang 👋</h2>
-          <p>
-            Before we start, tell us a bit about your {languageName} background.
-            This helps us calibrate your sessions from day one.
-          </p>
+          <Typography.Heading level={2}>Welcome to LingLang 👋</Typography.Heading>
+          <Typography.Paragraph style={{ color: 'var(--muted)' }}>
+            How would you rate your current {languageName}?
+          </Typography.Paragraph>
         </div>
 
         <form onSubmit={submit} className="onboarding-form">
-          {/* Prior study */}
-          <fieldset>
-            <legend>Have you studied {languageName} before?</legend>
-            <div className="radio-group">
-              {PRIOR_STUDY_OPTIONS.map((opt) => (
-                <label key={opt.value} className={`radio-option ${priorStudy === opt.value ? 'selected' : ''}`}>
-                  <input
-                    type="radio"
-                    name="priorStudy"
-                    value={opt.value}
-                    checked={priorStudy === opt.value}
-                    onChange={() => setPriorStudy(opt.value)}
-                  />
+          <RadioGroup
+            value={selfRatedLevel}
+            onChange={setSelfRatedLevel}
+            aria-label={`Current ${languageName} level`}
+          >
+            {LEVEL_OPTIONS.map((opt) => (
+              <Radio key={opt.value} value={opt.value}>
+                <Radio.Content>
+                  <Radio.Control>
+                    <Radio.Indicator />
+                  </Radio.Control>
                   {opt.label}
-                </label>
-              ))}
-            </div>
-            {priorStudy && priorStudy !== 'none' && (
-              <input
-                type="text"
-                className="text-input"
-                placeholder={`Tell us more — e.g. "Duolingo for 6 months", "2 years of classes in high school"`}
-                value={studyDetails}
-                onChange={(e) => setStudyDetails(e.target.value)}
-              />
-            )}
-          </fieldset>
-
-          {/* Goals */}
-          <fieldset>
-            <legend>Why are you learning {languageName}? (pick all that apply)</legend>
-            <div className="checkbox-group">
-              {GOAL_OPTIONS.map((opt) => (
-                <label key={opt.value} className={`checkbox-option ${goals.includes(opt.value) ? 'selected' : ''}`}>
-                  <input
-                    type="checkbox"
-                    value={opt.value}
-                    checked={goals.includes(opt.value)}
-                    onChange={() => toggleGoal(opt.value)}
-                  />
-                  {opt.label}
-                </label>
-              ))}
-            </div>
-            {goals.length > 0 && (
-              <input
-                type="text"
-                className="text-input"
-                placeholder={`Anything specific? e.g. "Moving to Lisbon in 6 months"`}
-                value={goalDetails}
-                onChange={(e) => setGoalDetails(e.target.value)}
-              />
-            )}
-          </fieldset>
-
-          {/* Self-rated level */}
-          <fieldset>
-            <legend>How would you rate your current {languageName}?</legend>
-            <div className="radio-group">
-              {LEVEL_OPTIONS.map((opt) => (
-                <label key={opt.value} className={`radio-option ${selfRatedLevel === opt.value ? 'selected' : ''}`}>
-                  <input
-                    type="radio"
-                    name="selfRatedLevel"
-                    value={opt.value}
-                    checked={selfRatedLevel === opt.value}
-                    onChange={() => setSelfRatedLevel(opt.value)}
-                  />
-                  {opt.label}
-                </label>
-              ))}
-            </div>
-          </fieldset>
+                </Radio.Content>
+                <Description>{opt.description}</Description>
+              </Radio>
+            ))}
+          </RadioGroup>
 
           {error && <div className="error-msg">{error}</div>}
 
           <div className="onboarding-actions">
-            <button
+            <Button
               type="submit"
-              className="btn-primary"
-              disabled={!canSubmit || submitting}
+              variant="primary"
+              isDisabled={!selfRatedLevel}
+              isPending={submitting}
             >
               {submitting ? 'Saving…' : "Let's go →"}
-            </button>
-            <button
-              type="button"
-              className="btn-text"
-              onClick={onSkipToVoice}
-            >
+            </Button>
+            <Button type="button" variant="ghost" onPress={onSkipToVoice}>
               Or, talk to the tutor instead →
-            </button>
+            </Button>
           </div>
         </form>
       </div>

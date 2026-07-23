@@ -4,19 +4,27 @@
  * The onboarding flow runs through the normal agent loop — no separate mode.
  * The supervisor reads onboarding state and injects nudges; the processor
  * detects background/goal statements and fires onboarding_signal triggers;
- * this module writes the results to user_onboarding and commits the level
- * anchor to user_language_levels with source='onboarding'.
+ * this module writes the results to user_onboarding.
  *
- * Two paths write to the same tables:
- *   - Voice: processor fires onboarding_signal → supervisor accumulates →
- *     commitOnboardingLevel() called when supervisor has enough signal
+ * 2026-07-10, learner-field spec §6.5: this module no longer writes a level
+ * override for the voice path. The intake conversation elicits real
+ * target-language production (buildOnboardingInstructions), graded by the
+ * same processor pipeline as normal conversation (provenance='probe') —
+ * level-inference.ts's coverage-curve inference reads that evidence
+ * directly. completeOnboarding() just marks the row done.
+ *
+ * Two paths write to user_onboarding:
+ *   - Voice: processor fires onboarding_signal → supervisor accumulates
+ *     background/goals; submit_onboarding_verdict tool calls
+ *     completeOnboarding() to end the intake conversation
  *   - UI form: POST /api/users/:id/onboarding/:lang → saveOnboardingData()
- *     + commitOnboardingLevel() directly
+ *     + setLevel(source='manual') (a direct self-report, unlike the voice
+ *     path's graded evidence) + completeOnboarding()
  */
 
 import { db } from '../db/index.js';
-import { userOnboarding, userLanguageLevels } from '../db/schema.js';
-import { eq, and } from 'drizzle-orm';
+import { userOnboarding, userLanguageLevels, lexemes } from '../db/schema.js';
+import { eq, and, asc, gte, lte, isNotNull, ne } from 'drizzle-orm';
 import type { Level } from './level-inference.js';
 
 export interface OnboardingState {
@@ -92,42 +100,29 @@ export async function saveOnboardingData(
 }
 
 /**
- * Commit the anchored level to user_language_levels with source='onboarding'.
- * This is the high-confidence anchor that level inference respects.
- * Also marks the onboarding row as complete.
+ * Mark onboarding complete WITHOUT writing a level override.
+ *
+ * 2026-07-10, learner-field spec §6.5: replaces commitOnboardingLevel. The
+ * old version wrote source='onboarding' to user_language_levels as a
+ * trusted anchor the tutor's own self-declared CEFR guess held until 100
+ * vocab items — an assessment based on the model's vibes about a 5-8 turn
+ * chat, not graded evidence. Onboarding's job now is only to CAPTURE real
+ * evidence: the intake conversation elicits target-language production
+ * across increasing difficulty (see buildOnboardingInstructions), and that
+ * gets graded by the exact same processor pipeline as normal conversation
+ * (echo-gated, provenance='probe' — see runProcessor's onboarding flag).
+ * level-inference.ts's coverage-curve/row-count inference reads that
+ * evidence directly; there is no separate anchor tier to maintain.
+ *
+ * selfRatedLevel is kept as informational color only (shown in the
+ * dashboard) — it never sets proficiencyLevel.
  */
-export async function commitOnboardingLevel(
+export async function completeOnboarding(
   userId: string,
   languageCode: string,
-  level: Level,
-  confidence: number,
-  evidence: string,
   path: 'voice' | 'ui' = 'voice',
 ): Promise<void> {
-  await db
-    .insert(userLanguageLevels)
-    .values({
-      userId,
-      languageCode,
-      proficiencyLevel: level,
-      confidence,
-      source: 'onboarding',
-      inferredAt: new Date(),
-    })
-    .onConflictDoUpdate({
-      target: [userLanguageLevels.userId, userLanguageLevels.languageCode],
-      set: {
-        proficiencyLevel: level,
-        confidence,
-        source: 'onboarding',
-        inferredAt: new Date(),
-      },
-    });
-
   await saveOnboardingData(userId, languageCode, {
-    anchoredLevel: level,
-    anchorConfidence: confidence,
-    anchorEvidence: evidence,
     voiceComplete: path === 'voice' ? true : undefined,
     uiComplete: path === 'ui' ? true : undefined,
     completedAt: new Date(),
@@ -174,4 +169,60 @@ export function selfRatedLevelToAnchor(selfRated: string): { level: Level; confi
     return { level: selfRated as Level, confidence: 0.6 }; // self-report, not probed
   }
   return { level: 'pre_a1', confidence: 0.5 };
+}
+
+export interface LadderWord {
+  lemma: string;
+  translation: string;
+  rank: number;
+}
+
+// Same bands as level-inference.ts's FREQUENCY_BANDS (kept as a separate
+// literal, not imported, since this is a display/prompt concern with its
+// own tuning — e.g. wanting exactly one word per rung — not the scoring
+// concern that file owns).
+const LADDER_BANDS: Array<{ lo: number; hi: number }> = [
+  { lo: 1, hi: 15 },
+  { lo: 50, hi: 150 },
+  { lo: 300, hi: 600 },
+  { lo: 1000, hi: 2500 },
+];
+
+/**
+ * Real words from the validated frequency_rank data (learner-field spec §9),
+ * one per band, for the onboarding staircase to actually climb — 2026-07-10,
+ * closing a gap found while auditing the prompts: the staircase asked the
+ * model to invent a frequency ladder from its own trained sense of the
+ * language, with zero access to the frequency data we'd just built and
+ * validated. Grounding beats trusting recall when we have real data.
+ *
+ * Returns [] for languages with no frequency backfill yet (spec §9 — only
+ * ru/zh so far) — buildOnboardingInstructions falls back to today's
+ * "think of common words yourself" phrasing in that case, not an error.
+ */
+export async function getOnboardingLadder(languageCode: string): Promise<LadderWord[]> {
+  const ladder: LadderWord[] = [];
+  for (const band of LADDER_BANDS) {
+    // Requires a non-empty translation — many auto-created lexemes (from
+    // the normal conversation ingestion path) never got one glossed
+    // (`translation: ''` when no native equivalent existed at creation
+    // time — see updateSRSFromAnalysis). A ladder word with no gloss is
+    // worse than useless for the tutor, so a band with only glossless
+    // candidates is skipped (a shorter, correct ladder beats a longer,
+    // broken one) rather than filled with a bad entry.
+    const row = await db.query.lexemes.findFirst({
+      where: and(
+        eq(lexemes.language, languageCode),
+        isNotNull(lexemes.frequencyRank),
+        gte(lexemes.frequencyRank, band.lo),
+        lte(lexemes.frequencyRank, band.hi),
+        ne(lexemes.translation, ''),
+      ),
+      orderBy: [asc(lexemes.frequencyRank)],
+    });
+    if (row?.frequencyRank != null) {
+      ladder.push({ lemma: row.lemma, translation: row.translation, rank: row.frequencyRank });
+    }
+  }
+  return ladder;
 }

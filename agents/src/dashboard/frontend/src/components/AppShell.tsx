@@ -3,32 +3,33 @@
  * the whole app behind the onboarding check, and lays out active tab
  * content + TabBar + Sheet.
  *
- * Task 4b wires in: the onboarding gate (via `useOnboarding()`, extracted
- * from VoiceRoom.tsx) covering the ENTIRE tabbed app — a user who hasn't
- * onboarded sees `OnboardingGate` before any tab renders, regardless of
- * which tab `activeTab` would otherwise select — and the real `VoiceTab`
- * screen in place of the Voice placeholder.
+ * The onboarding gate (via `useOnboarding()`, extracted from VoiceRoom.tsx)
+ * covers the ENTIRE tabbed app — a user who hasn't onboarded sees
+ * `OnboardingGate` before any tab renders, regardless of which tab
+ * `activeTab` would otherwise select.
  *
- * Library/Profile tab content is still a placeholder — those land in
- * Tasks 6/7. Sheet content is still a placeholder — that lands in Task 8.
- * `VoiceTab` renders its own `TopBar` (language/curriculum/streak pills),
- * so AppShell only renders the generic `TopBar` for the tabs that don't
- * supply their own yet (Library today; Profile intentionally never uses
- * TopBar per Task 2).
+ * Every tab renders its own header content (VoiceTab: language/curriculum/
+ * streak pills; LibraryTab/ProfileTab: their own `<h2>`), so AppShell
+ * itself no longer mounts a generic `TopBar`. Sheet content beyond
+ * `language` is still a placeholder.
  */
 
 import type { ReactElement } from 'react';
 import { AppStateProvider, useAppState } from '../state/AppState';
 import { useOnboarding } from '../hooks/useOnboarding';
 import TabBar from './TabBar';
-import TopBar from './TopBar';
 import Sheet from './Sheet';
 import OnboardingGate from '../OnboardingGate';
 import VoiceTab from '../tabs/VoiceTab';
+import ProfileTab from '../tabs/ProfileTab';
+import LibraryTab from '../tabs/LibraryTab';
+import LanguageSheet from '../sheets/LanguageSheet';
+import CurriculumSheet from '../sheets/CurriculumSheet';
+import ChunkBrowserSheet from '../sheets/ChunkBrowserSheet';
 import '../app.css';
 
 function AppShellInner({ onLogout }: { onLogout: () => void }) {
-  const { activeTab, activeSheet } = useAppState();
+  const { activeTab, activeSheet, closeSheet, setTab, openSheet, bumpContentVersion } = useAppState();
   const onboarding = useOnboarding();
 
   if (!onboarding.checked) {
@@ -47,25 +48,58 @@ function AppShellInner({ onLogout }: { onLogout: () => void }) {
     );
   }
 
-  let tabContent: ReactElement;
+  let otherTabContent: ReactElement | null = null;
   switch (activeTab) {
-    case 'voice':
-      tabContent = <VoiceTab userId={onboarding.userId} targetLang={onboarding.targetLang} />;
-      break;
     case 'library':
-      tabContent = <div>Library tab</div>;
+      otherTabContent = <LibraryTab />;
       break;
     case 'profile':
-      tabContent = <div>Profile tab</div>;
+      otherTabContent = <ProfileTab onLogout={onLogout} />;
       break;
   }
 
   return (
     <div className="app-shell">
-      {activeTab === 'library' && <TopBar center={<span>{activeTab}</span>} />}
-      {tabContent}
+      {/* VoiceTab stays mounted across tab switches so its LiveKitRoom
+          connection (and useConversationStream transcript state) survives
+          navigating to Library/Profile and back — it used to unmount
+          entirely here, silently dropping any live voice session. */}
+      <div style={{ display: activeTab === 'voice' ? 'contents' : 'none' }}>
+        <VoiceTab userId={onboarding.userId} targetLang={onboarding.targetLang} />
+      </div>
+      {otherTabContent}
       <TabBar />
-      <Sheet>{activeSheet && <div>Sheet: {activeSheet.kind}</div>}</Sheet>
+      <Sheet>
+        {activeSheet?.kind === 'language' ? (
+          <LanguageSheet
+            userId={onboarding.userId}
+            currentLang={onboarding.targetLang}
+            onSwitched={onboarding.refresh}
+            onClose={closeSheet}
+          />
+        ) : activeSheet?.kind === 'curriculum' ? (
+          <CurriculumSheet
+            userId={onboarding.userId}
+            targetLang={onboarding.targetLang}
+            onGoToLibrary={() => {
+              closeSheet();
+              setTab('library');
+            }}
+            onBrowseParts={(sourceId, sourceTitle) => openSheet({ kind: 'chunkBrowser', sourceId, sourceTitle })}
+          />
+        ) : activeSheet?.kind === 'chunkBrowser' ? (
+          <ChunkBrowserSheet
+            sourceId={activeSheet.sourceId}
+            sourceTitle={activeSheet.sourceTitle}
+            onJumped={() => {
+              bumpContentVersion();
+              closeSheet();
+            }}
+          />
+        ) : (
+          activeSheet && <div>Sheet: {activeSheet.kind}</div>
+        )}
+      </Sheet>
     </div>
   );
 }

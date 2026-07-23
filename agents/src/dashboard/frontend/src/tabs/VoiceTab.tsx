@@ -29,12 +29,14 @@ import {
   ConnectionStateToast,
 } from '@livekit/components-react';
 import '@livekit/components-styles';
+import { Avatar, Button, Chip, ScrollShadow } from '@heroui/react';
 import TopBar from '../components/TopBar';
 import VoiceControl, { type VoiceControlMode } from '../components/VoiceControl';
-import { useAppState } from '../state/AppState';
+import { useAppState, type ServiceMode } from '../state/AppState';
 import { useConversationStream, type ConversationTurn, type UserTurn, type AgentTurn } from '../hooks/useConversationStream';
 import { getChipClass, isNeutralChip, resolveWordId } from '../lib/wordChips';
 import { LANGUAGE_NAMES } from '../hooks/useOnboarding';
+import { apiFetch } from '../lib/api';
 
 interface VoiceTabProps {
   userId: string;
@@ -68,11 +70,11 @@ interface UserSummary {
 // 2026-06-25: server picks the room based on the authenticated user, so we
 // don't send roomName from the client any more. The response includes the
 // room name for logging/debugging.
-async function fetchToken(): Promise<{ token: string; url: string; roomName: string }> {
-  const res = await fetch('/api/token', {
+async function fetchToken(mode: ServiceMode): Promise<{ token: string; url: string; roomName: string }> {
+  const res = await apiFetch('/api/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ mode }),
   });
   if (!res.ok) throw new Error(`Token error: ${(await res.json()).error}`);
   return res.json();
@@ -100,44 +102,51 @@ function goalLabel(goal: ActiveGoal): string {
 
 function LanguagePill({ lang, onClick }: { lang: string; onClick: () => void }) {
   return (
-    <button
-      type="button"
-      className="voice-pill voice-pill-lang"
-      onClick={onClick}
-      title={LANGUAGE_NAMES[lang] ?? lang}
+    <Button
+      variant="secondary"
+      size="sm"
+      className="rounded-full"
+      onPress={onClick}
+      aria-label={LANGUAGE_NAMES[lang] ?? lang}
     >
       <span className="voice-pill-dot" />
       <span className="mono">{lang.toUpperCase()}</span>
-    </button>
+    </Button>
   );
 }
 
 function CurriculumPill({ title, onClick }: { title: string; onClick: () => void }) {
   return (
-    <button type="button" className="voice-pill voice-pill-curriculum" onClick={onClick}>
+    <Button variant="secondary" size="sm" className="rounded-full" onPress={onClick}>
       {title || 'Curriculum'}
-    </button>
+    </Button>
   );
 }
 
 function StreakChip({ streak }: { streak: number | null }) {
   return (
-    <span className="voice-pill voice-pill-streak" title="Day streak">
+    <Chip variant="soft" color="warning" title="Day streak">
       🔥 {streak === null ? '—' : streak}
-    </span>
+    </Chip>
   );
 }
 
 function GoalChip({ text, wordsDue }: { text: string; wordsDue: number | null }) {
   return (
-    <div className="voice-goal-chip">
-      Goal: {text} · {wordsDue === null ? '0' : wordsDue} words due
+    <div className="mb-2.5 flex justify-center">
+      <Chip variant="soft" color="success">
+        Goal: {text} · {wordsDue === null ? '0' : wordsDue} words due
+      </Chip>
     </div>
   );
 }
 
 function TutorAvatar() {
-  return <div className="voice-avatar">Т</div>;
+  return (
+    <Avatar size="sm" className="voice-avatar">
+      <Avatar.Fallback>Т</Avatar.Fallback>
+    </Avatar>
+  );
 }
 
 function TypingIndicator() {
@@ -301,7 +310,7 @@ function Transcript({
   }, [turns.length, showTyping]);
 
   return (
-    <div className="voice-transcript" ref={scrollRef}>
+    <ScrollShadow className="voice-transcript" ref={scrollRef}>
       {turns.length === 0 && !showTyping && (
         <div className="voice-transcript-empty">Connect and start talking — your conversation appears here.</div>
       )}
@@ -318,15 +327,16 @@ function Transcript({
         ),
       )}
       {showTyping && <TypingIndicator />}
-    </div>
+    </ScrollShadow>
   );
 }
 
 export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
-  const { openSheet } = useAppState();
-  const { turns } = useConversationStream();
+  const { openSheet, serviceMode, activeTab, contentVersion } = useAppState();
+  const { turns, clear: clearConversation } = useConversationStream();
 
   const [connected, setConnected] = useState(false);
+  const [connecting, setConnecting] = useState(false);
   const [token, setToken] = useState('');
   const [url, setUrl] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -388,30 +398,56 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
     }
   }, [turns, pttHoldFor]);
 
-  // Curriculum pill — existing /api/curriculum endpoint; Task 3's
-  // "current unit" concept isn't wired up yet, so this picks the
-  // lowest-`order` unit for the user's target language as a stand-in.
+  // Curriculum pill — shows the user's actual active reading (Library tab's
+  // "Now Learning" selection → placeUserInSource → readLearnerView's
+  // activeChunk), the same content the planner is using this turn. Falls
+  // back to the lowest-`order` /api/curriculum unit only when nothing's
+  // been selected yet, so the pill still shows something reasonable for a
+  // brand-new user with an empty Library.
+  //
+  // Refetches on `activeTab` too, not just mount: VoiceTab stays mounted
+  // across tab switches (AppShell toggles it with display:none rather than
+  // unmounting, so the live LiveKit connection survives navigating away),
+  // so without this a source picked in Library wouldn't show up here until
+  // a full page reload. Also depends on `contentVersion` for the case where
+  // the change happens WITHOUT a tab switch — jumping via the chunk browser
+  // sheet, reachable from this same tab's curriculum pill.
   useEffect(() => {
-    if (!targetLang) return;
+    if (!targetLang || !userId || activeTab !== 'voice') return;
+    let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`/api/curriculum?language=${targetLang}`);
+        const res = await apiFetch(`/api/users/${userId}/active-content?language=${targetLang}`);
+        if (res.ok) {
+          const chunk = await res.json();
+          if (!cancelled && chunk) {
+            setUnitTitle(chunk.sourceTitle);
+            return;
+          }
+        }
+      } catch { /* fall through to the curriculum-unit fallback below */ }
+
+      try {
+        const res = await apiFetch(`/api/curriculum?language=${targetLang}`);
         if (!res.ok) return;
         const units: CurriculumUnit[] = await res.json();
-        if (units.length > 0) {
+        if (!cancelled && units.length > 0) {
           const first = units.slice().sort((a, b) => a.order - b.order)[0];
           setUnitTitle(first.title);
         }
       } catch { /* non-fatal */ }
     })();
-  }, [targetLang]);
+    return () => {
+      cancelled = true;
+    };
+  }, [targetLang, userId, activeTab, contentVersion]);
 
   // Streak chip + word-due-count — Task 3's summary endpoint.
   useEffect(() => {
     if (!userId) return;
     (async () => {
       try {
-        const res = await fetch(`/api/users/${userId}/summary`);
+        const res = await apiFetch(`/api/users/${userId}/summary`);
         if (!res.ok) return;
         setSummary(await res.json());
       } catch { /* non-fatal */ }
@@ -423,7 +459,7 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
     if (!userId) return;
     (async () => {
       try {
-        const res = await fetch(`/api/users/${userId}`);
+        const res = await apiFetch(`/api/users/${userId}`);
         if (!res.ok) return;
         const data = await res.json();
         setGoals((data.goals ?? []).filter((g: ActiveGoal) => g.status === 'active'));
@@ -431,23 +467,39 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
     })();
   }, [userId]);
 
+  // `connecting` guards against a double-tap firing this twice before the
+  // button disappears — each call hits /api/token, which dispatches an
+  // agent job; two overlapping dispatches for the same room used to spawn
+  // two independent agent sessions talking over each other (see the
+  // server-side comment on the dispatch-dedup fix in server.ts).
   const connect = async () => {
+    if (connecting || connected) return;
+    setConnecting(true);
     setError(null);
+    // Fresh session, fresh transcript — otherwise turns from a previous
+    // connection (possibly a different target language, since switching
+    // languages only takes effect on the next connect) stay on screen
+    // forever: useConversationStream's state lives in this component and
+    // was never reset on reconnect.
+    clearConversation();
     try {
-      const { token: t, url: u, roomName: rn } = await fetchToken();
+      const { token: t, url: u, roomName: rn } = await fetchToken(serviceMode);
       setToken(t);
       setUrl(u);
       console.log(`[VoiceTab] Connecting to room: ${rn}`);
       setConnected(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setConnecting(false);
     }
   };
 
-  const disconnect = () => {
+  const disconnect = (reason?: string) => {
     setConnected(false);
     setToken('');
     setUrl('');
+    if (reason) setError(reason);
   };
 
   const primaryGoal = goals[0];
@@ -468,9 +520,9 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
 
       {!connected ? (
         <div className="voice-controls">
-          <button type="button" className="btn-primary" onClick={connect}>
-            Connect
-          </button>
+          <Button variant="primary" isPending={connecting} onPress={connect}>
+            {connecting ? 'Connecting…' : 'Connect'}
+          </Button>
           {error && <div className="error-msg">{error}</div>}
         </div>
       ) : (
@@ -487,7 +539,7 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
         // PTT mode and gets superseded by VoiceControl's effect (which fires
         // later, once `useConnectionState` flips to `connected`) in hands-free
         // mode. See VoiceControl.tsx and task-5-report.md for the full trace.
-        <LiveKitRoom token={token} serverUrl={url} connect={true} onDisconnected={disconnect}>
+        <LiveKitRoom token={token} serverUrl={url} connect={true} onDisconnected={() => disconnect()}>
           <RoomAudioRenderer />
           <ConnectionStateToast />
           <VoiceControl

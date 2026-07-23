@@ -1,5 +1,7 @@
 /**
- * Sheet — generic bottom-sheet shell, portaled to document.body.
+ * Sheet — generic bottom-sheet shell, built on HeroUI's Drawer (which
+ * portals, animates, and handles Escape/outside-click dismissal itself —
+ * this used to be hand-rolled here, see git history for the old version).
  *
  * Renders only when `activeSheet !== null` (enforced purely by reading
  * AppState's single `activeSheet` slot — that slot is what guarantees only
@@ -9,8 +11,8 @@
  * to pick which content to render.
  */
 
-import { useEffect, type ReactNode } from 'react';
-import { createPortal } from 'react-dom';
+import type { ReactNode } from 'react';
+import { Drawer } from '@heroui/react';
 import { useAppState } from '../state/AppState';
 
 interface SheetProps {
@@ -20,24 +22,14 @@ interface SheetProps {
 export default function Sheet({ children }: SheetProps) {
   const { activeSheet, closeSheet } = useAppState();
 
-  useEffect(() => {
-    if (!activeSheet) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeSheet();
-    };
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [activeSheet, closeSheet]);
-
-  if (!activeSheet) return null;
-
-  return createPortal(
-    <div className="sheet-scrim" onClick={closeSheet}>
-      <div className="sheet-panel" onClick={(e) => e.stopPropagation()}>
-        <div className="sheet-drag-handle" />
-        {children}
-      </div>
-    </div>,
-    document.body,
+  return (
+    <Drawer.Backdrop isOpen={activeSheet !== null} onOpenChange={(open) => !open && closeSheet()}>
+      <Drawer.Content placement="bottom">
+        <Drawer.Dialog>
+          <Drawer.Handle />
+          <Drawer.Body>{children}</Drawer.Body>
+        </Drawer.Dialog>
+      </Drawer.Content>
+    </Drawer.Backdrop>
   );
 }

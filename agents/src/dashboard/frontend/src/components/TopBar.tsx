@@ -12,6 +12,7 @@
  */
 
 import type { ReactNode } from 'react';
+import { Button } from '@heroui/react';
 import { useAppState } from '../state/AppState';
 
 interface TopBarProps {
@@ -29,14 +30,15 @@ export default function TopBar({ left, center, right }: TopBarProps) {
       <div className="top-bar-center">{center}</div>
       <div className="top-bar-right">
         {right}
-        <button
-          type="button"
-          className="theme-toggle"
+        <Button
+          isIconOnly
+          variant="ghost"
+          size="sm"
           aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-          onClick={toggleTheme}
+          onPress={toggleTheme}
         >
           {theme === 'dark' ? '☾' : '☀'}
-        </button>
+        </Button>
       </div>
     </header>
   );

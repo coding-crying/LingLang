@@ -111,7 +111,7 @@ pre,
   width: 34px;
   height: 34px;
   border-radius: 50%;
-  border: 1px solid var(--border);
+  border: 1px solid var(--ll-border);
   background: var(--surface2);
   color: var(--text);
   display: flex;
@@ -127,32 +127,16 @@ pre,
 .tab-bar {
   flex: 0 0 auto;
   display: flex;
-  border-top: 1px solid var(--border);
-  background: var(--surface);
+  border-top: 1px solid var(--ll-border);
+  background: var(--ll-surface);
   padding-bottom: env(safe-area-inset-bottom);
-}
-
-.tab-bar-item {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  padding: 10px 0 8px;
-  background: none;
-  border: none;
-  cursor: pointer;
-}
-
-.tab-bar-label {
-  font-size: 11px;
 }
 
 /* ── Bottom sheet scrim + panel ─────────────────────────────────────── */
 .sheet-scrim {
   position: fixed;
   inset: 0;
-  background: var(--overlay);
+  background: var(--ll-overlay);
   backdrop-filter: blur(2px);
   animation: llFade 0.18s ease;
   z-index: 100;
@@ -165,7 +149,7 @@ pre,
   bottom: 0;
   background: var(--surface2);
   border-radius: 20px 20px 0 0;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--ll-border);
   padding: 10px 20px calc(22px + env(safe-area-inset-bottom));
   animation: llSheet 0.22s ease;
   max-height: 78%;
@@ -176,8 +160,53 @@ pre,
   width: 36px;
   height: 4px;
   border-radius: 2px;
-  background: var(--border);
+  background: var(--ll-border);
   margin: 0 auto 16px;
+}
+
+.sheet-title {
+  font-family: 'Onest', sans-serif;
+  font-size: 17px;
+  font-weight: 700;
+  margin: 0 0 14px;
+}
+
+.language-sheet-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.language-sheet-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: var(--surface3);
+  border: 1px solid var(--ll-border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  color: var(--text);
+  font-size: 15px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.language-sheet-row.active {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--ll-accent);
+}
+
+.language-sheet-row:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.language-sheet-row-check {
+  color: var(--ll-accent);
+  font-weight: 700;
 }
 
 /* ── Generic buttons / states (shared by OnboardingGate, VoiceTab, login) ─ */
@@ -190,7 +219,7 @@ pre,
 }
 
 .btn-primary {
-  background: var(--accent);
+  background: var(--ll-accent);
   color: var(--bg);
   border: none;
   border-radius: 12px;
@@ -202,6 +231,13 @@ pre,
 .btn-primary:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+.mode-picker {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
 }
 
 .btn-text {
@@ -224,7 +260,7 @@ pre,
 .btn-toggle {
   background: var(--surface2);
   color: var(--text);
-  border: 1px solid var(--border);
+  border: 1px solid var(--ll-border);
   border-radius: 12px;
   padding: 10px 16px;
   cursor: pointer;
@@ -233,7 +269,7 @@ pre,
 .btn-toggle.active {
   background: var(--accent-soft);
   border-color: var(--accent-border);
-  color: var(--accent);
+  color: var(--ll-accent);
 }
 
 .error-msg {
@@ -255,8 +291,8 @@ pre,
 .onboarding-card {
   width: 100%;
   max-width: 430px;
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background: var(--ll-surface);
+  border: 1px solid var(--ll-border);
   border-radius: 20px;
   padding: 24px 20px;
   box-shadow: var(--shadow);
@@ -300,7 +336,7 @@ pre,
   display: flex;
   align-items: center;
   gap: 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--ll-border);
   border-radius: 12px;
   padding: 10px 14px;
   color: var(--text);
@@ -312,14 +348,14 @@ pre,
 .checkbox-option.selected {
   border-color: var(--accent-border);
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--ll-accent);
 }
 
 .text-input {
   width: 100%;
   margin-top: 8px;
   background: var(--surface3);
-  border: 1px solid var(--border);
+  border: 1px solid var(--ll-border);
   border-radius: 10px;
   padding: 10px 12px;
   color: var(--text);
@@ -359,21 +395,16 @@ pre,
   flex: 0 0 auto;
 }
 
-.voice-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 6px 12px;
-  color: var(--text);
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.voice-pill-lang {
-  flex: 0 0 auto;
+/* ── Library / Profile tabs ────────────────────────────────────────── */
+/* Match .voice-tab's flex: 1 so these always fill the rest of the
+ * .app-shell column regardless of how much content they hold — without
+ * it, the tab bar sits right after the content instead of pinned to the
+ * bottom, so it visibly jumps up/down when switching tabs. */
+.library-tab,
+.profile-tab {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .voice-pill-dot {
@@ -382,32 +413,6 @@ pre,
   border-radius: 50%;
   background: var(--accent);
   display: inline-block;
-}
-
-.voice-pill-curriculum {
-  width: 100%;
-  justify-content: center;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.voice-pill-streak {
-  background: var(--accent-soft);
-  border: 1px solid var(--accent-border);
-  color: var(--accent);
-  cursor: default;
-}
-
-.voice-goal-chip {
-  align-self: center;
-  background: var(--teal-soft);
-  border: 1px solid var(--teal-border);
-  color: var(--teal);
-  border-radius: 999px;
-  padding: 6px 16px;
-  font-size: 12.5px;
-  margin: 0 0 10px;
 }
 
 .voice-transcript {
@@ -493,6 +498,21 @@ pre,
   cursor: pointer;
 }
 
+/* User's full transcript line (2026-07-11) — shown above the color-coded
+   chips so native-language words (which produce no chips) are visible. */
+.bubble-user-text {
+  margin-bottom: 4px;
+}
+
+/* Playback of the turn's mic capture (what the model actually heard). */
+.bubble-audio {
+  display: block;
+  width: 100%;
+  max-width: 260px;
+  height: 32px;
+  margin: 4px 0;
+}
+
 .chip-mastered {
   color: var(--text);
 }
@@ -508,7 +528,8 @@ pre,
 
 .chip-wrong_use,
 .chip-recall_fail,
-.chip-native_substitution {
+.chip-native_substitution,
+.chip-wrong_tone {
   color: var(--bad);
   border-bottom: 1px dotted var(--bad);
 }
@@ -529,7 +550,7 @@ pre,
 .voice-waveform-bar {
   display: inline-block;
   width: 3px;
-  background: var(--accent);
+  background: var(--ll-accent);
   border-radius: 2px;
   animation: llShimmer 1s ease-in-out infinite;
   transform-origin: bottom;
@@ -570,26 +591,48 @@ pre,
 
 /* ── VoiceControl: PTT / hands-free (Task 5) ───────────────────────── */
 
+/* 2026-07-04 (user feedback): was a 3-row column (mode switch / PTT stage /
+   disconnect), which made the whole bar too tall. Now a single row —
+   mode switch and disconnect flank the PTT stage left/right instead of
+   stacking above/below it. */
 .voicectl {
   flex: 0 0 auto;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
-  gap: 14px;
-  padding: 14px 20px calc(14px + env(safe-area-inset-bottom));
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
   background: var(--scrim);
+}
+
+.voicectl-side {
+  flex: 0 0 auto;
+  min-width: 76px;
+  display: flex;
+  align-items: center;
+}
+
+.voicectl-side-left {
+  justify-content: flex-start;
+}
+
+.voicectl-side-right {
+  justify-content: flex-end;
 }
 
 .voicectl-modeswitch {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 10px;
+  gap: 5px;
 }
 
 .voicectl-modelabel {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text-faint);
   transition: color .15s ease;
+  white-space: nowrap;
 }
 
 .voicectl-modelabel.active {
@@ -616,7 +659,7 @@ pre,
 }
 
 .voicectl-switch-track[data-on="true"] {
-  background: var(--accent);
+  background: var(--ll-accent);
 }
 
 .voicectl-switch-knob {
@@ -639,40 +682,45 @@ pre,
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 108px;
+  min-height: 100px;
 }
 
-/* PTT button */
+/* PTT button — 72px (was 84px, 2026-07-04 height-reduction pass): still
+   well above the 44px min touch-target guideline. */
 
+/* Fixed to exactly the button's own box (2026-07-14 bug fix): this used
+   to be an auto-height flex column containing BOTH the button and the
+   hint text below it, so when the hint grew from "Hold to talk" to
+   "0:03 — release to send · swipe up to cancel" on press, the taller
+   column got re-centered by .voicectl-stage's `align-items: center`,
+   visibly shoving the button upward mid-hold. The hint is now
+   absolutely positioned (see .voicectl-hint) so its length can never
+   affect this box's height or the button's position. */
 .voicectl-ptt-wrap {
   position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
+  width: 72px;
+  height: 72px;
 }
 
 .voicectl-pulse-ring {
   position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 84px;
-  height: 84px;
-  margin-top: -42px;
-  margin-left: -42px;
+  top: 0;
+  left: 0;
+  width: 72px;
+  height: 72px;
   border-radius: 50%;
-  border: 1px solid var(--accent-border);
+  border: 1px solid var(--accent);
   animation: llPulse 1.4s ease-out infinite;
   pointer-events: none;
 }
 
 .voicectl-ptt-btn {
   position: relative;
-  width: 84px;
-  height: 84px;
+  width: 72px;
+  height: 72px;
   border-radius: 50%;
-  border: 1px solid var(--accent-border);
-  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  background: color-mix(in oklch, var(--accent) 14%, transparent);
   color: var(--accent);
   display: flex;
   align-items: center;
@@ -680,13 +728,21 @@ pre,
   cursor: pointer;
   touch-action: none;
   user-select: none;
+  box-shadow: var(--shadow-field, none);
   transition: background .12s ease, transform .12s ease;
 }
 
 .voicectl-ptt-btn.held {
   background: var(--accent);
-  color: var(--surface);
+  color: var(--accent-foreground);
   transform: scale(1.03);
+}
+
+.voicectl-ptt-btn.held.cancelling {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--danger-foreground);
+  transform: scale(0.94);
 }
 
 .voicectl-ptt-bars {
@@ -710,10 +766,26 @@ pre,
   animation: llBar .6s ease-in-out infinite;
 }
 
+.voicectl-ptt-btn.held.cancelling .voicectl-ptt-bar {
+  animation: none;
+  transform: scaleY(.4);
+}
+
 .voicectl-hint {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 260px;
+  text-align: center;
   font-size: 12px;
   color: var(--text-dim);
-  min-height: 16px;
+}
+
+.voicectl-hint.cancelling {
+  color: var(--danger);
+  font-weight: 600;
 }
 
 /* Hands-free orb */
@@ -722,12 +794,12 @@ pre,
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
 }
 
 .voicectl-orb {
-  width: 84px;
-  height: 84px;
+  width: 72px;
+  height: 72px;
   border-radius: 50%;
   background: radial-gradient(circle at 38% 32%, var(--accent-soft), rgba(0, 0, 0, 0) 70%);
   border: 1px solid var(--accent-border);
@@ -749,5 +821,89 @@ pre,
 }
 
 .voicectl-disconnect {
-  margin-top: 2px;
+  padding: 8px 14px;
+  font-size: 13px;
+}
+
+/* Login screen — only reached if a session expires while the SPA is
+   already loaded (the normal cold-load path is server-side redirected to
+   the static /login page, public/login.html, which carries its own
+   copy of these token values since it sits outside the Vite bundle). */
+.login-wrap,
+.loading-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 20px;
+  background: radial-gradient(120% 90% at 50% 0%, var(--bg-radial) 0%, var(--bg) 60%);
+  color: var(--text);
+}
+
+.login-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface2);
+  border: 1px solid var(--ll-border);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  padding: 2.5rem;
+  width: 100%;
+  max-width: 360px;
+  text-align: center;
+}
+
+.login-card h1 {
+  font-family: 'Onest', sans-serif;
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+  color: var(--ll-accent);
+}
+
+.login-card p {
+  color: var(--text-dim);
+  margin-bottom: 1.5rem;
+  font-size: 0.9rem;
+}
+
+.login-card input {
+  width: 100%;
+  padding: 0.75rem 0.9rem;
+  border-radius: 99px;
+  border: 1px solid var(--ll-border);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 1rem;
+  margin-bottom: 0.75rem;
+  outline: none;
+  transition: border-color .15s ease;
+}
+
+.login-card input:focus {
+  border-color: var(--accent-border);
+}
+
+.login-card .btn-primary {
+  width: 100%;
+  padding: 0.75rem;
+  border: none;
+  border-radius: 99px;
+  background: var(--ll-accent);
+  color: var(--bg);
+  font-family: 'Onest', sans-serif;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.login-card .btn-primary:hover {
+  opacity: .9;
+}
+
+.login-err {
+  color: var(--bad);
+  font-size: 0.85rem;
+  margin-top: 0.75rem;
 }

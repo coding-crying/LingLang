@@ -1,6 +1,7 @@
 import { db } from '../db/index.js';
 import { userVocabulary, units, lexemes, users, activeGoals, userNotes, sessionSummaries } from '../db/schema.js';
 import { eq, and, asc, desc, lte, isNull, sql, isNotNull } from 'drizzle-orm';
+import { isPlaceholderLexeme } from './learner-view.js';
 
 export class ContextManager {
 
@@ -32,8 +33,13 @@ export class ContextManager {
       orderBy: [asc(userVocabulary.due)],
       limit: 20,
     });
-    // Filter to target-language lexemes only (native-language entries are substitution tracking, not learning targets)
-    const dueReviews = allDue.filter((v: any) => v.lexeme?.language === targetLang).slice(0, 5);
+    // Filter to target-language lexemes only (native-language entries are substitution tracking, not learning targets).
+    // Also drop native-substitution placeholder lexemes (lemma === its own
+    // nativeLemma link) — the same contamination learner-view.ts already
+    // filters for the conversation prompt; getInitialContext feeds the
+    // planner and had no such filter, so contaminated placeholders could
+    // still surface there even after the conversation-side fix.
+    const dueReviews = allDue.filter((v: any) => v.lexeme?.language === targetLang && !isPlaceholderLexeme(v.lexeme)).slice(0, 5);
     console.log(`[Context] Found ${dueReviews.length} target-language reviews (filtered from ${allDue.length} total)`);
 
     const reviewList = dueReviews.map((p: any) => `${p.lexeme.lemma} (${p.lexeme.translation})`).join(', ');
@@ -56,7 +62,7 @@ export class ContextManager {
 
     // Filter: words not already in dueReviews or started vocab
     const newWords = newWordCandidates
-        .filter((l: typeof lexemes.$inferSelect) => !startedLexemeIds.has(l.id))
+        .filter((l: typeof lexemes.$inferSelect) => !startedLexemeIds.has(l.id) && !isPlaceholderLexeme(l))
         .slice(0, 3)
         .map((l: typeof lexemes.$inferSelect) => `${l.lemma} (${l.translation})`)
         .join(', ');

@@ -79,6 +79,29 @@ export const users = pgTable('users', {
   // /api/register or src/scripts/seed-*.ts scripts.
   username: text('username').unique(),
   passwordHash: text('password_hash'),
+
+  // 2026-07-16: self-serve signup (/api/signup). Not the login identifier
+  // (username still is) — collected for contact/account-recovery purposes.
+  // Nullable so pre-existing rows and admin-created (/api/register) users
+  // without an email stay valid; Postgres UNIQUE allows multiple NULLs.
+  email: text('email').unique(),
+
+  // 2026-07-17: per-user Google API key (BYO) + a usage budget for anyone
+  // riding on the shared/admin key instead — see lib/google-budget.ts.
+  // Encrypted at rest (AES-256-GCM via lib/crypto.ts), never returned to
+  // the client. Null = user is on the shared key.
+  googleApiKeyEncrypted: text('google_api_key_encrypted'),
+  // Accumulated estimated cost against the SHARED key this billing
+  // period, in micros (millionths of a USD — avoids float rounding).
+  // Only incremented for users with no key of their own; BYO-key users
+  // are unlimited and this stays 0 for them.
+  googleUsageMicros: integer('google_usage_micros').notNull().default(0),
+  // Per-user override of the shared-key budget; null = use the
+  // GOOGLE_SHARED_KEY_LIMIT_MICROS env default.
+  googleUsageLimitMicros: integer('google_usage_limit_micros'),
+  // Start of the current billing window; usage resets when this ages past
+  // GOOGLE_USAGE_RESET_DAYS (lazy reset on read, no cron needed).
+  googleUsagePeriodStart: timestamp('google_usage_period_start', { withTimezone: true }).notNull().defaultNow(),
 });
 
 // 2026-06-25: per-language proficiency replaces the global field for
@@ -143,6 +166,14 @@ export const userVocabulary = pgTable('user_vocabulary', {
   lastReview: timestamp('last_review', { withTimezone: true }),
   avgPronunciationScore: real('avg_pronunciation_score'),
 
+  // Receptive knowledge (2026-07-10, learner-field spec §3.1) — comprehension
+  // exposure tracked separately from FSRS production evidence. Not scheduled;
+  // just a count + rolling signal used to build the introduction queue (words
+  // heard/read but never produced).
+  receptiveExposures: integer('receptive_exposures').notNull().default(0),
+  lastExposure: timestamp('last_exposure', { withTimezone: true }),
+  comprehensionSignal: real('comprehension_signal').notNull().default(0), // rolling -1..+1
+
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   uniqueIndex('user_vocabulary_user_lexeme_idx').on(table.userId, table.lexemeId),
@@ -181,6 +212,14 @@ export const reviewLogs = pgTable('review_logs', {
   escalationLevelUsed: integer('escalation_level_used'),  // Did they get it at level 1, 2, or 3?
   pronunciationScore: real('pronunciation_score'),          // STT confidence for this review
   durationMs: integer('duration_ms'),                       // How long did it take them to recall?
+
+  // 2026-07-10, learner-field spec §3.2 — evidence weight/trust source.
+  // 'probe': selector-directed elicitation, closed-form judgment (highest
+  // trust). 'conversation': passive inference from open dialogue (default,
+  // legacy rows backfill to this). 'echo': should not normally reach
+  // review_logs at all (the echo gate in updateSRSFromAnalysis intercepts
+  // before grading) — value exists for completeness/debugging only.
+  provenance: text('provenance').notNull().default('conversation'),
 }, (table) => [
   index('review_logs_vocab_idx').on(table.userVocabularyId),
 ]);
@@ -327,7 +366,9 @@ export const userOnboarding = pgTable('user_onboarding', {
   goals:            text('goals').array(),     // ['travel','work','heritage','media','academic','other']
   goalDetails:      text('goal_details'),
   selfRatedLevel:   text('self_rated_level'),  // user's own CEFR estimate
-  // anchored level (written by commitOnboardingLevel)
+  // Legacy — written by the removed commitOnboardingLevel (learner-field
+  // spec §6.5, 2026-07-10). No longer written; kept for historical rows,
+  // not read by any current code path.
   anchoredLevel:    text('anchored_level'),
   anchorConfidence: real('anchor_confidence'),
   anchorEvidence:   text('anchor_evidence'),
@@ -339,4 +380,152 @@ export const userOnboarding = pgTable('user_onboarding', {
 
 export const userOnboardingRelations = relations(userOnboarding, ({ one }) => ({
   user: one(users, { fields: [userOnboarding.userId], references: [users.id] }),
+}));
+
+// ── Curriculum ──────────────────────────────────────────────────────────────
+// See docs/superpowers/specs/2026-07-06-curriculum-design.md. Ingested
+// content (textbooks, audio, YouTube) is chunked and distilled offline;
+// chunk_lexemes joins to the EXISTING lexemes table so FSRS, the dictionary
+// gate, embeddings, and the frontier all see curriculum vocab for free —
+// vocab that isn't a lexeme row is invisible to the rest of the loop.
+export const contentSources = pgTable('content_sources', {
+  id: text('id').primaryKey(),
+  ownerId: text('owner_id').references(() => users.id), // null = shared/global catalog
+  language: text('language').notNull(),
+  kind: text('kind').notNull(), // 'textbook' | 'audio' | 'youtube' | 'text'
+  title: text('title').notNull(),
+  originalRef: text('original_ref'), // file path / URL
+  status: text('status').notNull().default('uploaded'), // 'uploaded' | 'ingesting' | 'ready' | 'failed'
+  ingestError: text('ingest_error'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const contentSourcesRelations = relations(contentSources, ({ one, many }) => ({
+  owner: one(users, { fields: [contentSources.ownerId], references: [users.id] }),
+  chunks: many(contentChunks),
+}));
+
+export const contentChunks = pgTable('content_chunks', {
+  id: text('id').primaryKey(),
+  sourceId: text('source_id').notNull().references(() => contentSources.id),
+  ord: integer('ord').notNull(), // reading order within source
+  parentTitle: text('parent_title'), // chapter, for grouping in UI
+  title: text('title').notNull(),
+  body: text('body').notNull(), // cleaned chunk text, ~500-1500 tokens
+  // summary/card/grammarPoints/difficulty/embedding are all null until
+  // ensureChunkDistilled() runs (lib/ingest.ts) — lazily, the first time a
+  // learner actually reaches this chunk, not eagerly at ingestion. See
+  // distilledAt below.
+  summary: text('summary'), // 2-3 sentences, planner-facing
+  card: text('card'), // distilled lesson card, <=200 tokens, prompt-ready
+  grammarPoints: text('grammar_points'), // JSON: [{rule, example, explanation}]
+  difficulty: text('difficulty'),
+  // Only set for timed sources (youtube/movie) — see lib/ingest.ts's
+  // segmentTimedText. Null for text/textbook/audio, where `title` comes
+  // from heading detection instead of a time range.
+  startSec: real('start_sec'),
+  endSec: real('end_sec'),
+  embedding: vector('embedding', { dimensions: 1024 }), // BGE-M3, same as lexemes
+  // Set once ensureChunkDistilled() has run for this chunk — the signal
+  // that summary/card/chunk_lexemes/embedding are actually populated,
+  // distinct from "genuinely has no vocab" (computeCoverage would
+  // otherwise read an undistilled chunk's empty vocab list as trivially
+  // 100% covered — see curriculum.ts's listSourceChunks).
+  distilledAt: timestamp('distilled_at', { withTimezone: true }),
+}, (table) => [
+  index('content_chunks_source_ord_idx').on(table.sourceId, table.ord),
+  index('content_chunks_embedding_idx').using('hnsw', table.embedding.op('vector_cosine_ops')),
+]);
+
+export const contentChunksRelations = relations(contentChunks, ({ one, many }) => ({
+  source: one(contentSources, { fields: [contentChunks.sourceId], references: [contentSources.id] }),
+  lexemeLinks: many(chunkLexemes),
+  progress: many(userContentProgress),
+}));
+
+export const chunkLexemes = pgTable('chunk_lexemes', {
+  chunkId: text('chunk_id').notNull().references(() => contentChunks.id),
+  lexemeId: text('lexeme_id').notNull().references(() => lexemes.id),
+  salience: real('salience').notNull().default(0.5), // how central to the chunk, 0-1
+}, (t) => ({
+  pk: primaryKey({ columns: [t.chunkId, t.lexemeId] }),
+}));
+
+export const chunkLexemesRelations = relations(chunkLexemes, ({ one }) => ({
+  chunk: one(contentChunks, { fields: [chunkLexemes.chunkId], references: [contentChunks.id] }),
+  lexeme: one(lexemes, { fields: [chunkLexemes.lexemeId], references: [lexemes.id] }),
+}));
+
+export const userContentProgress = pgTable('user_content_progress', {
+  userId: text('user_id').notNull().references(() => users.id),
+  chunkId: text('chunk_id').notNull().references(() => contentChunks.id),
+  status: text('status').notNull().default('queued'), // 'queued' | 'active' | 'done' | 'skipped'
+  coverage: real('coverage').notNull().default(0), // computed, see lib/curriculum.ts
+  cardOverride: text('card_override'), // planner-adapted card, see design doc §3/§6
+  activatedAt: timestamp('activated_at', { withTimezone: true }),
+  completedAt: timestamp('completed_at', { withTimezone: true }),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.userId, t.chunkId] }),
+  activeIdx: index('user_content_progress_active_idx').on(t.userId, t.status),
+}));
+
+export const userContentProgressRelations = relations(userContentProgress, ({ one }) => ({
+  user: one(users, { fields: [userContentProgress.userId], references: [users.id] }),
+  chunk: one(contentChunks, { fields: [userContentProgress.chunkId], references: [contentChunks.id] }),
+}));
+
+// ── Discourse memory & grammar analytics ────────────────────────────────────
+// The word layer (user_vocabulary, review_logs) is already durable. What's
+// missing is the utterance/discourse level above it — which sentence, which
+// grammar context, which conversation an error happened in. Written
+// fire-and-forget from runProcessor's completion hook; nothing reads these
+// yet (Phase M is record-only by design — zero behavioral risk).
+export const utterances = pgTable('utterances', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: text('user_id').notNull().references(() => users.id),
+  sessionId: text('session_id').notNull(),
+  turnSeq: integer('turn_seq').notNull(),
+  language: text('language').notNull(),
+  transcript: text('transcript').notNull(), // the cascade's clean pass-1 output
+  analysis: text('analysis'), // JSON: processor result for this turn
+  embedding: vector('embedding', { dimensions: 1024 }), // BGE-M3, same service as lexemes
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index('utterances_user_idx').on(table.userId, table.createdAt),
+  index('utterances_embedding_idx').using('hnsw', table.embedding.op('vector_cosine_ops')),
+]);
+
+export const utterancesRelations = relations(utterances, ({ one, many }) => ({
+  user: one(users, { fields: [utterances.userId], references: [users.id] }),
+  errors: many(errorObservations),
+}));
+
+// Canonical-tag mapping is the linchpin: the processor's free-text rule
+// labels ("genitive after negation" / "wrong case after не") never
+// aggregate on their own. ruleId maps each label to its nearest grammar_rules
+// row (via that table's existing, currently-unused embeddings); below a
+// cosine threshold, ruleId stays null and ruleText is kept as-is. Once
+// mapped, "weak grammar patterns" is a plain GROUP BY, no LLM in the read
+// path — the processor's extraction fidelity is what bounds this table's
+// quality, hence a two-pass cascade there matters more than clever queries
+// here.
+export const errorObservations = pgTable('error_observations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: text('user_id').notNull().references(() => users.id),
+  language: text('language').notNull(),
+  ruleId: text('rule_id').references(() => grammarRules.id), // canonical tag, nullable until mapped
+  ruleText: text('rule_text').notNull(), // processor's raw free-text label
+  lexemeId: text('lexeme_id').references(() => lexemes.id),
+  snippet: text('snippet'), // the offending fragment
+  utteranceId: uuid('utterance_id').references(() => utterances.id),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index('error_observations_user_rule_idx').on(table.userId, table.ruleId),
+]);
+
+export const errorObservationsRelations = relations(errorObservations, ({ one }) => ({
+  user: one(users, { fields: [errorObservations.userId], references: [users.id] }),
+  rule: one(grammarRules, { fields: [errorObservations.ruleId], references: [grammarRules.id] }),
+  lexeme: one(lexemes, { fields: [errorObservations.lexemeId], references: [lexemes.id] }),
+  utterance: one(utterances, { fields: [errorObservations.utteranceId], references: [utterances.id] }),
 }));

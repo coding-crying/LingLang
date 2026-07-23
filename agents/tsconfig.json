@@ -6,11 +6,34 @@
     "outDir": "dist",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "esModuleInterop": true
+    "esModuleInterop": true,
+    // 2026-07-12: ../tsconfig.json's `paths` block is livekit-agents-js SDK
+    // repo-internal tooling ("@livekit/agents" -> agents/src,
+    // "@livekit/agents-plugin-*" -> plugins/*/src) for linking the SDK's
+    // own sibling packages during ITS development. This LingLang app just
+    // happens to live at the same "agents/" path slot in this checkout, so
+    // it inherits that mapping too — and tsx (unlike plain tsc) actually
+    // APPLIES tsconfig paths at runtime. Every `import
+    // '@livekit/agents-plugin-google'` was silently getting rewritten to
+    // the SDK repo's own unbuilt in-tree plugin (v1.0.30, built against
+    // @livekit/agents@1.2.3) instead of our real installed npm dependency
+    // (1.5.0, matching the rest of the app). Two different @livekit/agents
+    // versions in play meant two genuinely different RealtimeModel
+    // classes, so `instanceof RealtimeModel` silently failed everywhere in
+    // the real SDK — the root cause of gemini/RealtimeModel mode never
+    // producing audio. Reset paths to empty so this package always
+    // resolves @livekit/* from node_modules like any normal consumer.
+    "paths": {}
   },
   "ts-node": {
     "esm": true
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts"]
+  // The frontend (src/dashboard/frontend/) has its own tsconfig with a
+  // different moduleResolution ("bundler", for Vite) and its own "types"
+  // (vite/client, for import.meta.env) — its loose .ts files (hooks/, lib/)
+  // were being incidentally swept into this glob too (its .tsx files
+  // never were) and typechecked against the wrong config. Verify frontend
+  // code via `frontend/tsconfig.json` + `vite build`, not this one.
+  "exclude": ["src/**/*.test.ts", "src/dashboard/frontend/**"]
 }

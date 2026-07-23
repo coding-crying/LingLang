@@ -21,6 +21,14 @@ const EXPAND_BACKLOG_THRESHOLD = 5;
 
 export type FrontierState = 'consolidate' | 'balance' | 'expand';
 
+/**
+ * Explicit user intent for this session — see design doc §10. An explicit
+ * choice always outranks the computed frontier state, same precedent as
+ * the curriculum_advance trigger (§5): the user asked, so the algorithm's
+ * inference doesn't get a vote. 'mixed' is today's behavior, unchanged.
+ */
+export type SessionMode = 'mixed' | 'review' | 'new';
+
 export interface FrontierBudget {
   state: FrontierState;
   /** How many new words the tutor may reach for this turn. 0 in consolidate. */
@@ -36,8 +44,33 @@ function newWordHeadroom(dueBacklog: number): number {
  * @param dueBacklog Count of currently-due user_vocabulary rows.
  * @param recentSuccess Fraction of grades >= Good over the last 20
  *   review_logs, or null if fewer than 5 logs exist (insufficient data).
+ * @param sessionMode Explicit user choice for this session (§10). Checked
+ *   BEFORE the computed consolidate/balance/expand logic — an explicit
+ *   'review'/'new' request short-circuits the algorithm entirely rather
+ *   than nudging its inputs, so there's no ambiguity about which one won.
  */
-export function computeFrontierBudget(dueBacklog: number, recentSuccess: number | null): FrontierBudget {
+export function computeFrontierBudget(
+  dueBacklog: number,
+  recentSuccess: number | null,
+  sessionMode: SessionMode = 'mixed',
+): FrontierBudget {
+  if (sessionMode === 'review') {
+    return {
+      state: 'consolidate',
+      newWordBudget: 0,
+      directive: 'The learner chose a review session — work only with due/known words. Introduce nothing new, even if a due word is easy.',
+    };
+  }
+
+  if (sessionMode === 'new') {
+    const budget = newWordHeadroom(dueBacklog);
+    return {
+      state: 'expand',
+      newWordBudget: budget,
+      directive: `The learner chose a new-vocabulary session — lead with new words (up to ${budget}), scaffolded by known words. Still weave in due words when they fit naturally, but don't let review dominate.`,
+    };
+  }
+
   // Fewer than 5 logs: treat as balance unless the backlog itself is
   // already large enough to force consolidation.
   const success = recentSuccess ?? 1; // neutral: never trips consolidate/expand on success alone
@@ -75,8 +108,14 @@ export function computeFrontierBudget(dueBacklog: number, recentSuccess: number 
  * renders empty, a dangling reference the model will visibly get confused
  * by (it did, in testing — narrated the contradiction as its reply).
  */
-export function buildFrontierInfo(dueWords: WordRef[], newWords: WordRef[], dueBacklog: number, recentSuccess: number | null): FrontierInfo {
-  const budget = computeFrontierBudget(dueBacklog, recentSuccess);
+export function buildFrontierInfo(
+  dueWords: WordRef[],
+  newWords: WordRef[],
+  dueBacklog: number,
+  recentSuccess: number | null,
+  sessionMode: SessionMode = 'mixed',
+): FrontierInfo {
+  const budget = computeFrontierBudget(dueBacklog, recentSuccess, sessionMode);
   const dueWordsStr = formatWordList(dueWords);
   const newWordsStr = budget.newWordBudget > 0 ? formatWordList(newWords) : '';
 

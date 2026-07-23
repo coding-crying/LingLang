@@ -9,7 +9,7 @@ import { llmEvents } from '../lib/llm-events.js';
 // to vLLM as a real OpenAI audio_url content type which vLLM accepts for
 // native-audio models.
 
-type LLMOptions = { baseURL: string; model: string };
+type LLMOptions = { baseURL: string; model: string; audioCapable?: boolean };
 
 /** Max conversation items sent to the LLM. 2026-06-25: the chat context
  *  was growing unbounded — `Built 44 msgs` after 36 turns — and the model
@@ -44,11 +44,13 @@ function truncateContext(chatCtx: llm.ChatContext, maxItems: number): llm.ChatCo
 export class GemmaAudioLLM extends llm.LLM {
   private baseURL: string;
   private _model: string;
+  private _audioCapable: boolean;
 
   constructor(options: LLMOptions) {
     super();
     this.baseURL = options.baseURL.replace(/\/$/, '');
     this._model = options.model;
+    this._audioCapable = options.audioCapable ?? true;
   }
 
   label(): string { return 'gemma-audio-llm'; }
@@ -70,6 +72,7 @@ export class GemmaAudioLLM extends llm.LLM {
 class GemmaAudioLLMStream extends llm.LLMStream {
   private _baseURL: string;
   private _model: string;
+  private _audioCapable: boolean;
   private _chatCtx: llm.ChatContext;
   private _extraKwargs: Record<string, unknown> | undefined;
   /** Token counter for the streaming dashboard event bus. */
@@ -93,6 +96,7 @@ class GemmaAudioLLMStream extends llm.LLMStream {
     });
     this._baseURL = llmInstance['baseURL'];
     this._model = llmInstance['_model'];
+    this._audioCapable = llmInstance['_audioCapable'];
     // 2026-06-25: truncate the chat context BEFORE the stream runs.
     // Without this, the LLM sees the entire session history unbounded
     // (44+ items after 36 turns) and starts repeating itself.
@@ -214,6 +218,13 @@ class GemmaAudioLLMStream extends llm.LLMStream {
             if (text) {
               text = text.replace(/<\|[^|>]*\|>[\s\S]*?<\|\/[^|>]*\|>/g, '');
               text = text.replace(/<\|[^|>]*\|>/g, '');
+              // This checkpoint's chat template (gemma4-12b-no-think.jinja)
+              // uses asymmetric channel markers — "<|channel>thought\n...
+              // \n<channel|>" — not the "<|channel|>...<|/channel|>" style
+              // above, so that regex never matches them. Strip this format
+              // too (mirrors the template's own strip_thinking() macro).
+              text = text.replace(/<\|channel>[\s\S]*?<channel\|>/g, '');
+              text = text.replace(/<\|channel>|<channel\|>/g, '');
               if (!text.trim() && text !== ' ') continue;
             }
 
@@ -277,25 +288,46 @@ class GemmaAudioLLMStream extends llm.LLMStream {
     // First pass: collect all messages and identify audio turns.
     // We keep the last MAX_AUDIO_TURNS audio turns as real audio (for
     // prefix-cache hits on recent context) and collapse older ones into
-    // a short text summary to keep KV cache usage bounded.
+    // text (see the collapse branch below — real per-turn transcript when
+    // available, generic filler otherwise).
     //
-    // With 5.43 GiB KV cache and ~7680 audio tokens/min, 2s audio ≈ 256
-    // tokens. 4 turns × 256 = 1024 audio tokens — fits comfortably.
-    // Without pruning, 6+ turns overflow and crash vLLM.
-    const MAX_AUDIO_TURNS = 3; // max user audio turns sent as real audio
+    // 2026-07-10: dropped from 3 to 1. Confirmed live: with 3 simultaneous
+    // raw audio clips in one request, the model produced an irrelevant
+    // reply to a real, clearly-captured order attempt (VAD/STT mechanics
+    // all correct — this was an attention failure, not a plumbing one).
+    // This exact failure mode — the model losing track of "whose turn is
+    // this" / which clip is current once multiple audio turns share a
+    // context — was already documented and fixed for the PROCESSOR's own
+    // pipeline (ConversationHistory.getLatestTurnMessages, tutor-event-
+    // driven.ts: "a wider window doesn't help this model reason better...
+    // it just gives it more surface area to get confused on"). That fix
+    // was never applied here. Only the CURRENT turn needs to be real audio
+    // for pronunciation/tone judgment; older turns now get a real
+    // transcript instead of stale raw audio.
+    // 2026-07-21: 0 for a text-only backend (Qwen3.5-9B, no audio modality)
+    // — every audio turn, including the current one, must collapse to its
+    // transcript text below. The transcript is already anchored inline
+    // (GemmaAudioSTT appends it after the placeholder), so this only costs
+    // the tone/pronunciation-from-raw-audio nuance, not the content itself.
+    const MAX_AUDIO_TURNS = this._audioCapable ? 1 : 0; // max user audio turns sent as real audio
 
-    const items: { role: string; textContent: string; isAudio: boolean; audioId?: string }[] = [];
+    // 2026-07-10: the STT now appends the real transcript after the
+    // bracket (`[audio key=X dur=Ys] Я хочу кофе.`) — capture it. Older
+    // placeholder-only turns (transcription failed/disabled) still match
+    // with an undefined transcript.
+    const items: { role: string; textContent: string; isAudio: boolean; audioId?: string; transcript?: string }[] = [];
     for (const item of this._chatCtx.items) {
       if (item.type !== 'message') continue;
       const textContent: string = (item as any).textContent ?? '';
       if (!textContent) continue;
 
-      const keyMatch = textContent.match(/^\[audio key=([A-Za-z0-9]+)(?: dur=([0-9.]+)s)?\]$/);
+      const keyMatch = textContent.match(/^\[audio key=([A-Za-z0-9]+)(?: dur=([0-9.]+)s)?\](?:\s+([\s\S]+))?$/);
       items.push({
         role: item.role,
         textContent,
         isAudio: !!keyMatch,
         audioId: keyMatch?.[1],
+        transcript: keyMatch?.[3]?.trim() || undefined,
       });
     }
 
@@ -315,6 +347,8 @@ class GemmaAudioLLMStream extends llm.LLMStream {
     // Second pass: build the vLLM messages.
     const out: any[] = [];
     let collapsedOldAudio = false;
+    let collapsedWithTranscript = 0;
+    let collapsedGeneric = 0;
 
     for (const msg of items) {
       if (msg.isAudio && msg.audioId) {
@@ -326,17 +360,33 @@ class GemmaAudioLLMStream extends llm.LLMStream {
               `[GemmaAudioLLM] Audio key=${msg.audioId} not in registry ` +
               `(size=${audioPayloadRegistry.size}) — sending text fallback`,
             );
-            out.push({ role: msg.role, content: `[user spoke in Russian]` });
+            // 2026-07-11: was hardcoded "[user spoke in Russian]" from the
+            // ru-only era — in a zh session that told the model the user
+            // speaks Russian, and it confabulated accordingly ("you went
+            // full Russian on me!" to a verified-Chinese transcript, live).
+            // Language-neutral text can never be wrong.
+            out.push({ role: msg.role, content: `[voice message — transcript unavailable]` });
             continue;
           }
           console.log(
             `[GemmaAudioLLM] Audio payload: ${(entry.uri.length / 1024).toFixed(1)} KB ` +
-            `(${entry.durationSec.toFixed(2)}s @ ${entry.sampleRate}Hz, key=${msg.audioId})`,
+            `(${entry.durationSec.toFixed(2)}s @ ${entry.sampleRate}Hz, key=${msg.audioId}` +
+            `${msg.transcript ? ', anchored' : ', no transcript'})`,
           );
+          // 2026-07-10: transcript anchor. Same pattern that fixed the
+          // processor's grading pass — hand the model the verified words so
+          // it judges/responds instead of also solving "what was said" from
+          // raw audio under a big prompt (which produced wrong-language
+          // hallucinations and inverted speaker attribution, live, 3x).
+          // Audio stays attached for tone/pronunciation. No transcript
+          // (transcription failed) → old instruction, old behavior.
+          const anchorText = msg.transcript
+            ? `The user said (verified transcript): "${msg.transcript}". Their audio is attached — respond to what they actually said, in the same language they used.`
+            : "Listen to the user's audio and respond in the same language they used.";
           out.push({
             role: msg.role,
             content: [
-              { type: 'text', text: "Listen to the user's audio and respond in the same language they used." },
+              { type: 'text', text: anchorText },
               // 2026-07-02: the stripped-prefix workaround was SGLang-specific
               // (its load_audio patch decoded raw base64 > 1KB directly).
               // vLLM's OpenAI-compatible audio_url strictly validates the URL
@@ -350,17 +400,31 @@ class GemmaAudioLLMStream extends llm.LLMStream {
             ],
           });
         } else {
-          // Old audio — collapse to text summary (saves KV cache).
-          // Insert ONE summary marker before the first collapsed audio
-          // instead of repeating it per turn.
-          if (!collapsedOldAudio) {
-            collapsedOldAudio = true;
-            out.push({
-              role: msg.role,
-              content: `[The user spoke several sentences in Russian earlier in this conversation.]`,
-            });
+          // Old audio — collapse to text (saves KV cache, avoids the
+          // multi-audio attention failure — see MAX_AUDIO_TURNS note
+          // above). Transcript preference order: inline (STT-attached,
+          // travels with the message itself — survives registry GC) →
+          // registry entry (processor-attached, legacy path) → generic
+          // one-per-group marker.
+          const inlineTranscript = msg.transcript;
+          const registryTranscript = audioPayloadRegistry.get(msg.audioId)?.transcript;
+          const transcript = inlineTranscript || registryTranscript;
+          if (transcript) {
+            collapsedWithTranscript++;
+            out.push({ role: msg.role, content: `[User said: "${transcript}"]` });
+          } else {
+            collapsedGeneric++;
+            if (!collapsedOldAudio) {
+              collapsedOldAudio = true;
+              out.push({
+                role: msg.role,
+                // 2026-07-11: was "...spoke several sentences in Russian..."
+                // hardcoded from the ru-only era — see the note on the
+                // registry-miss fallback above; same live confabulation.
+                content: `[The user said some earlier turns by voice — transcripts unavailable.]`,
+              });
+            }
           }
-          // Skip this individual audio turn — already summarized above.
         }
         continue;
       }
@@ -370,7 +434,10 @@ class GemmaAudioLLMStream extends llm.LLMStream {
     }
 
     const audioCount = out.filter(m => Array.isArray(m?.content) && m.content.some((c: any) => c?.type === 'audio_url')).length;
-    console.log(`[GemmaAudioLLM] Built ${out.length} msgs: ${audioCount} real audio, ${items.filter(i => i.isAudio).length - audioCount} collapsed`);
+    console.log(
+      `[GemmaAudioLLM] Built ${out.length} msgs: ${audioCount} real audio, ` +
+      `${collapsedWithTranscript} collapsed→transcript, ${collapsedGeneric} collapsed→generic`,
+    );
     return out;
   }
 }

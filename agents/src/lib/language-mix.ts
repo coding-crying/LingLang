@@ -58,7 +58,10 @@ export function computeTargetShare(inputs: MixTargetInputs): number {
 // (Latin-script) native language. Latin-script targets (es, pt, fr, de…)
 // can't be measured this cheaply — measureTargetShare returns null and
 // the controller degrades to directive-only (no escalation).
-const SCRIPT_RANGES: Record<string, RegExp> = {
+// Exported 2026-07-10: lexical-lint.ts reuses these to score only
+// target-script tokens (an all-English reply used to read as 100% OOV).
+export const SCRIPT_RANGES: Record<string, RegExp> = {
+  th: /[฀-๿]/,
   ru: /[Ѐ-ӿ]/,
   uk: /[Ѐ-ӿ]/,
   bg: /[Ѐ-ӿ]/,
@@ -91,6 +94,30 @@ export function measureTargetShare(text: string, targetLangCode: string): number
   const total = target + native;
   if (total < MIN_LETTERS_FOR_MEASUREMENT) return null;
   return target / total;
+}
+
+/**
+ * Find the first letter in `text` that belongs to neither the target
+ * language's script, nor Latin (the native-English side), nor
+ * digits/punctuation. Returns that char, or null if the text is clean.
+ *
+ * 2026-07-10: added as the deterministic guard behind the STT node's
+ * transcription — the ASR prompt names both allowed languages, but the
+ * model emitted actual THAI SCRIPT for a Mandarin utterance anyway
+ * (live, zh session: "เรียนศิษย์บูชา"). A transcript in a script the
+ * session can't contain is a hallucination by definition — the caller
+ * rejects it and falls back to placeholder-only behavior, which is
+ * strictly safer than anchoring the conversation on hallucinated Thai.
+ */
+export function findForeignScriptChar(text: string, targetIso: string): string | null {
+  const target = SCRIPT_RANGES[(targetIso || '').toLowerCase()];
+  for (const ch of text) {
+    if (!/\p{L}/u.test(ch)) continue;                    // not a letter — fine
+    if (/[a-zA-ZÀ-ɏ]/.test(ch)) continue;      // Latin (+ extensions) — native side
+    if (target?.test(ch)) continue;                       // target script — fine
+    return ch;                                            // letter in some OTHER script
+  }
+  return null;
 }
 
 /** Overshoot margin beyond which the tail line escalates to a hard corrective. */

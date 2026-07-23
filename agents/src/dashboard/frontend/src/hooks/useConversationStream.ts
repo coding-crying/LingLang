@@ -75,6 +75,7 @@
  */
 
 import { useCallback, useEffect, useReducer } from 'react';
+import { apiEventSource } from '../lib/api';
 
 // ─── Types ───
 
@@ -342,7 +343,7 @@ export function useConversationStream() {
   const [state, dispatch] = useReducer(conversationReducer, initialConversationState);
 
   useEffect(() => {
-    const es = new EventSource('/api/events');
+    const es = apiEventSource('/api/events');
     es.onmessage = (e) => {
       try {
         const evt = JSON.parse(e.data) as RawStreamEvent;

@@ -32,9 +32,13 @@ SUMMARY is your memory — it comes back to you next cycle. Capture topics cover
 
 Session gap: minutes since last session → continue where they left off; hours → light review first; days → warm up with their struggling words before anything new.
 
+If a Curriculum line is present below, the learner is working through chosen material — steer your nudge to work it in (a scenario built from its topic, a phrase to elicit) rather than picking an unrelated angle. Engagement still outranks curriculum: if engagement is dropping, change the angle or set the material aside for this cycle — don't force it.
+
 NOTE[category]: one sentence — only when you learn something durable and NEW about this learner worth remembering tomorrow. Categories: preference, level, frustration, goal, engagement. Never restate a note already shown to you. Most cycles produce no note.
 
-PERSONA: field=value[, field=value...] — only on clear evidence the current teaching style is wrong for this learner, or to record how they like to be taught (you are the sole writer of that style read). Fields: tone (roast|warm|neutral|formal|drill-sergeant), correctionStyle (immediate|gentle|ignore|end-of-turn), teachingMode (conversational|drill|roleplay|storytelling), personaOverride (free text), extraInstructions (free text — the usual home of a 1-2 sentence style read, e.g. "Terse, likes being teased back, skip pleasantries"). Most cycles produce no persona line.` as const;
+PERSONA: field=value[, field=value...] — only on clear evidence the current teaching style is wrong for this learner, or to record how they like to be taught (you are the sole writer of that style read). Fields: tone (roast|warm|neutral|formal|drill-sergeant), correctionStyle (immediate|gentle|ignore|end-of-turn), teachingMode (conversational|drill|roleplay|storytelling), personaOverride (free text), extraInstructions (free text — the usual home of a 1-2 sentence style read, e.g. "Terse, likes being teased back, skip pleasantries"). Most cycles produce no persona line.
+
+CURRICULUM: skip|revisit — only when a Curriculum line is present AND you judge from engagement or the learner's own words that the current material should move on early or be revisited. This is a suggestion, not a command — it goes through the same coverage-tracked advancement the rest of the system uses. Most cycles produce no curriculum line.` as const;
 
 
 export interface PlannerContext {
@@ -72,6 +76,16 @@ export interface PlannerContext {
     /** Error-density trend over recent processor runs. */
     errorTrend: 'rising' | 'falling' | 'steady';
   };
+  /** Active curriculum chunk, if any — see learner-view.ts's activeChunk. */
+  curriculum?: {
+    sourceTitle: string;
+    chunkTitle: string;
+    ord: number;
+    totalChunks: number;
+    coverage: number;
+    summary: string;
+    nextChunk: { title: string; summary: string } | null;
+  } | null;
 }
 
 export function buildPlannerPrompt(ctx: PlannerContext): string {
@@ -87,10 +101,14 @@ export function buildPlannerPrompt(ctx: PlannerContext): string {
 
   const engagementLine = `Engagement: turn length ${ctx.engagement.turnLengthTrend}, pacing ${ctx.engagement.pacing}, errors ${ctx.engagement.errorTrend}.`;
 
+  const curriculumSection = ctx.curriculum
+    ? `\nCurriculum: "${ctx.curriculum.sourceTitle}" — chunk ${ctx.curriculum.ord + 1}/${ctx.curriculum.totalChunks} "${ctx.curriculum.chunkTitle}" (coverage ${Math.round(ctx.curriculum.coverage * 100)}%).\nChunk summary: ${ctx.curriculum.summary}${ctx.curriculum.nextChunk ? `\nNext chunk: "${ctx.curriculum.nextChunk.title}" — ${ctx.curriculum.nextChunk.summary}` : ''}\n`
+    : '';
+
   return `Reason: ${ctx.reason}
 Signals: ${signals}
 ${engagementLine}
-
+${curriculumSection}
 ${nudgeLine}
 
 DB state:

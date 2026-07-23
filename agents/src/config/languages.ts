@@ -26,6 +26,16 @@ export interface LanguageConfig {
   // Pedagogy
   pedagogy: {
     targetLanguageRatio: number    // 0.0-1.0 (0.7 = 70% target language)
+    /** Tone is phonemic (changes word meaning) — gates tone-specific
+     *  guidance in both the conversation agent's core prompt and the
+     *  processor's grading prompt (buildFullPrompt). */
+    tonal?: boolean
+    /** Extra per-language guidance injected into the conversation agent's
+     *  stable core prompt (base.ts), after the standard rules. Optional —
+     *  most languages need nothing here since teaching style differences
+     *  already live in the persona; this is for genuinely language-
+     *  specific mechanics (e.g. tone correction for Mandarin). */
+    specialInstructions?: string
   }
 
   // Prompts
@@ -202,6 +212,57 @@ export const LANGUAGES: Record<string, LanguageConfig> = {
 
     prompts: {
       greeting: 'أهلاً! Ready to learn?',
+    },
+  },
+
+  zh: {
+    code: 'zh',
+    name: 'Mandarin Chinese',
+    nativeName: '中文',
+    nativeLanguage: 'English',
+
+    stt: {
+      language: 'Chinese',
+    },
+
+    tts: {
+      // Fixed 2026-07-08: `omnivoiceVoice: 'auto'` was the root cause of
+      // two live complaints — a generic/wrong-sounding voice AND the voice
+      // audibly changing every sentence. Root-caused in omnivoice_server.py:
+      // the "auto" path calls the base model with NO reference audio at
+      // all (no ref_audio_prompt), so there's nothing anchoring speaker
+      // identity between calls — a zero-shot model with no reference has
+      // no fixed voice to be consistent WITH. Seeded a real reference clip
+      // — public-domain (LibriVox via Wikimedia Commons) recording of UDHR
+      // Article 1 in Mandarin, converted to 24kHz mono WAV, transcript
+      // verified against the official UN Chinese translation (traditional
+      // characters, matching what the recording reads) — same pattern as
+      // russian_will_chatterbox/portuguese_prompt_24k. Files:
+      // agents/../TTS/OmniVoice/voices/chinese_prompt_24k.{wav,txt}.
+      voice: 'Li Wei',
+      mossVoice: 'english_prompt',
+      // 2026-07-11: switched to chinese_moss_24k (MOSS-TTS's bundled native
+      // reference, 三国演义 opening line) after Will's ear-test preferred it
+      // over the LibriVox UDHR seed for Mandarin quality. Old seed files
+      // remain in voices/ if a revert is ever needed.
+      omnivoiceVoice: 'chinese_moss_24k',
+      omnivoiceLanguage: 'zh',
+      geminiVoice: 'Zephyr',
+      speed: 1.0,
+    },
+
+    // No cognates with English at all (unlike the Romance languages), and
+    // absolute beginners can't yet read pinyin fluently — lean on the
+    // native language more than pt/ar do early on.
+    pedagogy: {
+      targetLanguageRatio: 0.5,
+      tonal: true,
+      specialInstructions:
+        "Mandarin is tonal — the same syllable means different things depending on pitch (mā mother / má hemp / mǎ horse / mà scold). A learner can nail every consonant and vowel and still say the wrong word by getting the tone wrong. Listen for tone, not just segments: when a tone is off, correct it explicitly and model the right contour — don't let it slide as a minor accent issue. When you write pinyin, include tone marks (nǐ hǎo, not ni hao).",
+    },
+
+    prompts: {
+      greeting: '你好! Nǐ hǎo — that\'s hello. What do you already know?',
     },
   },
 }

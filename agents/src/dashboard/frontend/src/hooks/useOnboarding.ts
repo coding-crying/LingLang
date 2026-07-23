@@ -11,11 +11,20 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import { apiFetch } from '../lib/api';
 
+// Display names for languages actually implemented in
+// agents/src/config/languages.ts — LanguageSheet is the selectable list
+// and sources its options live from /api/languages/voices (the backend's
+// own config), but this map is still used here and in VoiceTab for a
+// short display label. Keep this in sync with languages.ts: listing a
+// language here that the backend doesn't support isn't itself harmful
+// (it's a fallback label, not a picker source) but was previously the
+// picker's own source and caused a silent connect-time crash for
+// unsupported codes — see LanguageSheet.tsx's comment.
 export const LANGUAGE_NAMES: Record<string, string> = {
-  ru: 'Russian', pt: 'Portuguese', es: 'Spanish', fr: 'French',
-  de: 'German', ar: 'Arabic', zh: 'Chinese', ja: 'Japanese',
-  ko: 'Korean', it: 'Italian', nl: 'Dutch', en: 'English',
+  en: 'English', ru: 'Russian', es: 'Spanish', fr: 'French',
+  pt: 'Portuguese', ar: 'Arabic', zh: 'Chinese',
 };
 
 export interface OnboardingResult {
@@ -32,6 +41,12 @@ export interface OnboardingResult {
    *  identical to VoiceRoom's onComplete/onSkipToVoice, which did the same
    *  `setNeedsOnboarding(false)` in both branches). */
   markComplete: () => void;
+  /** Re-run the /api/me + onboarding check. Used after switching target
+   *  language (LanguageSheet) so the gate re-evaluates onboarding status
+   *  for the new language — a language the user hasn't onboarded in yet
+   *  should show the onboarding gate again, same as it would on a fresh
+   *  login for that language. */
+  refresh: () => Promise<void>;
 }
 
 export function useOnboarding(): OnboardingResult {
@@ -40,27 +55,29 @@ export function useOnboarding(): OnboardingResult {
   const [userId, setUserId] = useState('');
   const [targetLang, setTargetLang] = useState('ru');
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const meRes = await fetch('/api/me');
-        if (!meRes.ok) { setChecked(true); return; }
-        const { user } = await meRes.json();
-        const uid = user?.id ?? '';
-        const lang = user?.targetLanguage ?? 'ru';
-        setUserId(uid);
-        setTargetLang(lang);
-        if (uid) {
-          const obRes = await fetch(`/api/users/${uid}/onboarding/${lang}`);
-          if (obRes.ok) {
-            const ob = await obRes.json();
-            setNeedsOnboarding(!ob.isComplete);
-          }
+  const load = useCallback(async () => {
+    try {
+      const meRes = await apiFetch('/api/me');
+      if (!meRes.ok) { setChecked(true); return; }
+      const { user } = await meRes.json();
+      const uid = user?.id ?? '';
+      const lang = user?.targetLanguage ?? 'ru';
+      setUserId(uid);
+      setTargetLang(lang);
+      if (uid) {
+        const obRes = await apiFetch(`/api/users/${uid}/onboarding/${lang}`);
+        if (obRes.ok) {
+          const ob = await obRes.json();
+          setNeedsOnboarding(!ob.isComplete);
         }
-      } catch { /* non-fatal */ }
-      setChecked(true);
-    })();
+      }
+    } catch { /* non-fatal */ }
+    setChecked(true);
   }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   const markComplete = useCallback(() => setNeedsOnboarding(false), []);
 
@@ -71,5 +88,6 @@ export function useOnboarding(): OnboardingResult {
     targetLang,
     languageName: LANGUAGE_NAMES[targetLang] ?? targetLang,
     markComplete,
+    refresh: load,
   };
 }

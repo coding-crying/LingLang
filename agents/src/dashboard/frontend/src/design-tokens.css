@@ -1,23 +1,26 @@
-/* Design tokens for the LingLang mobile UI, copied verbatim from the
-   Claude Design handoff prototype (LingLang.dc.html), project
-   23e53236-88e1-493d-b1ab-9cc0e1e189ba. Do not hand-tune these values —
-   if a color needs to change, change it in the source design first. */
+/* Design tokens for the LingLang mobile UI.
+   2026-07-17: swapped the old cream-plus-burnt-orange brand palette for
+   aliases onto the HeroUI theme (neutral gray plus blue) so the legacy
+   app.css rules that still read the ll- names match HeroUI components
+   instead of clashing with them. good/bad/new/teal kept as-is. */
+
+@import "tailwindcss";
+@import "@heroui/styles";
 
 :root,
 [data-theme="dark"] {
-  --bg: #141210;
-  --bg-radial: #1a1611;
-  --surface: #1c1812;
-  --surface2: #231e17;
-  --surface3: #191510;
-  --border: rgba(255, 240, 220, .08);
-  --border-soft: rgba(255, 240, 220, .05);
-  --text: #f1ece3;
-  --text-dim: #a39a8c;
-  --text-faint: #726a5f;
-  --accent: #e8934a;
-  --accent-soft: rgba(232, 147, 74, .12);
-  --accent-border: rgba(232, 147, 74, .32);
+  --bg: var(--background);
+  --bg-radial: var(--background-secondary);
+  --ll-surface: var(--surface);
+  --surface2: var(--surface-secondary);
+  --surface3: var(--surface-tertiary);
+  --ll-border: var(--border);
+  --border-soft: var(--separator);
+  --text: var(--foreground);
+  --text-dim: var(--muted);
+  --text-faint: color-mix(in oklab, var(--muted) 65%, transparent);
+  --ll-accent: var(--accent);
+  --accent-border: color-mix(in oklab, var(--accent) 32%, transparent);
   --good: #79b878;
   --good-soft: rgba(121, 184, 120, .1);
   --good-border: rgba(121, 184, 120, .24);
@@ -27,25 +30,24 @@
   --teal: #5fb8ad;
   --teal-soft: rgba(95, 184, 173, .1);
   --teal-border: rgba(95, 184, 173, .24);
-  --overlay: rgba(8, 6, 4, .62);
+  --ll-overlay: var(--backdrop);
   --shadow: 0 8px 26px rgba(0, 0, 0, .4);
-  --scrim: linear-gradient(to top, #141210 65%, transparent);
+  --scrim: linear-gradient(to top, var(--bg) 65%, transparent);
 }
 
 [data-theme="light"] {
-  --bg: #f4efe6;
-  --bg-radial: #fdfbf7;
-  --surface: #ffffff;
-  --surface2: #efe8db;
-  --surface3: #f7f2e9;
-  --border: rgba(35, 27, 18, .09);
-  --border-soft: rgba(35, 27, 18, .05);
-  --text: #231c14;
-  --text-dim: #736a5c;
-  --text-faint: #9a9082;
-  --accent: #c1702e;
-  --accent-soft: rgba(193, 112, 46, .1);
-  --accent-border: rgba(193, 112, 46, .3);
+  --bg: var(--background);
+  --bg-radial: var(--background-secondary);
+  --ll-surface: var(--surface);
+  --surface2: var(--surface-secondary);
+  --surface3: var(--surface-tertiary);
+  --ll-border: var(--border);
+  --border-soft: var(--separator);
+  --text: var(--foreground);
+  --text-dim: var(--muted);
+  --text-faint: color-mix(in oklab, var(--muted) 55%, transparent);
+  --ll-accent: var(--accent);
+  --accent-border: color-mix(in oklab, var(--accent) 30%, transparent);
   --good: #3d8a44;
   --good-soft: rgba(61, 138, 68, .08);
   --good-border: rgba(61, 138, 68, .22);
@@ -55,40 +57,7 @@
   --teal: #2c887d;
   --teal-soft: rgba(44, 136, 125, .08);
   --teal-border: rgba(44, 136, 125, .22);
-  --overlay: rgba(40, 32, 22, .32);
+  --ll-overlay: var(--backdrop);
   --shadow: 0 8px 22px rgba(40, 30, 20, .14);
-  --scrim: linear-gradient(to top, #f4efe6 65%, transparent);
-}
-
-/* Shared animation keyframes used across the app (PTT pulse rings,
-   typing-indicator dots, PTT bars, hands-free breathing orb, bottom
-   sheet slide-in, generic fade-in, recording-bubble shimmer). */
-@keyframes llPulse {
-  0% { transform: scale(1); opacity: .5; }
-  100% { transform: scale(1.75); opacity: 0; }
-}
-@keyframes llDot {
-  0%, 60%, 100% { opacity: .25; transform: translateY(0); }
-  30% { opacity: 1; transform: translateY(-3px); }
-}
-@keyframes llBar {
-  0%, 100% { transform: scaleY(.4); }
-  50% { transform: scaleY(1); }
-}
-@keyframes llBreathe {
-  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 var(--accent-soft); }
-  50% { transform: scale(1.05); box-shadow: 0 0 0 22px rgba(0, 0, 0, 0); }
-}
-@keyframes llSheet {
-  from { transform: translateY(28px); opacity: 0; }
-  to { transform: translateY(0); opacity: 1; }
-}
-@keyframes llFade {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-@keyframes llShimmer {
-  0% { opacity: .5; }
-  50% { opacity: 1; }
-  100% { opacity: .5; }
+  --scrim: linear-gradient(to top, var(--bg) 65%, transparent);
 }

@@ -2,14 +2,56 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>LingLang</title>
-  <link rel="stylesheet" href="/css/design-tokens.css" />
+  <meta name="theme-color" content="#0485f7" />
+  <meta name="description" content="LingLang — voice-first language tutor." />
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="LingLang" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <!-- 2026-06-25: removed /css/app.css — stale reference to a Vite template
        file that was never created. Returns 404 in production. -->
+  <!-- 2026-07-03: removed the /css/design-tokens.css link — that path never
+       existed in the repo (404). design-tokens.css now lives at
+       src/design-tokens.css and is imported from src/main.tsx so Vite
+       bundles it. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <!-- Golos Text's css2 embed automatically includes the Cyrillic subset
+       (via unicode-range @font-face blocks) alongside Latin — needed for
+       Russian target-language UI text. -->
+  <link
+    href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=Golos+Text:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap"
+    rel="stylesheet"
+  />
+  <!-- 2026-07-03: pre-hydration theme script (Task 2). Mirrors
+       AppState.tsx's resolveInitialTheme() priority (localStorage wins,
+       then prefers-color-scheme, else 'dark') so the CSS `data-theme`
+       attribute is set before first paint — avoids a flash of the wrong
+       theme for a first-time visitor whose resolved theme differs from
+       design-tokens.css's `:root` (dark) default. Keep in sync with
+       resolveInitialTheme() if that logic ever changes. -->
+  <script>
+    (function () {
+      try {
+        var stored = localStorage.getItem('linglang-theme');
+        var theme = stored === 'dark' || stored === 'light' ? stored : null;
+        if (!theme && window.matchMedia) {
+          if (window.matchMedia('(prefers-color-scheme: dark)').matches) theme = 'dark';
+          else if (window.matchMedia('(prefers-color-scheme: light)').matches) theme = 'light';
+        }
+        document.documentElement.dataset.theme = theme || 'dark';
+      } catch (e) {
+        document.documentElement.dataset.theme = 'dark';
+      }
+    })();
+  </script>
   <script type="module" crossorigin src="/assets/index.js"></script>
   <link rel="stylesheet" crossorigin href="/assets/index.css">
-</head>
+<link rel="manifest" href="/manifest.webmanifest"><script id="vite-plugin-pwa:register-sw" src="/registerSW.js"></script></head>
 <body>
   <div id="root"></div>
 </body>

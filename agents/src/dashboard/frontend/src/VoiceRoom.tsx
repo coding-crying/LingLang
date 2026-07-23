@@ -7,9 +7,30 @@ import {
   RoomAudioRenderer,
   ConnectionStateToast,
 } from '@livekit/components-react';
+import { useKrispNoiseFilter } from '@livekit/components-react/krisp';
+import { apiEventSource, apiFetch } from './lib/api';
 import '@livekit/components-styles';
 import './app.css';
 import OnboardingGate from './OnboardingGate';
+
+// Krisp AI noise suppression (the same tech Discord uses), served through
+// LiveKit Cloud. 2026-07-10: added after a live car session produced audio
+// the model badly mis-heard — the browser's built-in noiseSuppression
+// (already on via audio={true} defaults) only handles stationary hum, not
+// road noise. Client-side WASM: the agent simply receives cleaner audio,
+// no pipeline changes. Must render INSIDE <LiveKitRoom>. Fails soft: if
+// the plan doesn't include Krisp or the browser can't run it, we log and
+// continue with the browser's default suppression.
+function KrispFilter() {
+  const krisp = useKrispNoiseFilter();
+  useEffect(() => {
+    krisp.setNoiseFilterEnabled(true).catch((err: unknown) => {
+      console.warn('[Krisp] enable failed, continuing without AI noise suppression:', err);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return null;
+}
 
 const LANGUAGE_NAMES: Record<string, string> = {
   ru: 'Russian', pt: 'Portuguese', es: 'Spanish', fr: 'French',
@@ -40,6 +61,18 @@ interface SrsUpdate {
 
 interface ProcessorBubble {
   id: string;
+  /** The user's full transcript — INCLUDING native-language words.
+   *  2026-07-11: bubbles used to render lexeme chips only, and the
+   *  processor only tags target-language words — so a user's English
+   *  ("I don't know") produced zero chips and literally could not appear
+   *  in the chat. Bubbles are now born from user.transcript with the full
+   *  text; processor.analysis merges its chips in by turnSeq. */
+  text?: string;
+  turnSeq?: number | null;
+  /** Audio dump keys for this turn (2026-07-11) — playback of exactly what
+   *  the model heard, served via /api/audio-dumps/:key. Lets the user tell
+   *  a transcription error (model issue) from garbled capture (audio issue). */
+  audioIds?: string[];
   lexemes: LexemeChip[];
   srsUpdates: SrsUpdate[];
   ts: number;
@@ -98,11 +131,17 @@ function getChipClass(lex: LexemeChip, srsUpdates: SrsUpdate[]): string {
 // 2026-06-25: server picks the room based on the authenticated user, so
 // we don't send roomName from the client any more. The response includes
 // the room name for logging/debugging.
-async function fetchToken(): Promise<{ token: string; url: string; roomName: string }> {
-  const res = await fetch('/api/token', {
+// 2026-07-12: mode is a per-connect choice now ('local' = locally hosted
+// cascade, 'cloud' = Gemini Live) — each maps to its own room/job on the
+// backend (dashboard/server.ts's /api/token), so picking one never
+// disrupts a session already running in the other.
+type TutorMode = 'local' | 'cloud';
+
+async function fetchToken(mode: TutorMode): Promise<{ token: string; url: string; roomName: string; mode: TutorMode }> {
+  const res = await apiFetch('/api/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ mode }),
   });
   if (!res.ok) throw new Error(`Token error: ${(await res.json()).error}`);
   return res.json();
@@ -186,19 +225,50 @@ function useConversationStream() {
   const renderTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    const es = new EventSource('/api/events');
+    const es = apiEventSource('/api/events');
     es.onmessage = (e) => {
       try {
         const evt = JSON.parse(e.data);
         const { type, data } = evt;
 
-        if (type === 'processor.analysis' && data?.lexemes?.length > 0) {
+        if (type === 'user.transcript' && data?.text && data?.isFinal) {
+          // The user's bubble appears immediately with their full words —
+          // both languages — not only after (and only if) analysis tags
+          // target-language lexemes.
+          const turnSeq = typeof data.turnSeq === 'number' ? data.turnSeq : null;
           setProcessorBubbles((prev) => [...prev, {
             id: crypto.randomUUID(),
-            lexemes: data.lexemes,
-            srsUpdates: data.srsUpdates || [],
+            text: data.text,
+            turnSeq,
+            audioIds: Array.isArray(data.audioIds) ? data.audioIds : undefined,
+            lexemes: [],
+            srsUpdates: [],
             ts: evt.ts,
           }]);
+        } else if (type === 'processor.analysis' && data?.lexemes?.length > 0) {
+          setProcessorBubbles((prev) => {
+            const turnSeq = typeof data.turnSeq === 'number' ? data.turnSeq : null;
+            // Merge chips into the matching transcript bubble (by turnSeq,
+            // else the most recent chip-less bubble); append standalone only
+            // if no transcript bubble exists to attach to.
+            let idx = turnSeq !== null ? prev.findIndex((b) => b.turnSeq === turnSeq) : -1;
+            if (idx < 0) {
+              for (let i = prev.length - 1; i >= 0; i--) {
+                if (prev[i].lexemes.length === 0 && prev[i].text) { idx = i; break; }
+              }
+            }
+            if (idx < 0) {
+              return [...prev, {
+                id: crypto.randomUUID(),
+                lexemes: data.lexemes,
+                srsUpdates: data.srsUpdates || [],
+                ts: evt.ts,
+              }];
+            }
+            const next = prev.slice();
+            next[idx] = { ...next[idx], lexemes: data.lexemes, srsUpdates: data.srsUpdates || [] };
+            return next;
+          });
         } else if (type === 'llm.token') {
           // 2026-06-30: stream LLM tokens into the chat as they arrive,
           // BEFORE TTS finishes. The previous code waited for `agent.reply`
@@ -291,7 +361,7 @@ function useLogStream() {
   const [logs, setLogs] = useState<{ text: string; ts: number }[]>([]);
 
   useEffect(() => {
-    const es = new EventSource('/api/logs');
+    const es = apiEventSource('/api/logs');
     es.onmessage = (e) => {
       try {
         const line = JSON.parse(e.data);
@@ -325,7 +395,7 @@ function VocabularyPanel() {
     try {
       const params = new URLSearchParams({ sort });
       if (filterLang) params.set('lang', filterLang);
-      const res = await fetch(`/api/vocabulary?${params}`);
+      const res = await apiFetch(`/api/vocabulary?${params}`);
       if (res.ok) {
         const data = await res.json();
         setWords(data.words || []);
@@ -457,6 +527,16 @@ function ConversationView({
             <div key={proc.id} className="bubble bubble-user">
               <div className="bubble-speaker">👤</div>
               <div className="bubble-content bubble-content-user">
+                {proc.text && <div className="bubble-user-text">{proc.text}</div>}
+                {proc.audioIds?.map((aid) => (
+                  <audio
+                    key={aid}
+                    className="bubble-audio"
+                    controls
+                    preload="none"
+                    src={`/api/audio-dumps/${aid}`}
+                  />
+                ))}
                 <div className="chip-row">
                   {proc.lexemes.map((lex, i) => (
                     <span
@@ -542,6 +622,8 @@ export default function VoiceRoom({ onLogout }: { onLogout: () => void }) {
   const [token, setToken] = useState('');
   const [url, setUrl] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [mode, setMode] = useState<TutorMode>('local');
+  const [connecting, setConnecting] = useState<TutorMode | null>(null);
 
   // Onboarding state
   const [onboardingChecked, setOnboardingChecked] = useState(false);
@@ -553,7 +635,7 @@ export default function VoiceRoom({ onLogout }: { onLogout: () => void }) {
   useEffect(() => {
     (async () => {
       try {
-        const meRes = await fetch('/api/me');
+        const meRes = await apiFetch('/api/me');
         if (!meRes.ok) { setOnboardingChecked(true); return; }
         const { user } = await meRes.json();
         const uid = user?.id ?? '';
@@ -561,7 +643,7 @@ export default function VoiceRoom({ onLogout }: { onLogout: () => void }) {
         setUserId(uid);
         setTargetLang(lang);
         if (uid) {
-          const obRes = await fetch(`/api/users/${uid}/onboarding/${lang}`);
+          const obRes = await apiFetch(`/api/users/${uid}/onboarding/${lang}`);
           if (obRes.ok) {
             const ob = await obRes.json();
             setNeedsOnboarding(!ob.isComplete);
@@ -575,17 +657,23 @@ export default function VoiceRoom({ onLogout }: { onLogout: () => void }) {
   const { processorBubbles, agentBubbles, clear: clearConv } = useConversationStream();
   const { logs, clear: clearLogs } = useLogStream();
 
-  const connect = async () => {
+  const connect = async (chosenMode: TutorMode) => {
     setError(null);
+    setConnecting(chosenMode);
     // 2026-06-25: server determines room name per-user (`linglang-<userId>`).
+    // 2026-07-12: mode picks which room (`linglang-<userId>-local` or
+    // `-cloud`) and therefore which independent session/job you join.
     try {
-      const { token: t, url: u, roomName: rn } = await fetchToken();
+      const { token: t, url: u, roomName: rn, mode: confirmedMode } = await fetchToken(chosenMode);
       setToken(t);
       setUrl(u);
-      console.log(`[VoiceRoom] Connecting to room: ${rn}`);
+      setMode(confirmedMode);
+      console.log(`[VoiceRoom] Connecting to room: ${rn} (mode=${confirmedMode})`);
       setConnected(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setConnecting(null);
     }
   };
 
@@ -625,9 +713,24 @@ export default function VoiceRoom({ onLogout }: { onLogout: () => void }) {
             <div className="connect-screen">
               <div className="connect-icon">🎙️</div>
               <p>Start a voice session with your LingLang tutor</p>
-              <button className="btn-primary btn-lg" onClick={connect}>
-                Connect
-              </button>
+              <div className="mode-picker">
+                <button
+                  className="btn-primary btn-lg"
+                  onClick={() => connect('local')}
+                  disabled={connecting !== null}
+                  title="Locally hosted tutor — runs on our own GPU"
+                >
+                  {connecting === 'local' ? 'Connecting…' : '🖥️ Local'}
+                </button>
+                <button
+                  className="btn-primary btn-lg"
+                  onClick={() => connect('cloud')}
+                  disabled={connecting !== null}
+                  title="Cloud tutor (Gemini Live) — use when the local machine is busy"
+                >
+                  {connecting === 'cloud' ? 'Connecting…' : '☁️ Cloud'}
+                </button>
+              </div>
               {error && <div className="error-msg">{error}</div>}
             </div>
           ) : (
@@ -639,6 +742,7 @@ export default function VoiceRoom({ onLogout }: { onLogout: () => void }) {
                 audio={true}
                 onDisconnected={disconnect}
               >
+                <KrispFilter />
                 <AgentVisualizer />
                 <RoomAudioRenderer />
                 <ConnectionStateToast />

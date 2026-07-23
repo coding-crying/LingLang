@@ -103,7 +103,17 @@ class OmniVoiceChunkedStream extends tts.ChunkedStream {
         body.language = this.#opts.language;
       }
 
-      const response = await fetch(`${this.#opts.baseURL}/v1/audio/speech`, {
+      // 2026-07-12: /v1/audio/speech generates the FULL utterance before
+      // returning any bytes — confirmed live via metrics, ttfb was ~94-99%
+      // of total duration on every single request (i.e. "streaming" in
+      // name only; the whole point of a byte-stream reader loop below was
+      // being wasted on a response that arrives all at once). The server
+      // has a real sentence-chunked streaming endpoint
+      // (/v1/audio/speech/stream — same TTSRequest body shape, always
+      // returns PCM) that yields each sentence's audio as it's generated
+      // instead of waiting for the whole reply. Switching to it is what
+      // actually uses the streaming reader loop already written here.
+      const response = await fetch(`${this.#opts.baseURL}/v1/audio/speech/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),

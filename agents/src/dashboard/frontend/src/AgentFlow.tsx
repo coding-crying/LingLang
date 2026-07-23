@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { apiEventSource } from './lib/api';
 
 // ─── Types for Agent Flow ───
 
@@ -64,7 +65,7 @@ function useAgentFlow() {
       }, 50);
     };
 
-    const es = new EventSource('/api/events');
+    const es = apiEventSource('/api/events');
     es.onmessage = (e) => {
       try {
         const evt = JSON.parse(e.data);

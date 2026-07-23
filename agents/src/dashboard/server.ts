@@ -11,18 +11,24 @@ import * as dotenv from 'dotenv';
 dotenv.config({ path: '.env.local' });
 
 import express from 'express';
+import cors from 'cors';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AccessToken, AgentDispatchClient } from 'livekit-server-sdk';
+import { AccessToken, AgentDispatchClient, RoomServiceClient } from 'livekit-server-sdk';
+import { JobStatus } from '@livekit/protocol';
 import { watchEvents, type AgentEvent } from '../lib/trace.js';
 import { db } from '../db/index.js';
-import { users, lexemes, userVocabulary, activeGoals, units, userPersona, userLanguageLevels, reviewLogs, sessionSummaries } from '../db/schema.js';
-import { eq, desc, sql, gte, lte, and } from 'drizzle-orm';
+import { users, lexemes, userVocabulary, activeGoals, units, userPersona, userLanguageLevels, reviewLogs, sessionSummaries, contentSources, contentChunks, userContentProgress } from '../db/schema.js';
+import { eq, desc, sql, gte, lte, and, or, isNull, inArray } from 'drizzle-orm';
 import { execFileSync } from 'child_process';
 import { authenticateByUsername, createUser, hashPassword } from '../lib/user-auth.js';
 import { writePersona } from '../lib/persona.js';
+import { placeUserInSource, listSourceChunks, activateChunk } from '../lib/curriculum.js';
+import { readLearnerView } from '../lib/learner-view.js';
+import { ingestSource, type ContentKind } from '../lib/ingest.js';
+import { getGoogleKeyPlan, setGoogleApiKey, clearGoogleApiKey } from '../lib/google-budget.js';
 import { LANGUAGES } from '../config/languages.js';
 import { computeStreak, bucketVocabHistory } from './stats.js';
 
@@ -33,6 +39,41 @@ const app = express();
 const PORT = parseInt(process.env.DASHBOARD_PORT || '3001');
 
 app.use(express.json());
+
+// Cross-origin readiness (Capacitor wraps the same web build in an iOS/
+// Android shell served from `capacitor://localhost`/`https://localhost`, a
+// different origin than this server — always cross-origin, dev or prod).
+// Both knobs below default OFF, so today's same-origin dev/PWA deployment
+// is byte-for-byte unchanged unless explicitly opted in when a Capacitor
+// build actually exists to test against.
+//   CORS_ALLOWED_ORIGINS: comma-separated allow-list (e.g.
+//     "capacitor://localhost,https://localhost,https://app.linglang.app").
+//     Credentialed CORS can't use "*", hence an explicit list.
+//   CROSS_ORIGIN_COOKIES=true: flips the session cookie from
+//     SameSite=Strict to SameSite=None; Secure — required for the cookie to
+//     ride along on a cross-origin request at all. Secure means it only
+//     works over HTTPS (or the mobile WebView's equivalent), so don't set
+//     this for plain-HTTP local dev.
+const corsAllowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+if (corsAllowedOrigins.length > 0) {
+  app.use(cors({
+    origin: corsAllowedOrigins,
+    credentials: true,
+  }));
+  console.log(`[CORS] Allowing credentialed cross-origin requests from: ${corsAllowedOrigins.join(', ')}`);
+}
+
+const crossOriginCookies = process.env.CROSS_ORIGIN_COOKIES === 'true';
+function sessionCookieAttrs(req: express.Request): string {
+  const behindProxy = req.headers['x-forwarded-proto'] === 'https';
+  const secure = crossOriginCookies || behindProxy || process.env.NODE_ENV === 'production';
+  const sameSite = crossOriginCookies ? 'None' : 'Strict';
+  return `SameSite=${sameSite}${secure ? '; Secure' : ''}`;
+}
 
 // Security headers
 app.use((_req, res, next) => {
@@ -82,7 +123,16 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
   if (!session || (Date.now() - session.createdAt) > SESSION_MAX_AGE_MS) {
     // Expired or missing session
     if (sessionId) sessions.delete(sessionId);
-    if (req.path.startsWith('/api/')) {
+    // req.path, not req.originalUrl: when this runs as the blanket
+    // `app.use('/api', requireAuth)` mount, Express strips the mount
+    // prefix from req.path (it'd be '/content-sources', not
+    // '/api/content-sources') — that check always failed for any route
+    // relying on the blanket rather than its own inline `requireAuth`,
+    // silently sending an HTML redirect instead of 401 JSON to every
+    // fetch() caller whose session had expired. originalUrl is never
+    // rewritten by mount-path stripping, so it's the one that's actually
+    // stable regardless of which requireAuth call site is running.
+    if (req.originalUrl.startsWith('/api/')) {
       res.status(401).json({ error: 'Authentication required' });
     } else {
       res.redirect('/login');
@@ -129,8 +179,19 @@ declare global {
 // AUTH ROUTES (unprotected)
 // ============================================================================
 
+// 2026-07-16: serve the same React SPA bundle as /dashboard, not the old
+// static login.html — the SPA's own App.tsx (useAuth()) already renders a
+// LoginScreen/SignupScreen when unauthenticated, now rebuilt on HeroUI.
+// Keeping this as a distinct route (rather than merging into '/') means
+// requireAuth's existing non-API redirect target ('/login') still works
+// unchanged for expired/missing sessions.
 app.get('/login', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'login.html'));
+  const appPath = path.join(__dirname, 'public', 'app', 'index.html');
+  if (fs.existsSync(appPath)) {
+    res.sendFile(appPath);
+  } else {
+    res.sendFile(path.join(__dirname, 'public', 'login.html'));
+  }
 });
 
 app.post('/api/login', async (req, res) => {
@@ -164,11 +225,7 @@ app.post('/api/login', async (req, res) => {
     sessions.set(sessionId, { userId: user.id, createdAt: Date.now() });
 
     // Set cookie — always use Secure when behind nginx (x-forwarded-proto)
-    const behindProxy = req.headers['x-forwarded-proto'] === 'https';
-    const secureFlag = behindProxy || process.env.NODE_ENV === 'production' ? '; Secure' : '';
-    res.setHeader('Set-Cookie', [
-      `ll_session=${sessionId}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400${secureFlag}`
-    ].join('; '));
+    res.setHeader('Set-Cookie', `ll_session=${sessionId}; HttpOnly; ${sessionCookieAttrs(req)}; Path=/; Max-Age=86400`);
 
     console.log(`[Auth] User "${user.username}" (${user.id}) logged in from ${clientIp}`);
     res.json({ success: true, user: { id: user.id, username: user.username } });
@@ -217,23 +274,132 @@ app.post('/api/register', requireAuth, async (req, res) => {
   }
 });
 
+// 2026-07-16: public self-serve signup — /api/register above stays
+// admin-gated for manual/scripted account creation, this is the new path
+// for users creating their own accounts. Reuses the login rate limiter
+// (same IP-keyed map/window) since it's the same abuse surface. On
+// success, logs the new user straight in (same cookie logic as
+// /api/login) so signup lands directly in the app, no separate login step.
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+app.post('/api/signup', async (req, res) => {
+  try {
+    const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+
+    if (!checkLoginRateLimit(clientIp)) {
+      return res.status(429).json({ error: 'Too many attempts. Try again in 15 minutes.' });
+    }
+
+    const { username, email, password, targetLanguage, nativeLanguage } = req.body ?? {};
+    if (!username || !email || !password) {
+      return res.status(400).json({ error: 'username, email, and password are required' });
+    }
+    if (typeof password !== 'string' || password.length < 4) {
+      return res.status(400).json({ error: 'password must be at least 4 characters' });
+    }
+    if (typeof email !== 'string' || !EMAIL_PATTERN.test(email)) {
+      recordLoginAttempt(clientIp, false);
+      return res.status(400).json({ error: 'a valid email is required' });
+    }
+
+    const idBase = String(username).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    const id = idBase || `user_${Date.now().toString(36)}`;
+
+    const existingId = await db.query.users.findFirst({ where: eq(users.id, id) });
+    if (existingId) {
+      recordLoginAttempt(clientIp, false);
+      return res.status(409).json({ error: `Username "${username}" is already taken` });
+    }
+    const existingEmail = await db.query.users.findFirst({
+      where: sql`LOWER(${users.email}) = LOWER(${email})`,
+    });
+    if (existingEmail) {
+      recordLoginAttempt(clientIp, false);
+      return res.status(409).json({ error: 'An account with this email already exists' });
+    }
+
+    await createUser({
+      id,
+      username: String(username),
+      email: String(email),
+      password: String(password),
+      targetLanguage: targetLanguage || 'ru',
+      nativeLanguage: nativeLanguage || 'en',
+    });
+
+    recordLoginAttempt(clientIp, true);
+
+    // Log the new user straight in — same session/cookie mechanics as /api/login.
+    const sessionId = crypto.randomUUID();
+    sessions.set(sessionId, { userId: id, createdAt: Date.now() });
+    res.setHeader('Set-Cookie', `ll_session=${sessionId}; HttpOnly; ${sessionCookieAttrs(req)}; Path=/; Max-Age=86400`);
+
+    console.log(`[Auth] New self-serve signup: "${username}" (${id}) from ${clientIp}`);
+    res.json({ success: true, user: { id, username } });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
 app.post('/api/logout', (req, res) => {
   const cookies = parseCookies(req.headers.cookie);
   const sessionId = cookies['ll_session'];
   if (sessionId) sessions.delete(sessionId);
 
-  res.setHeader('Set-Cookie', 'll_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');
+  res.setHeader('Set-Cookie', `ll_session=; HttpOnly; ${sessionCookieAttrs(req)}; Path=/; Max-Age=0`);
   res.json({ success: true });
+});
+
+// Serve per-turn mic audio dumps for in-chat playback (2026-07-11) — lets
+// the user hear exactly what the model heard, to tell transcription errors
+// (model issue) apart from garbled capture (audio issue). Files are written
+// by GemmaAudioSTT when LINGLANG_DUMP_AUDIO is set; named <iso-ts>_<key>.wav.
+// Key is the audio id from user.transcript events. Strict [A-Za-z0-9] key
+// match — no path traversal surface.
+const AUDIO_DUMP_DIR = process.env.LINGLANG_DUMP_AUDIO && process.env.LINGLANG_DUMP_AUDIO !== '1'
+  ? process.env.LINGLANG_DUMP_AUDIO
+  : '/tmp/linglang-audio-dumps';
+// Admin-only: dumped WAVs carry no per-user ownership metadata (audioId is
+// generated in GemmaAudioSTT with no user context available at that scope),
+// so any authenticated user could otherwise enumerate/brute-force another
+// user's key (Date.now().toString(36) + counter — not cryptographically
+// random) and listen to their raw voice recordings. This is a maintainer
+// debugging tool (see DUMP_AUDIO's doc comment), not a user-facing feature,
+// so restricting it to admin closes that cross-user exposure without
+// needing to thread userId through the STT layer for an opt-in debug flag.
+app.get('/api/audio-dumps/:key', requireAuth, (req, res) => {
+  if (req.user!.id !== 'will') return res.status(403).json({ error: 'Forbidden' });
+  const key = String(req.params.key || '');
+  if (!/^[A-Za-z0-9]{4,32}$/.test(key)) {
+    return res.status(400).json({ error: 'bad key' });
+  }
+  let match: string | undefined;
+  try {
+    match = fs.readdirSync(AUDIO_DUMP_DIR).find((f) => f.endsWith(`_${key}.wav`));
+  } catch {
+    return res.status(404).json({ error: 'dumps unavailable' });
+  }
+  if (!match) return res.status(404).json({ error: 'not found' });
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+  res.sendFile(path.join(AUDIO_DUMP_DIR, match));
 });
 
 app.get('/api/me', requireAuth, async (req, res) => {
   try {
     const userRow = await db.query.users.findFirst({ where: eq(users.id, req.user!.id) });
+    const googlePlan = await getGoogleKeyPlan(req.user!.id);
     res.json({
       user: {
         id: req.user!.id,
+        username: userRow?.username ?? req.user!.id,
+        email: userRow?.email ?? null,
         targetLanguage: userRow?.targetLanguage ?? 'ru',
         nativeLanguage: userRow?.nativeLanguage ?? 'en',
+        proficiencyLevel: userRow?.proficiencyLevel ?? 'beginner',
+        createdAt: userRow?.createdAt ?? null,
+        hasGoogleApiKey: !!userRow?.googleApiKeyEncrypted,
+        googleUsageMicros: googlePlan.useShared ? googlePlan.spentMicros : 0,
+        googleUsageLimitMicros: googlePlan.useShared ? googlePlan.limitMicros : null,
       },
     });
   } catch {
@@ -332,8 +498,19 @@ app.get('/api/users/:userId', requireAuth, async (req, res) => {
       }
     }
 
+    // Strip sensitive columns — passwordHash and the encrypted Google key
+    // were previously returned verbatim in `user`. Surface Google-key
+    // status/usage as plain booleans/numbers instead of the raw column.
+    const { passwordHash: _passwordHash, googleApiKeyEncrypted, googleUsageMicros, googleUsageLimitMicros, ...safeUser } = user;
+    const googlePlan = await getGoogleKeyPlan(userId as string);
+
     res.json({
-      user,
+      user: {
+        ...safeUser,
+        hasGoogleApiKey: !!googleApiKeyEncrypted,
+        googleUsageMicros: googlePlan.useShared ? googlePlan.spentMicros : 0,
+        googleUsageLimitMicros: googlePlan.useShared ? googlePlan.limitMicros : null,
+      },
       progress,
       goals,
       stats: {
@@ -343,6 +520,39 @@ app.get('/api/users/:userId', requireAuth, async (req, res) => {
         completedGoals: goals.filter(g => g.status === 'completed').length,
       }
     });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// Save/clear a user's own Google API key (BYO — unlimited use of Cloud
+// mode, no draw against the shared-key budget). Never echoed back; GET
+// /api/users/:userId only exposes a hasGoogleApiKey boolean.
+app.put('/api/users/:userId/google-key', requireAuth, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (req.user!.id !== userId && req.user!.id !== 'will') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const { apiKey } = req.body ?? {};
+    if (typeof apiKey !== 'string' || apiKey.trim().length < 10) {
+      return res.status(400).json({ error: 'apiKey looks too short to be valid' });
+    }
+    await setGoogleApiKey(userId as string, apiKey.trim());
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.delete('/api/users/:userId/google-key', requireAuth, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (req.user!.id !== userId && req.user!.id !== 'will') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    await clearGoogleApiKey(userId as string);
+    res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -458,6 +668,200 @@ app.get('/api/users/:userId/vocab-history', requireAuth, async (req, res) => {
   }
 });
 
+// ============================================================================
+// LIBRARY (content-source catalog: Spotify-style tiles the user picks from)
+// ============================================================================
+
+// List sources visible to this user (their own uploads + shared/global,
+// ownerId === null), annotated with per-user progress so the frontend can
+// show a progress ring and highlight the currently-active tile.
+app.get('/api/content-sources', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user!.id;
+    const sources = await db.query.contentSources.findMany({
+      where: or(eq(contentSources.ownerId, userId), isNull(contentSources.ownerId)),
+      orderBy: [desc(contentSources.createdAt)],
+    });
+    if (sources.length === 0) return res.json([]);
+
+    const sourceIds = sources.map((s) => s.id);
+    const chunkRows = await db.select({ id: contentChunks.id, sourceId: contentChunks.sourceId })
+      .from(contentChunks)
+      .where(inArray(contentChunks.sourceId, sourceIds));
+
+    const chunkIdsBySource = new Map<string, string[]>();
+    for (const c of chunkRows) {
+      chunkIdsBySource.set(c.sourceId, [...(chunkIdsBySource.get(c.sourceId) ?? []), c.id]);
+    }
+
+    const allChunkIds = chunkRows.map((c) => c.id);
+    const progressRows = allChunkIds.length
+      ? await db.query.userContentProgress.findMany({
+        where: and(eq(userContentProgress.userId, userId), inArray(userContentProgress.chunkId, allChunkIds)),
+      })
+      : [];
+    const progressByChunk = new Map(progressRows.map((p) => [p.chunkId, p]));
+
+    const result = sources.map((s) => {
+      const chunkIds = chunkIdsBySource.get(s.id) ?? [];
+      let done = 0;
+      let isActive = false;
+      let started = false;
+      for (const id of chunkIds) {
+        const p = progressByChunk.get(id);
+        if (!p) continue;
+        started = true;
+        if (p.status === 'done') done++;
+        if (p.status === 'active') isActive = true;
+      }
+      return {
+        id: s.id,
+        language: s.language,
+        kind: s.kind,
+        title: s.title,
+        status: s.status,
+        ingestError: s.status === 'failed' ? s.ingestError : undefined,
+        chunkCount: chunkIds.length,
+        progress: chunkIds.length > 0 ? done / chunkIds.length : 0,
+        isActive,
+        started,
+      };
+    });
+
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// Create a new content source and kick off ingestion in the background.
+// Responds as soon as the row exists so the frontend can poll
+// GET /api/content-sources for status transitions (uploaded -> ingesting ->
+// ready|failed) instead of blocking the request on the multi-minute
+// distillation pipeline.
+const INGEST_KINDS: ContentKind[] = ['text', 'textbook', 'audio', 'youtube', 'movie'];
+
+app.post('/api/content-sources', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user!.id;
+    const { kind, language, title, ref } = req.body ?? {};
+
+    if (!INGEST_KINDS.includes(kind)) {
+      return res.status(400).json({ error: `kind must be one of: ${INGEST_KINDS.join(', ')}` });
+    }
+    if (!LANGUAGES[language]) {
+      return res.status(400).json({ error: `Unknown language "${language}"` });
+    }
+    if (!title?.trim() || !ref?.trim()) {
+      return res.status(400).json({ error: 'title and ref are required' });
+    }
+
+    const sourceId = `src-${crypto.randomUUID().slice(0, 8)}`;
+
+    // Fire-and-forget: ingestSource manages its own status transitions
+    // (inserts as 'ingesting', flips to 'ready'/'failed' on completion) and
+    // already logs + records ingestError on failure, so nothing further to
+    // await or handle here.
+    void ingestSource({
+      sourceId,
+      ownerId: userId,
+      language,
+      kind: kind as ContentKind,
+      title: title.trim(),
+      ref: ref.trim(),
+    }).catch((err) => {
+      console.error(`[Ingest] Background ingestion failed for ${sourceId}:`, err);
+    });
+
+    res.status(202).json({ id: sourceId, status: 'ingesting' });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// Select a source as the user's active reading — wraps placeUserInSource,
+// which is idempotent (onConflictDoNothing per chunk) and auto-places the
+// learner at the right chunk based on vocab coverage.
+app.post('/api/content-sources/:sourceId/select', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user!.id;
+    const { sourceId } = req.params;
+    const source = await db.query.contentSources.findFirst({ where: eq(contentSources.id, sourceId) });
+    if (!source) return res.status(404).json({ error: 'Not found' });
+    if (source.ownerId && source.ownerId !== userId) return res.status(403).json({ error: 'Forbidden' });
+    if (source.status !== 'ready') return res.status(400).json({ error: `Source is ${source.status}, not ready` });
+
+    await placeUserInSource(userId, sourceId);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// Every chunk in a source, ordered, each with the learner's live vocab
+// coverage and progress status — powers the chunk-browser sheet's "jump to
+// any part" list. Coverage is computed for every chunk regardless of
+// whether it's been visited (see curriculum.ts's listSourceChunks), so a
+// learner can tell which parts they likely already know before jumping.
+app.get('/api/content-sources/:sourceId/chunks', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user!.id;
+    const { sourceId } = req.params as { sourceId: string };
+    const source = await db.query.contentSources.findFirst({ where: eq(contentSources.id, sourceId) });
+    if (!source) return res.status(404).json({ error: 'Not found' });
+    if (source.ownerId && source.ownerId !== userId) return res.status(403).json({ error: 'Forbidden' });
+
+    const chunks = await listSourceChunks(userId, sourceId);
+    res.json(chunks);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// Explicit "go here" — jump straight to one chunk, bypassing coverage-based
+// auto-placement and the one-step-at-a-time skipActiveChunk path. Same
+// trust-the-user precedent as the voice "let's move on" trigger.
+app.post('/api/content-sources/:sourceId/chunks/:chunkId/activate', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user!.id;
+    const { sourceId, chunkId } = req.params as { sourceId: string; chunkId: string };
+    const source = await db.query.contentSources.findFirst({ where: eq(contentSources.id, sourceId) });
+    if (!source) return res.status(404).json({ error: 'Not found' });
+    if (source.ownerId && source.ownerId !== userId) return res.status(403).json({ error: 'Forbidden' });
+
+    const chunk = await db.query.contentChunks.findFirst({ where: eq(contentChunks.id, chunkId) });
+    if (!chunk || chunk.sourceId !== sourceId) return res.status(404).json({ error: 'Chunk not found in this source' });
+
+    const result = await activateChunk(userId, chunkId);
+    if (!result) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true, coverage: result.coverage });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// The learner's current active content_chunks row (or null), for the Voice
+// tab's curriculum pill/sheet — same data readLearnerView already computes
+// for the prompt builder, so the UI can never show something out of sync
+// with what the planner is actually using this turn.
+app.get('/api/users/:userId/active-content', requireAuth, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (req.user!.id !== userId && req.user!.id !== 'will') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const { language } = req.query;
+    if (!language || typeof language !== 'string') {
+      return res.status(400).json({ error: 'language is required' });
+    }
+
+    const view = await readLearnerView(userId as string, language);
+    res.json(view.activeChunk);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
 // Get curriculum units
 app.get('/api/curriculum', async (req, res) => {
   try {
@@ -482,8 +886,14 @@ app.get('/api/curriculum', async (req, res) => {
 });
 
 // Database stats
+// Admin-gated: runtime_state.json is a single shared file written by
+// whichever job process last touched it (not per-user), so it can leak
+// another user's live session debug state (transcript trace, nudges,
+// subagent chats) to anyone who happens to hit this while a session is
+// active. Also unused by the current frontend.
 app.get('/api/runtime', async (req, res) => {
   try {
+    if (req.user!.id !== 'will') return res.status(403).json({ error: 'Forbidden' });
     // runtime_state.json is written by the LiveKit agent at agents/runtime_state.json
     const runtimePath = path.join(__dirname, '..', '..', 'runtime_state.json');
     if (!fs.existsSync(runtimePath)) {
@@ -531,8 +941,13 @@ app.get('/api/stats', async (req, res) => {
 // DATABASE EXPLORER
 // ============================================================================
 
+// Debug-only DB explorer — not used by the current frontend. Admin-gated:
+// `table=users` returns every row including passwordHash, and the other
+// tables return every user's data unfiltered, so this must never be
+// reachable by a non-admin account.
 app.get('/api/db/:table', async (req, res) => {
   try {
+    if (req.user!.id !== 'will') return res.status(403).json({ error: 'Forbidden' });
     const { table } = req.params;
     let data;
     if (table === 'users') data = await db.query.users.findMany({ limit: 100 });
@@ -646,8 +1061,8 @@ app.get('/api/services', async (req, res) => {
 
   const [stt, tts, ollama] = await Promise.all([
     checkService('STT (Qwen3-ASR)', 'http://localhost:8001/health'),
-    checkService('TTS (MossTTS)', 'http://localhost:8880/v1/models'),
-    checkService('LLM (Ollama)', 'http://localhost:11434/api/tags'),
+    checkService('TTS (OmniVoice)', 'http://localhost:8882/health'),
+    checkService('LLM (vLLM Gemma 4 QAT)', 'http://localhost:8093/v1/models'),
   ]);
 
   // Ollama: which models are currently loaded in VRAM
@@ -695,12 +1110,72 @@ app.get('/api/services', async (req, res) => {
   res.json({ stt, tts, ollama, ollamaModels, gpu });
 });
 
+// Is the dashboard's "Local" mode option actually reachable right now?
+// Used by the frontend to grey out Local and auto-switch to Cloud when the
+// local GPU stack is stopped (e.g. for a heavy local job like the Audex
+// requant, or `gpu-state enter exclusive`/`off`) — see ProfileTab.tsx and
+// AppState.tsx's health poll.
+//
+// 2026-07-16: "Local" was pointed at the Audex-30B-A3B cascaded s2s server
+// (see resolveServiceMode() in tutor-event-driven.ts) for an A/B test.
+// Reverted 2026-07-21 back to local-gemma-audio — a live session produced
+// 0-token LLM responses and empty STT transcripts despite Audex's
+// /api/status reporting healthy (see project-linglang-audex-ab memory).
+// This constant MUST be kept in sync with resolveServiceMode()'s mapping.
+// Routed through a function (rather than a plain const) so TS's control-flow
+// literal-narrowing doesn't flag the `=== 'audex'` check below as an
+// always-false comparison every time this gets flipped by hand.
+function currentLocalModeBackend(): 'audex' | 'local-gemma-audio' {
+  return 'local-gemma-audio';
+}
+const LOCAL_MODE_BACKEND = currentLocalModeBackend();
+
+async function probeUrl(url: string, timeoutMs = 2500): Promise<boolean> {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    const res = await fetch(url, { signal: ctrl.signal });
+    clearTimeout(timer);
+    // Reachable at all (even a 4xx/5xx from the right process) is enough
+    // signal that the server is up — this is a liveness probe, not a full
+    // capability check. Audex's /api/status specifically is known to stay
+    // "healthy"-looking after an internal engine crash (see
+    // project-linglang-audex-ab memory) — this only catches "the process
+    // isn't listening at all," which is the common case (stopped for GPU
+    // exclusivity), not every possible degraded state.
+    return res.status < 500;
+  } catch {
+    return false;
+  }
+}
+
+app.get('/api/local-health', requireAuth, async (req, res) => {
+  const checkedAt = Date.now();
+  if (LOCAL_MODE_BACKEND === 'audex') {
+    const audexUrl = process.env.AUDEX_URL || 'http://127.0.0.1:7860';
+    const online = await probeUrl(`${audexUrl}/api/status`);
+    return res.json({ online, backend: 'audex', checkedAt });
+  }
+
+  // local-gemma-audio: require the whole trio up, same ports /api/services checks.
+  const [sttUp, ttsUp, llmUp] = await Promise.all([
+    probeUrl('http://localhost:8001/health'),
+    probeUrl('http://localhost:8882/health'),
+    probeUrl('http://localhost:8093/v1/models'),
+  ]);
+  res.json({ online: sttUp && ttsUp && llmUp, backend: 'local-gemma-audio', checkedAt });
+});
+
 // ============================================================================
 // AGENT ACTIVITY (Supervisor / Processor DB writes)
 // ============================================================================
 
+// Admin-gated: returns recent progress/goals across ALL users unfiltered
+// (a system-wide activity feed for debugging the Supervisor/Processor, not
+// a per-user feature) and is unused by the current frontend.
 app.get('/api/activity', async (req, res) => {
   try {
+    if (req.user!.id !== 'will') return res.status(403).json({ error: 'Forbidden' });
     const since = new Date(Date.now() - 86400000); // last 24 hours
 
     const recentProgress = await db.query.userVocabulary.findMany({
@@ -747,7 +1222,7 @@ function redactSecrets(line: string): string {
   return result;
 }
 
-app.get('/api/logs', (req, res) => {
+app.get('/api/logs', requireAuth, (req, res) => {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -803,7 +1278,7 @@ app.get('/api/logs', (req, res) => {
 // LIVE AGENT EVENTS (SSE) — structured events from the tutor agent
 // ============================================================================
 
-app.get('/api/events', (req, res) => {
+app.get('/api/events', requireAuth, (req, res) => {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -811,8 +1286,31 @@ app.get('/api/events', (req, res) => {
     'X-Content-Type-Options': 'nosniff',
   });
 
+  // This endpoint used to be unauthenticated AND unfiltered: watchEvents()
+  // always replays the last 32KB of the shared /tmp/tutor-events.jsonl file
+  // to every new subscriber (see trace.ts), and that file is written to by
+  // every user's job-proc. Before this fix, loading the dashboard replayed
+  // whichever conversation turns — anyone's, from any recent session — last
+  // landed in that 32KB window. That's both the "old chat history won't go
+  // away" bug and a real cross-user data leak. `setSessionId` (called on
+  // room join) stamps every event's sessionId as `room-${ctx.room.name}-
+  // <userId>`, so we can filter to just this user's own room.
+  // 2026-07-13: the 2026-07-12 mode-toggle change put `-local`/`-cloud` into
+  // the room name (`linglang-<userId>-<mode>`), which shifted the actual
+  // sessionId to `room-linglang-<userId>-<mode>-<userId>`. This filter still
+  // matched the pre-toggle `room-linglang-<userId>-<userId>` shape, so it
+  // never matched anything post-toggle and the chat log silently stayed
+  // empty for every user. Match any mode segment now — 2026-07-16: hardcoding
+  // `(local|cloud)` here meant adding the 'audex' mode would hit this exact
+  // same silent-empty-chat-log bug again, so match a generic `[^-]+` mode
+  // segment instead of enumerating modes twice (VALID_MODES above, and here).
+  const userId = req.user!.id;
+  const escapedUserId = userId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const ownSessionPattern = new RegExp(`^room-linglang-${escapedUserId}-[^-]+-${escapedUserId}$`);
+
   const cleanup = watchEvents(
     (event: AgentEvent) => {
+      if (!ownSessionPattern.test(event.sessionId)) return;
       try {
         res.write(`data: ${JSON.stringify(event)}\n\n`);
       } catch { /* client disconnected */ }
@@ -829,14 +1327,37 @@ app.get('/api/events', (req, res) => {
 // LIVEKIT TOKEN
 // ============================================================================
 
+// 2026-07-12: local vs cloud is a per-session choice now, not a fixed
+// deployment-wide env var — the demo site wants to offer both ("try the
+// locally hosted tutor" / "try the cloud one when the local machine is
+// busy") as two distinct connect options, not a single always-on mode.
+// 'local' maps to the local-gemma-audio cascade (QAT + Qwen3-ASR + local
+// LLM + OmniVoice); 'cloud' maps to Gemini Live (gemini mode). Client
+// picks explicitly; SERVICE_MODE in .env.local is now only the fallback
+// for dispatches that don't specify a mode (e.g. manual CLI testing).
+// 2026-07-16: 'local' is currently pointed at the experimental Audex-30B-A3B
+// cascaded s2s server for an A/B test (see resolveServiceMode in
+// tutor-event-driven.ts) — no new mode value here, since there's only ever
+// one "local" option in the UI.
+type TutorMode = 'local' | 'cloud';
+const VALID_MODES: TutorMode[] = ['local', 'cloud'];
+
 app.post('/api/token', requireAuth, async (req, res) => {
   try {
+    const requestedMode = req.body?.mode;
+    const mode: TutorMode = VALID_MODES.includes(requestedMode) ? requestedMode : 'local';
+
     // 2026-06-25: per-user deterministic room. Each user gets their own
     // room `linglang-<userId>`. The room name is NOT client-controlled
     // any more — that was the source of cross-user room collisions when
     // the dashboard generated random room names.
+    // 2026-07-12: mode is now part of the room name (`-local`/`-cloud`
+    // suffix) so switching modes doesn't fight over one shared room/job —
+    // each mode gets its own independent session, job, and history. A
+    // user can have both open in separate tabs without collision, and
+    // switching modes never requires tearing down a live job first.
     const userId = req.user!.id;
-    const roomName = `linglang-${userId}`;
+    const roomName = `linglang-${userId}-${mode}`;
 
     const apiKey = process.env.LIVEKIT_API_KEY;
     const apiSecret = process.env.LIVEKIT_API_SECRET;
@@ -856,19 +1377,100 @@ app.post('/api/token', requireAuth, async (req, res) => {
 
     const token = await at.toJwt();
 
-    // Create agent dispatch so LiveKit Cloud assigns our worker to this room
+    // Create agent dispatch so LiveKit Cloud assigns our worker to this room.
+    // createDispatch() does NOT dedupe — calling it twice for the same room
+    // (e.g. a double-tap on "Connect" before the button re-renders, or a
+    // retried /api/token call) spins up a second, fully independent agent
+    // job-proc in the same room: two STT/LLM/TTS pipelines both listening to
+    // the same mic track and both talking back, which is what "multiple
+    // audio files playing at once" and duplicated/diverging chat history
+    // turned out to be (confirmed via job-proc logs: two "received job
+    // request" events 3s apart, both processing identical VAD/transcript
+    // events for room linglang-will). Check for an existing dispatch first.
     const livekitUrl = process.env.LIVEKIT_URL || '';
     const dispatchClient = new AgentDispatchClient(livekitUrl.replace('wss://', 'https://'), apiKey, apiSecret);
+    const agentName = process.env.LINGLANG_AGENT_NAME ?? 'linglang-tutor';
+
+    // listDispatch() throws for a room that doesn't exist yet (the normal
+    // case for a first-time connect — the room is only created once the
+    // participant actually joins). That's not "an existing dispatch check
+    // failed", it's "there's nothing to find yet" — treat it as such and
+    // still proceed to createDispatch below. Regression note: an earlier
+    // version of this fix put both calls in one try/catch, so a nonexistent
+    // room's listDispatch error skipped createDispatch entirely and no
+    // agent ever joined new rooms — confirmed live via zero "received job
+    // request" log lines across multiple real connect attempts.
+    let alreadyDispatched = false;
     try {
-      const agentName = process.env.LINGLANG_AGENT_NAME ?? 'linglang-tutor';
-      await dispatchClient.createDispatch(roomName, agentName);
-      console.log(`[Dashboard] Agent dispatch for user ${userId} in room ${roomName}`);
-    } catch (dispatchErr: any) {
-      // Non-fatal — room may already have a dispatch, or agent is auto-dispatched
-      console.warn(`[Dashboard] Agent dispatch warning: ${dispatchErr.message || dispatchErr}`);
+      const existing = await dispatchClient.listDispatch(roomName);
+      // 2026-07-12: a dispatch record persists on the LiveKit server even
+      // after its job proc has died (crashed, OOM-killed, manually killed
+      // while debugging) — state.status goes to JS_FAILED but the dispatch
+      // itself is never cleaned up. Matching on agentName alone treated a
+      // dead dispatch as "an agent is already here" forever, permanently
+      // blocking new dispatches for that room until someone manually
+      // deleted the stale record via the API. Only count a dispatch as
+      // live if it has no jobs yet (still pending assignment) or at least
+      // one job that isn't JS_FAILED/JS_SUCCESS (i.e. actually running).
+      alreadyDispatched = existing.some(d => {
+        if (d.agentName !== agentName) return false;
+        const jobs = d.state?.jobs ?? [];
+        if (jobs.length === 0) return true;
+        return jobs.some(j => j.state?.status !== JobStatus.JS_FAILED && j.state?.status !== JobStatus.JS_SUCCESS);
+      });
+    } catch {
+      // Room doesn't exist yet (or listDispatch failed for some other
+      // reason) — fall through and dispatch as normal.
     }
 
-    res.json({ token, url: process.env.LIVEKIT_URL, roomName });
+    if (alreadyDispatched) {
+      console.log(`[Dashboard] Agent already dispatched for user ${userId} in room ${roomName}, skipping`);
+    } else {
+      // 2026-07-18: Local mode is capped to ONE concurrent session across
+      // ALL users while Audex is still being fixed — the local server is
+      // sized/tuned for a single user (see project-linglang-audex-ab
+      // memory: max_num_seqs patched down to 8, "single-user smoke-test
+      // box, not a multi-tenant server"), so a second concurrent Local
+      // user wouldn't fail cleanly, just silently degrade both sessions.
+      // Only checked for a NEW dispatch — reconnecting to your OWN
+      // already-running local session is never blocked by this.
+      if (mode === 'local') {
+        const roomService = new RoomServiceClient(livekitUrl.replace('wss://', 'https://'), apiKey, apiSecret);
+        const activeRooms = await roomService.listRooms().catch(() => []);
+        const otherLocalRoom = activeRooms.find((r) => r.name.endsWith('-local') && r.name !== roomName);
+        if (otherLocalRoom) {
+          return res.status(423).json({
+            error: 'Local mode is in use by another session right now (it only supports one at a time). Try Cloud mode, or wait a bit.',
+          });
+        }
+      }
+
+      // Only checked for NEW dispatches (a fresh Google API session about
+      // to be spun up) — reconnecting to an already-running job never
+      // incurs new cost here, so budget exhaustion mid-session doesn't cut
+      // an existing conversation off.
+      let googleApiKey: string | undefined;
+      if (mode === 'cloud') {
+        const plan = await getGoogleKeyPlan(userId);
+        if (plan.useShared && plan.overBudget) {
+          return res.status(402).json({
+            error: 'Shared Google API budget for this period is used up. Add your own free Gemini API key in Profile to keep using Cloud mode, or switch to Local mode.',
+          });
+        }
+        googleApiKey = plan.apiKey ?? undefined;
+      }
+
+      try {
+        await dispatchClient.createDispatch(roomName, agentName, {
+          metadata: JSON.stringify({ mode, userId, googleApiKey, billGoogleUsage: mode === 'cloud' && !googleApiKey }),
+        });
+        console.log(`[Dashboard] Agent dispatch for user ${userId} in room ${roomName} (mode=${mode})`);
+      } catch (dispatchErr: any) {
+        console.warn(`[Dashboard] Agent dispatch warning: ${dispatchErr.message || dispatchErr}`);
+      }
+    }
+
+    res.json({ token, url: process.env.LIVEKIT_URL, roomName, mode });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -910,6 +1512,13 @@ app.get('/debug', (_req, res) => {
 // (the app itself does auth via API calls)
 app.use('/assets', express.static(path.join(__dirname, 'public', 'app', 'assets')));
 
+// Root-level PWA files (manifest.webmanifest, sw.js, icons) — vite-plugin-pwa
+// emits these into the build outDir root (public/app/), but nothing served
+// them at the root URL path they're referenced at (e.g. GET /sw.js) before
+// this. Falls through (no matching file) for /login, /api/*, /dashboard —
+// those stay handled by their own routes.
+app.use(express.static(path.join(__dirname, 'public', 'app'), { index: false }));
+
 // ============================================================================
 // VOCABULARY BY LANGUAGE
 // ============================================================================
@@ -917,7 +1526,13 @@ app.use('/assets', express.static(path.join(__dirname, 'public', 'app', 'assets'
 app.get('/api/vocabulary/:language', async (req, res) => {
   try {
     const { language } = req.params;
-    const { userId = 'test-user', limit = '200' } = req.query;
+    const { userId = req.user!.id, limit = '200' } = req.query;
+
+    // Ownership check — same pattern as the /api/users/:userId/* routes:
+    // only the account itself or admin ('will') may pass a different userId.
+    if (req.user!.id !== userId && req.user!.id !== 'will') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
 
     const user = await db.query.users.findFirst({
       where: eq(users.id, userId as string)
@@ -1092,26 +1707,38 @@ app.get('/api/users/:userId/onboarding/:lang', requireAuth, async (req, res) => 
  */
 app.post('/api/users/:userId/onboarding/:lang', requireAuth, async (req, res) => {
   try {
-    const { userId, lang } = req.params;
+    const userId = String(req.params.userId || '');
+    const lang = String(req.params.lang || '');
     const { priorStudy, studyDetails, goals, goalDetails, selfRatedLevel } = req.body;
 
-    if (!priorStudy || !goals || !selfRatedLevel) {
-      return res.status(400).json({ error: 'priorStudy, goals, and selfRatedLevel are required' });
+    if (!userId || !lang || !selfRatedLevel) {
+      return res.status(400).json({ error: 'userId, lang, and selfRatedLevel are required' });
     }
 
-    const { saveOnboardingData, commitOnboardingLevel, selfRatedLevelToAnchor } = await import('../lib/onboarding.js');
+    const { saveOnboardingData, completeOnboarding, selfRatedLevelToAnchor } = await import('../lib/onboarding.js');
+    const { setLevel } = await import('../lib/level-inference.js');
 
+    // 2026-07-16: the multi-question form (prior study / goals) was cut —
+    // the tutor already extracts these conversationally (onboarding_signal
+    // supervisor triggers). priorStudy/goals are now optional inputs kept
+    // only for the admin/API surface; left null when the UI doesn't send
+    // them rather than a placeholder string (buildPromptLines only injects
+    // a line when the field is truthy, so null just omits it cleanly).
     await saveOnboardingData(userId, lang, {
-      priorStudy,
+      priorStudy: priorStudy || null,
       studyDetails: studyDetails || null,
-      goals: Array.isArray(goals) ? goals : [goals],
+      goals: goals ? (Array.isArray(goals) ? goals : [goals]) : null,
       goalDetails: goalDetails || null,
       selfRatedLevel,
     });
 
+    // A UI-form self-report is the user directly telling us their level —
+    // philosophically the same as a manual dashboard pin (spec §6.5), not
+    // the LLM's vibes-based guess from a 5-8 turn voice chat (which no
+    // longer sets a level override at all — see completeOnboarding).
     const { level, confidence } = selfRatedLevelToAnchor(selfRatedLevel);
-    const evidence = `UI onboarding: ${priorStudy}${studyDetails ? ` (${studyDetails})` : ''}, self-rated ${selfRatedLevel}`;
-    await commitOnboardingLevel(userId, lang, level, confidence, evidence, 'ui');
+    await setLevel(userId, lang, level, 'manual', confidence);
+    await completeOnboarding(userId, lang, 'ui');
 
     res.json({ ok: true, userId, lang, anchoredLevel: level, confidence });
   } catch (error) {

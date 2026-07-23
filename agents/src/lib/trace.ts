@@ -152,27 +152,19 @@ export function watchEvents(
   onEvent: (event: AgentEvent) => void,
   onError?: (error: Error) => void,
 ): () => void {
+  // Start at the current end of file — do NOT replay a backlog. This used
+  // to send the last 32KB of events (everyone's, across every user's past
+  // sessions — this file is shared and unpartitioned) to every new SSE
+  // subscriber, which is why old conversation turns (sometimes another
+  // user's) reappeared on every dashboard page load regardless of who was
+  // actually connected. A subscriber should only ever see events from the
+  // moment it starts watching onward.
   let position = 0;
-
-  // Start near end of file
   try {
-    const stats = fs.statSync(EVENT_FILE);
-    position = Math.max(0, stats.size - 32768);
+    position = fs.statSync(EVENT_FILE).size;
   } catch {
     // File doesn't exist yet
   }
-
-  // Send initial tail
-  try {
-    const events = readRecentEvents(32768);
-    for (const ev of events) {
-      onEvent(ev);
-    }
-    // Set position to end of file after sending initial events
-    try {
-      position = fs.statSync(EVENT_FILE).size;
-    } catch { /* ignore */ }
-  } catch { /* ignore */ }
 
   // Poll for new events (simple, works across processes)
   const interval = setInterval(() => {
