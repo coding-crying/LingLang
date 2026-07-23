@@ -79,6 +79,36 @@ export async function createUser(opts: CreateUserOpts): Promise<void> {
   });
 }
 
+export interface ClaimUserOpts {
+  id: string;
+  username: string;
+  password: string;
+  email?: string;
+}
+
+// Attaches login credentials to an existing, still-unclaimed row (the
+// anonymous demo flow's `demo-<uuid>` users) instead of inserting a new
+// row. This is deliberately an UPDATE, not an INSERT: the row's id never
+// changes, so every FK'd table (vocab, session summaries, memory graph,
+// etc.) that already points at it stays attached with zero migration.
+// Caller is responsible for verifying the row is actually unclaimed
+// (username IS NULL) before calling this — done via the WHERE clause below
+// as a race-safe guard, but the caller should still 404 on zero rows
+// affected rather than assume success.
+export async function claimUser(opts: ClaimUserOpts): Promise<boolean> {
+  const passwordHash = await hashPassword(opts.password);
+  const result = await db
+    .update(users)
+    .set({
+      username: opts.username,
+      passwordHash,
+      email: opts.email || null,
+    })
+    .where(sql`${users.id} = ${opts.id} AND ${users.username} IS NULL`)
+    .returning({ id: users.id });
+  return result.length > 0;
+}
+
 export async function authenticateByUsername(
   username: string,
   password: string,

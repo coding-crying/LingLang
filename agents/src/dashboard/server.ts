@@ -23,7 +23,7 @@ import { db } from '../db/index.js';
 import { users, lexemes, userVocabulary, activeGoals, units, userPersona, userLanguageLevels, reviewLogs, sessionSummaries, contentSources, contentChunks, userContentProgress } from '../db/schema.js';
 import { eq, desc, sql, gte, lte, and, or, isNull, inArray } from 'drizzle-orm';
 import { execFileSync } from 'child_process';
-import { authenticateByUsername, createUser, hashPassword } from '../lib/user-auth.js';
+import { authenticateByUsername, createUser, claimUser, hashPassword } from '../lib/user-auth.js';
 import { writePersona } from '../lib/persona.js';
 import { placeUserInSource, listSourceChunks, activateChunk } from '../lib/curriculum.js';
 import { readLearnerView } from '../lib/learner-view.js';
@@ -336,6 +336,86 @@ app.post('/api/signup', async (req, res) => {
 
     console.log(`[Auth] New self-serve signup: "${username}" (${id}) from ${clientIp}`);
     res.json({ success: true, user: { id, username } });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// 2026-07-23: claim-on-signup for the anonymous marketing-site demo (see
+// ROADMAP.md in the LingLang.app repo). A demo session runs through the
+// tutor agent with a synthetic `demo-<uuid>` users.id and no credentials —
+// this attaches a real username/email/password to that SAME row instead of
+// minting a new one, so all the FK'd data from the demo session (vocab,
+// session summaries, memory graph) stays attached with no migration step.
+// Deliberately its own endpoint rather than an optional field on
+// /api/signup: the semantics are different enough (UPDATE vs INSERT, and
+// the demoUserId must actually look like one of ours) to want a distinct,
+// narrowly-scoped code path rather than branching logic inside signup.
+app.post('/api/demo/claim', async (req, res) => {
+  try {
+    const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+
+    if (!checkLoginRateLimit(clientIp)) {
+      return res.status(429).json({ error: 'Too many attempts. Try again in 15 minutes.' });
+    }
+
+    const { demoUserId, username, email, password } = req.body ?? {};
+    if (!demoUserId || typeof demoUserId !== 'string' || !demoUserId.startsWith('demo-')) {
+      return res.status(400).json({ error: 'Invalid demo session' });
+    }
+    if (!username || !email || !password) {
+      return res.status(400).json({ error: 'username, email, and password are required' });
+    }
+    if (typeof password !== 'string' || password.length < 4) {
+      return res.status(400).json({ error: 'password must be at least 4 characters' });
+    }
+    if (typeof email !== 'string' || !EMAIL_PATTERN.test(email)) {
+      recordLoginAttempt(clientIp, false);
+      return res.status(400).json({ error: 'a valid email is required' });
+    }
+
+    const demoRow = await db.query.users.findFirst({ where: eq(users.id, demoUserId) });
+    if (!demoRow) {
+      recordLoginAttempt(clientIp, false);
+      return res.status(404).json({ error: 'Demo session not found or already expired' });
+    }
+    if (demoRow.username) {
+      recordLoginAttempt(clientIp, false);
+      return res.status(409).json({ error: 'This demo session has already been claimed' });
+    }
+
+    const usernameNorm = String(username).toLowerCase().trim();
+    const existingUsername = await db.query.users.findFirst({
+      where: sql`LOWER(${users.username}) = ${usernameNorm}`,
+    });
+    if (existingUsername) {
+      recordLoginAttempt(clientIp, false);
+      return res.status(409).json({ error: `Username "${username}" is already taken` });
+    }
+    const existingEmail = await db.query.users.findFirst({
+      where: sql`LOWER(${users.email}) = LOWER(${email})`,
+    });
+    if (existingEmail) {
+      recordLoginAttempt(clientIp, false);
+      return res.status(409).json({ error: 'An account with this email already exists' });
+    }
+
+    const claimed = await claimUser({ id: demoUserId, username: String(username), email: String(email), password: String(password) });
+    if (!claimed) {
+      // Lost a race with another claim attempt on the same row between the
+      // check above and the update's WHERE guard.
+      recordLoginAttempt(clientIp, false);
+      return res.status(409).json({ error: 'This demo session has already been claimed' });
+    }
+
+    recordLoginAttempt(clientIp, true);
+
+    const sessionId = crypto.randomUUID();
+    sessions.set(sessionId, { userId: demoUserId, createdAt: Date.now() });
+    res.setHeader('Set-Cookie', `ll_session=${sessionId}; HttpOnly; ${sessionCookieAttrs(req)}; Path=/; Max-Age=86400`);
+
+    console.log(`[Auth] Demo session claimed: "${username}" (${demoUserId}) from ${clientIp}`);
+    res.json({ success: true, user: { id: demoUserId, username } });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
