@@ -1799,6 +1799,39 @@ export default defineAgent({
       }
     }
 
+    // === DEMO MODE: graceful session wrap-up before the hard token expiry ===
+    // Only active when DEMO_SESSION_TIME_LIMIT_MS is set (the anonymous demo
+    // worker only, see ROADMAP.md in the marketing-site repo — production
+    // never sets this, so this block is a no-op there). Nudges the model to
+    // wrap up warmly ~30s before the LiveKit token's hard TTL, then force-
+    // disconnects a few seconds before the token actually expires so the
+    // session ends cleanly instead of getting cut off mid-sentence.
+    const demoLimitMs = process.env.DEMO_SESSION_TIME_LIMIT_MS
+      ? parseInt(process.env.DEMO_SESSION_TIME_LIMIT_MS, 10)
+      : null;
+    if (demoLimitMs && demoLimitMs > 0) {
+      const wrapUpAt = Math.max(0, demoLimitMs - 30_000);
+      const hardStopAt = Math.max(0, demoLimitMs - 5_000);
+      setTimeout(() => {
+        trace('demo.wrapup.nudge');
+        (async () => {
+          try {
+            await session.generateReply({
+              userInput:
+                '[system: this demo session is almost out of time — wrap up the conversation warmly in this reply, thank them, and mention they can create a free account to keep going and save their progress]',
+            });
+          } catch (err: any) {
+            console.warn('[Tutor-ED] demo wrap-up generateReply failed:', err?.message);
+          }
+        })();
+      }, wrapUpAt);
+      setTimeout(() => {
+        trace('demo.session.hardstop');
+        console.log('[Tutor-ED] Demo session time limit reached, disconnecting');
+        ctx.room.disconnect();
+      }, hardStopAt);
+    }
+
     // === LLM TOKEN STREAM → DASHBOARD ===
     // Subscribe to the LLM event bus and forward each text delta to the
     // dashboard as `llm.token` events. The dashboard's SSE endpoint relays
