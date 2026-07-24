@@ -1553,6 +1553,34 @@ export default defineAgent({
           response: (result.rawResponse || '').substring(0, 4000),
         });
 
+        // === DEMO MODE: mirror the processor's tracked words onto the
+        // LiveKit data channel so the marketing site's live memory graph
+        // can render them in real time. Only active when
+        // DEMO_SESSION_TIME_LIMIT_MS is set (this worktree only — see
+        // ROADMAP.md in the marketing-site repo; production's own copy of
+        // this file is untouched). Deliberately reads the same
+        // decoratedLexemes the dashboard's SSE stream already gets, just
+        // delivered over the room's own (already-public) data channel
+        // instead of the admin dashboard's not-yet-exposed SSE endpoint.
+        if (process.env.DEMO_SESSION_TIME_LIMIT_MS && decoratedLexemes.length > 0) {
+          try {
+            const payload = JSON.stringify({
+              type: 'linglang.demo.words',
+              lexemes: decoratedLexemes.map((lex: any) => ({
+                lemma: lex.lemma,
+                translation: lex.translation,
+                tracking: lex.tracking,
+              })),
+            });
+            ctx.room.localParticipant?.publishData(new TextEncoder().encode(payload), {
+              reliable: true,
+              topic: 'linglang-demo-events',
+            });
+          } catch (err: any) {
+            console.warn('[Tutor-ED] demo word-event publish failed:', err?.message);
+          }
+        }
+
         if (result.errors.length) {
           console.warn('[Processor] Errors:', result.errors);
         }
