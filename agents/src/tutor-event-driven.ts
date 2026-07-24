@@ -1815,16 +1815,17 @@ export default defineAgent({
     // the LLM reads as "the user has just connected." Plain "..." was
     // too vague and the LLM defaulted to a generic "Olá, tudo bem?"
     console.log('[Tutor-ED] Sending initial greeting (LLM-generated)...');
-    if (!isGemini) {
-      trace('session.generateReply.opening');
-      try {
-        await session.generateReply({
-          userInput: '[system: the user has just connected — greet them and pick up where you left off]',
-        });
-      } catch (err: any) {
-        console.warn('[Tutor-ED] generateReply failed, falling back to hardcoded greeting:', err?.message);
-        session.say(langConfig.prompts.greeting);
-      }
+    trace('session.generateReply.opening');
+    try {
+      await session.generateReply({
+        userInput: '[system: the user has just connected — greet them and pick up where you left off]',
+      });
+    } catch (err: any) {
+      console.warn('[Tutor-ED] generateReply failed:', err?.message);
+      // session.say() isn't supported on the RealtimeModel (Gemini) path —
+      // only fall back to it for the STT/TTS pipeline modes, where a silent
+      // demo session is otherwise unrecoverable.
+      if (!isGemini) session.say(langConfig.prompts.greeting);
     }
 
     // === DEMO MODE: graceful session wrap-up before the hard token expiry ===
