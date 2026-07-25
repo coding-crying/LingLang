@@ -13,6 +13,7 @@
 import * as openai from '@livekit/agents-plugin-openai';
 import * as silero from '@livekit/agents-plugin-silero';
 import { Modality } from '@google/genai';
+import { llm as llmRuntime } from '@livekit/agents';
 import type { llm, stt, tts } from '@livekit/agents';
 
 import { createTTS } from '../tts/fallback.js';
@@ -28,6 +29,24 @@ async function getGoogleRealtime() {
   if (!_googleRealtime) {
     const googlePlugin = await import('@livekit/agents-plugin-google');
     _googleRealtime = googlePlugin.beta.realtime;
+
+    // Workaround: agents-plugin-google's RealtimeModel ends up extending a
+    // *different* loaded copy of @livekit/agents' RealtimeModel class than
+    // the one @livekit/agents' own AgentActivity checks against internally
+    // (`this.llm instanceof RealtimeModel` in agent_activity.js) — confirmed
+    // via a standalone repro, same lockfile-resolved package version on
+    // disk, just two distinct class objects at runtime (likely a tsx/dynamic
+    // -import module-instance split, root cause not fully pinned down).
+    // Without this, that instanceof check silently fails, AgentActivity
+    // never opens a realtime session, and the whole gemini-mode demo hangs
+    // in total silence with no error anywhere. Re-parenting the plugin
+    // class's prototype chain (not per-instance) fixes `instanceof` for
+    // every instance while leaving all of the plugin's own methods intact.
+    Object.setPrototypeOf(
+      Object.getPrototypeOf(_googleRealtime.RealtimeModel.prototype),
+      llmRuntime.RealtimeModel.prototype,
+    );
+    Object.setPrototypeOf(_googleRealtime.RealtimeModel, llmRuntime.RealtimeModel);
   }
   return _googleRealtime;
 }

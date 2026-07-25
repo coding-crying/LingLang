@@ -763,7 +763,7 @@ export class RealtimeSession extends llm.RealtimeSession {
               }
             },
             onclose: (event: CloseEvent) => {
-              this.#logger.debug('Gemini Live session closed:', event.code, event.reason);
+              this.#logger.debug(`Gemini Live session closed: code=${event.code} reason=${event.reason}`);
               this.markCurrentGenerationDone();
             },
           },
@@ -883,8 +883,13 @@ export class RealtimeSession extends llm.RealtimeSession {
           case 'realtime_input':
             const { mediaChunks, activityStart, activityEnd } = msg.value;
             if (mediaChunks) {
+              // `{ media: ... }` serializes to the deprecated `mediaChunks`
+              // wire field, which Gemini's server now hard-rejects (closes
+              // the session with code 1007). `{ audio: ... }` takes the same
+              // { mimeType, data } shape and serializes to the field the
+              // server actually still accepts.
               for (const mediaChunk of mediaChunks) {
-                await session.sendRealtimeInput({ media: mediaChunk });
+                await session.sendRealtimeInput({ audio: mediaChunk });
               }
             }
             if (activityStart) await session.sendRealtimeInput({ activityStart });
