@@ -359,6 +359,27 @@ export default defineAgent({
     console.log(`[Tutor-ED] Starting session for user: ${userId}`);
     setSessionId(`room-${ctx.room.name}-${userId}`);
 
+    // === TARGET LANGUAGE FROM TOKEN METADATA ===
+    // Anonymous demo visitors pick their language on the landing page
+    // before connecting; the token endpoint validates that choice and
+    // bakes it into the participant metadata. Without this, every demo
+    // session fell back to DEFAULT_TARGET_LANGUAGE (Russian) and the tutor
+    // opened in a language the visitor never asked for.
+    // Same signal the wrap-up/hard-stop timers below key off: this worker
+    // is running the anonymous landing-page demo, not a real account.
+    const isDemoSession = !!process.env.DEMO_SESSION_TIME_LIMIT_MS;
+
+    let requestedLang: string | null = null;
+    try {
+      const meta = participant.metadata ? JSON.parse(participant.metadata) : null;
+      if (meta && typeof meta.lang === 'string' && LANGUAGES[meta.lang]) {
+        requestedLang = meta.lang;
+        console.log(`[Tutor-ED] Target language from participant metadata: ${requestedLang}`);
+      }
+    } catch (err: any) {
+      console.warn('[Tutor-ED] Could not parse participant metadata:', err?.message);
+    }
+
     // === USER SETUP ===
     let user = await db.query.users.findFirst({
       where: eq(users.id, userId)
@@ -368,7 +389,7 @@ export default defineAgent({
       console.log(`[Tutor-ED] Creating new user: ${userId}`);
       await db.insert(users).values({
         id: userId,
-        targetLanguage: process.env.DEFAULT_TARGET_LANGUAGE || 'ru',
+        targetLanguage: requestedLang || process.env.DEFAULT_TARGET_LANGUAGE || 'ru',
         nativeLanguage: process.env.DEFAULT_NATIVE_LANGUAGE || 'en',
         proficiencyLevel: 'beginner',
       });
@@ -382,7 +403,12 @@ export default defineAgent({
     // === LANGUAGE CONFIG ===
     // Mutable: the processor can detect a language change request and
     // update this mid-session, then refresh instructions.
-    let targetLang = user.targetLanguage;
+    let targetLang = requestedLang || user.targetLanguage;
+    if (requestedLang && user.targetLanguage !== requestedLang) {
+      // Keep the DB in step with the pick — everything downstream (context
+      // manager, level inference, onboarding state) keys off it.
+      await db.update(users).set({ targetLanguage: requestedLang }).where(eq(users.id, userId));
+    }
     let langConfig = getLanguageConfig(targetLang);
     console.log(`[Tutor-ED] Language: ${langConfig.name}`);
     emitEvent('session.start', { userId, language: langConfig.name, mode: process.env.SERVICE_MODE || 'local' });
@@ -606,6 +632,7 @@ export default defineAgent({
           targetLanguage: langConfig.name,
           nativeName: langConfig.nativeName,
           nativeLanguage: usersNativeLanguage,
+          demo: isDemoSession,
           existingData: onboardingState ? {
             priorStudy: onboardingState.priorStudy ?? undefined,
             studyDetails: onboardingState.studyDetails ?? undefined,
@@ -1818,7 +1845,12 @@ export default defineAgent({
     trace('session.generateReply.opening');
     try {
       await session.generateReply({
-        userInput: '[system: the user has just connected — greet them and pick up where you left off]',
+        userInput: isDemoSession
+          // A demo visitor has no history to pick up from, and every second
+          // before they speak is a second of a 3-minute session gone — so
+          // the opening turn has to hand them something to say out loud.
+          ? `[system: a brand-new visitor just connected and chose ${langConfig.name} — run your opening turn now: greet them in ${langConfig.name}, translate it, invite them to say it back, and ask if they've studied it before. Keep it under 15 seconds.]`
+          : '[system: the user has just connected — greet them and pick up where you left off]',
       });
     } catch (err: any) {
       console.warn('[Tutor-ED] generateReply failed:', err?.message);

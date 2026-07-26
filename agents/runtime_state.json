@@ -1,508 +1,311 @@
 {
-  "userId": "will",
-  "targetLang": "pt",
-  "lastPlanAt": 1783074316340,
+  "userId": "demo-3a180561-9f6a-492d-8576-2804fa598095",
+  "targetLang": "ru",
+  "lastPlanAt": 1784942070667,
   "pendingSignals": [],
-  "supervisorNudge": "Since the user is a beginner who likes a playful/challenging tone, start with a warm but slightly cheeky greeting in European Portuguese. Ask them what they already know or what they want to talk about first to gauge their baseline.",
+  "supervisorNudge": "Focus on the \"two years\" comment to correct the usage of \"год\" (years) and \"много\" (many) through a natural follow-up. Ask if they spent a lot of time studying or if it was just a few classes to prompt a comparison.",
   "lastProcessorRun": {
-    "at": 1783074383371,
+    "at": 1784942049806,
     "batch": [
-      "[audio key=amr4sg6gx2 dur=3.01s]"
+      "Не знаю. Потом э-э Fuck, I forgot how to say because. Can you tell me how to say because? Э-э because я изучаю в университете очень многие года, э-э вот 2 года."
     ],
-    "analysisLexemeCount": 0,
-    "srsUpdateCount": 0,
+    "analysisLexemeCount": 13,
+    "srsUpdateCount": 12,
     "errors": [],
-    "rawPrompt": "Listen to a English→Portuguese learner's utterance. Identify the Portuguese words they actually said and grade each one. Return JSON only.\n\nYour output becomes permanent spaced-repetition records. Precision beats coverage: if the audio is unclear, silent, or you can't make out real words, return an empty lexemes array. Never invent words you didn't clearly hear.\n\nTag ONLY these words:\n- Portuguese words the learner said: language=\"pt\".\n- English content words used IN PLACE of an expected Portuguese word: performance=\"native_substitution\", language=\"en\". If you're confident which Portuguese word they should have used (it was just taught, or it's an obvious everyday word), add expectedTargetLemma in dictionary form — omit if unsure, don't guess.\nDo NOT tag English words otherwise. A learner just chatting in English → empty lexemes array (triggers below still apply). Every \"language\" field is exactly \"pt\" or \"en\", nothing else.\n\nperformance — one judgment per word:\n- correct_instant: fluent, immediate, clean\n- correct: produced correctly (default; always use this for text-only input)\n- correct_struggled: got it, but with hesitation, self-correction, stutter, or a long pause\n- wrong_use: wrong form or usage\n- recall_fail: tried and failed to produce it\n- native_substitution: see above\n\nnote (optional): ONE short sentence if something notable recurred this turn — a grammar pattern or pronunciation issue worth deliberate practice later. Omit otherwise.\n\nsupervisorTriggers (empty array if none):\n- language_change: user wants different language. value=ISO code of the language they are asking FOR (never the language they're already learning).\n- difficulty_adjustment: too easy/hard. Fire \"easier\" whenever the learner says they can't understand, feels overwhelmed, or asks for more English. value=\"easier\"|\"harder\"\n- goal_change: topic/skill focus within current language. value=topic.\n- session_feedback: user signals they're wrapping up (goodbye, gotta go, that's enough for today). value=\"wants_to_end\".\n- onboarding_signal: user reveals background or goals. value=JSON with any of: priorStudy (\"none\"|\"self_taught\"|\"class\"|\"immersion\"|\"heritage\"), studyDetails (free text), goals (array: \"travel\"|\"work\"|\"heritage\"|\"media\"|\"academic\"|\"other\"), goalDetails (free text), selfRatedLevel (\"pre_a1\"|\"a1\"|\"a2\"|\"b1\"|\"b2\"|\"c1\"|\"c2\"). Only fire when user explicitly states something — don't infer.\n\nExample 1 — Portuguese speech with one substitution (\"Я хочу пить water\", said fluently except a pause before \"пить\"):\n{\"language\":\"ru\",\"lexemes\":[{\"lemma\":\"я\",\"form\":\"я\",\"pos\":\"PRON\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"хотеть\",\"form\":\"хочу\",\"pos\":\"VERB\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"пить\",\"form\":\"пить\",\"pos\":\"VERB\",\"language\":\"ru\",\"performance\":\"correct_struggled\"},{\"lemma\":\"water\",\"form\":\"water\",\"pos\":\"NOUN\",\"language\":\"en\",\"performance\":\"native_substitution\",\"expectedTargetLemma\":\"вода\"}],\"supervisorTriggers\":[]}\n\nExample 2 — pure English chatter with a request (\"I want to learn Portuguese\"): no lexemes, just the trigger:\n{\"language\":\"en\",\"lexemes\":[],\"supervisorTriggers\":[{\"type\":\"language_change\",\"value\":\"pt\",\"reason\":\"User wants to learn Portuguese\"}]}\nAnalyze: \"[audio key=amr4sg6gx2 dur=3.01s]\"\n\nRecent conversation (for scaffolded detection):\nTutor: Portuguese? That is quite the pivot, but I suppose it's better than you trying to pronounce Russian \"shch\" sounds and failing miserably.\nUser: [audio key=amr4sg6gx2 dur=3.01s]",
-    "rawResponse": "{\"language\":\"en\",\"lexemes\":[],\"supervisorTriggers\":[]}",
-    "structuredErrors": [],
+    "rawPrompt": "Listen to a English→Russian learner's utterance. Identify the Russian words they actually said and grade each one. Return JSON only.\n\nYour output becomes permanent spaced-repetition records. Precision beats coverage: if the audio is unclear, silent, or you can't make out real words, return an empty lexemes array. Never invent words you didn't clearly hear.\n\nTag ONLY these words:\n- Russian words the learner said: language=\"ru\".\n- English content words used IN PLACE of an expected Russian word: performance=\"native_substitution\", language=\"en\". If you're confident which Russian word they should have used (it was just taught, or it's an obvious everyday word), add expectedTargetLemma in dictionary form — omit if unsure, don't guess.\nDo NOT tag English words otherwise. A learner just chatting in English → empty lexemes array (triggers below still apply). Every \"language\" field is exactly \"ru\" or \"en\", nothing else.\n\nperformance — one judgment per word:\n- correct_instant: fluent, immediate, clean\n- correct: produced correctly (default; always use this for text-only input)\n- correct_struggled: got it, but with hesitation, self-correction, stutter, or a long pause\n- wrong_use: wrong form or usage\n- recall_fail: tried and failed to produce it\n- native_substitution: see above\n\nnote (optional): ONE short sentence if something notable recurred this turn — a grammar pattern or pronunciation issue worth deliberate practice later. Omit otherwise.\n\nsupervisorTriggers (empty array if none):\n- language_change: user wants different language. value=ISO code of the language they are asking FOR (never the language they're already learning).\n- difficulty_adjustment: too easy/hard. Fire \"easier\" whenever the learner says they can't understand, feels overwhelmed, or asks for more English. value=\"easier\"|\"harder\"\n- goal_change: topic/skill focus within current language. value=topic.\n- session_feedback: user signals they're wrapping up (goodbye, gotta go, that's enough for today). value=\"wants_to_end\".\n- onboarding_signal: user reveals background or goals. value=JSON with any of: priorStudy (\"none\"|\"self_taught\"|\"class\"|\"immersion\"|\"heritage\"), studyDetails (free text), goals (array: \"travel\"|\"work\"|\"heritage\"|\"media\"|\"academic\"|\"other\"), goalDetails (free text), selfRatedLevel (\"pre_a1\"|\"a1\"|\"a2\"|\"b1\"|\"b2\"|\"c1\"|\"c2\"). Only fire when user explicitly states something — don't infer.\n\nExample 1 — Russian speech with one substitution (\"Я хочу пить water\", said fluently except a pause before \"пить\"):\n{\"language\":\"ru\",\"lexemes\":[{\"lemma\":\"я\",\"form\":\"я\",\"pos\":\"PRON\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"хотеть\",\"form\":\"хочу\",\"pos\":\"VERB\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"пить\",\"form\":\"пить\",\"pos\":\"VERB\",\"language\":\"ru\",\"performance\":\"correct_struggled\"},{\"lemma\":\"water\",\"form\":\"water\",\"pos\":\"NOUN\",\"language\":\"en\",\"performance\":\"native_substitution\",\"expectedTargetLemma\":\"вода\"}],\"supervisorTriggers\":[]}\n\nExample 2 — pure English chatter with a request (\"I want to learn Portuguese\"): no lexemes, just the trigger:\n{\"language\":\"en\",\"lexemes\":[],\"supervisorTriggers\":[{\"type\":\"language_change\",\"value\":\"pt\",\"reason\":\"User wants to learn Portuguese\"}]}\nAnalyze: \"Не знаю. Потом э-э Fuck, I forgot how to say because. Can you tell me how to say because? Э-э because я изучаю в университете очень многие года, э-э вот 2 года.\"\n\nRecent conversation (for scaffolded detection):\nTutor: О, интересно! So you've encountered this before? That's great to know! Could you tell me a bit more about it? Maybe what you've studied before or where you learned that? I'm curious!\nUser: Не знаю. Потом э-э Fuck, I forgot how to say because. Can you tell me how to say because? Э-э because я изучаю в университете очень многие года, э-э вот 2 года.",
+    "rawResponse": "{\"language\":\"ru\",\"lexemes\":[{\"lemma\":\"не знать\",\"form\":\"не знаю\",\"pos\":\"VERB\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"потом\",\"form\":\"потом\",\"pos\":\"ADV\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"потому что\",\"form\":\"because\",\"pos\":\"CONJ\",\"language\":\"en\",\"performance\":\"native_substitution\",\"expectedTargetLemma\":\"потому что\"},{\"lemma\":\"я\",\"form\":\"я\",\"pos\":\"PRON\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"изучать\",\"form\":\"изучаю\",\"pos\":\"VERB\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"в\",\"form\":\"в\",\"pos\":\"PREP\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"университет\",\"form\":\"университете\",\"pos\":\"NOUN\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"очень\",\"form\":\"очень\",\"pos\":\"ADV\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"много\",\"form\":\"многие\",\"pos\":\"ADJ\",\"language\":\"ru\",\"performance\":\"wrong_use\"},{\"lemma\":\"год\",\"form\":\"года\",\"pos\":\"NOUN\",\"language\":\"ru\",\"performance\":\"wrong_use\"},{\"lemma\":\"вот\",\"form\":\"вот\",\"pos\":\"PART\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"два\",\"form\":\"2\",\"pos\":\"NUM\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"год\",\"form\":\"года\",\"pos\":\"NOUN\",\"language\":\"ru\",\"performance\":\"correct_instant\"}],\"supervisorTriggers\":[]}",
+    "structuredErrors": [
+      {
+        "lemma": "потому что",
+        "grammarRule": {
+          "rule": "native_substitution",
+          "example": "used native word \"потому что\" instead of the target-language word"
+        }
+      },
+      {
+        "lemma": "много"
+      },
+      {
+        "lemma": "год"
+      }
+    ],
     "grammarHints": []
   },
   "lastPlannerRun": {
-    "at": 1783074316340,
+    "at": 1784942070667,
     "reason": "timer",
-    "rawPrompt": "You are the strategist behind a voice language tutor. Every cycle you read the session state and steer the conversation agent with one nudge. You are the only agent that sees the whole session — the conversation agent only sees the last few turns and the latest errors, so your job is direction, not data.\n\nOutput — exactly these two lines (NOTE/PERSONA optional, see below):\nNUDGE: 1-3 sentences\nSUMMARY: 2-3 sentences\n\nNUDGE is strategy. Don't repeat errors or hints the agent already sees. Decide what matters most right now and give an angle: a scenario, a topic shift, a natural way to surface a due word, when to push and when to lighten up. If engagement is dropping (shrinking turns, rising errors), change the angle before the material. Match the level: beginners get basics and support; intermediates get nuance and natural phrasing; advanced learners get register and subtlety. Never build a nudge around function words (pronouns, prepositions, articles) — exposure teaches those. A word stuck in Learning/Relearning needs a different approach, not the same quiz again.\n\nSUMMARY is your memory — it comes back to you next cycle. Capture topics covered, what they struggled with, what clicked, and patterns you noticed.\n\nSession gap: minutes since last session → continue where they left off; hours → light review first; days → warm up with their struggling words before anything new.\n\nNOTE[category]: one sentence — only when you learn something durable and NEW about this learner worth remembering tomorrow. Categories: preference, level, frustration, goal, engagement. Never restate a note already shown to you. Most cycles produce no note.\n\nPERSONA: field=value[, field=value...] — only on clear evidence the current teaching style is wrong for this learner, or to record how they like to be taught (you are the sole writer of that style read). Fields: tone (roast|warm|neutral|formal|drill-sergeant), correctionStyle (immediate|gentle|ignore|end-of-turn), teachingMode (conversational|drill|roleplay|storytelling), personaOverride (free text), extraInstructions (free text — the usual home of a 1-2 sentence style read, e.g. \"Terse, likes being teased back, skip pleasantries\"). Most cycles produce no persona line.\n\nReason: timer\nSignals: language_changed\nEngagement: turn length steady, pacing medium, errors steady.\n\nPrevious nudge (issued 0 turn(s) ago): The user just asked to switch to European Portuguese. Switch immediately, no pushback — don't question it, joke about it, or make them justify it. That's not a teaching moment, it's a request to honor. Greet them warmly in European Portuguese right now and find out what they know.\n\nDB state:\nUser ID: will\nTarget Language: pt\nNative Language: en\nNEW_USER: false\n\nVocabulary to Review (DUE by FSRS): None\nNew Vocabulary to Introduce (by frequency): O (), vez (), falámos ()\n\nGoals:\nSTRUGGLING: \"preservativo\" () — the learner keeps making errors with this word. The grammar rule: {\"rule\":\"Vocabulary error - 'preservativo' is a Portuguese word for 'condom'.\",\"example\":\"preservativo\"}. Weave practice into the conversation naturally, don't drill it explicitly.\nNEW WORD: \"voltar\" () — introduce it when the conversation naturally touches on the topic. Don't force it.\nNEW WORD: \"O\" () — introduce it when the conversation naturally touches on the topic. Don't force it.\nLearner Notes:\n- [engagement] Uses a playful, challenging tone to interact with the tutor.\n- [level] Speaking production is genuine beginner (A1): attempts complex sentences beyond his level and gets lost. Keep spoken Russian minimal, scaffold in English, build up slowly.\nRecent Sessions (last was 9 hours ago):\n- Jul 2 (2min): The session started with a struggle to establish basic communication, as the learner's initial audio was unclear. We are currently working on establishing a baseline of comprehension through simplified prompts.\nRunning Summary: First session starting. User is a beginner (A1) who enjoys a playful/challenging tone but struggles with complex sentence structures. Goal is to introduce \"вы\", \"кто\", and \"всё\" naturally.\n\nRecent conversation:\nTutor: Ready to start?\nUser: [audio key=amr4senzg1 dur=4.48s]",
-    "rawResponse": "thought\nNUDGE: Since the user is a beginner who likes a playful/challenging tone, start with a warm but slightly cheeky greeting in European Portuguese. Ask them what they already know or what they want to talk about first to gauge their baseline.\n\nSUMMARY: First session starting after a 9-hour gap. User is a beginner (A1) who prefers a playful/challenging tone but struggles with complex sentences. The goal is to establish a baseline of comprehension and introduce basic vocabulary naturally."
+    "rawPrompt": "You are the strategist behind a voice language tutor. Every cycle you read the session state and steer the conversation agent with one nudge. You are the only agent that sees the whole session — the conversation agent only sees the last few turns and the latest errors, so your job is direction, not data.\n\nOutput — exactly these two lines (NOTE/PERSONA optional, see below):\nNUDGE: 1-3 sentences\nSUMMARY: 2-3 sentences\n\nNUDGE is strategy. Don't repeat errors or hints the agent already sees. Decide what matters most right now and give an angle: a scenario, a topic shift, a natural way to surface a due word, when to push and when to lighten up. If engagement is dropping (shrinking turns, rising errors), change the angle before the material. Match the level: beginners get basics and support; intermediates get nuance and natural phrasing; advanced learners get register and subtlety. Never build a nudge around function words (pronouns, prepositions, articles) — exposure teaches those. A word stuck in Learning/Relearning needs a different approach, not the same quiz again.\n\nSUMMARY is your memory — it comes back to you next cycle. Capture topics covered, what they struggled with, what clicked, and patterns you noticed.\n\nSession gap: minutes since last session → continue where they left off; hours → light review first; days → warm up with their struggling words before anything new.\n\nNOTE[category]: one sentence — only when you learn something durable and NEW about this learner worth remembering tomorrow. Categories: preference, level, frustration, goal, engagement. Never restate a note already shown to you. Most cycles produce no note.\n\nPERSONA: field=value[, field=value...] — only on clear evidence the current teaching style is wrong for this learner, or to record how they like to be taught (you are the sole writer of that style read). Fields: tone (roast|warm|neutral|formal|drill-sergeant), correctionStyle (immediate|gentle|ignore|end-of-turn), teachingMode (conversational|drill|roleplay|storytelling), personaOverride (free text), extraInstructions (free text — the usual home of a 1-2 sentence style read, e.g. \"Terse, likes being teased back, skip pleasantries\"). Most cycles produce no persona line.\n\nReason: timer\nSignals: processor_analysis, srs_updated\nEngagement: turn length steady, pacing slow, errors steady.\n\nPrevious nudge (issued 0 turn(s) ago): The user is far beyond a complete beginner; pivot immediately to an intermediate level. Shift to a conversational mode about their university studies to surface \"не\" naturally through opinions or contradictions.\n\nDB state:\nUser ID: demo-3a180561-9f6a-492d-8576-2804fa598095\nTarget Language: ru\nNative Language: en\nNEW_USER: false\n\nVocabulary to Review (DUE by FSRS): None\nNew Vocabulary to Introduce (by frequency): не (not), и (and), это (this; that)\n\nGoals:\nSTRUGGLING: \"много\" (a lot; many) — the learner keeps making errors with this word. Weave practice into the conversation naturally, don't drill it explicitly.\nSTRUGGLING: \"год\" (year) — the learner keeps making errors with this word. Weave practice into the conversation naturally, don't drill it explicitly.\nNEW WORD: \"не\" (not) — introduce it when the conversation naturally touches on the topic. Don't force it.\nLearner Notes:\n- [level] Intermediate; has university background.\nRunning Summary: User revealed they have 2 years of university Russian, contradicting the \"complete beginner\" status. They can form complex sentences but struggle with specific connectors like \"because.\"\n\nRecent conversation:\nTutor: Hi there! Welcome! I'm so happy you're here to learn Russian. To help me tailor our lessons, tell me a bit about yourself. Have you ever studied Russian before? Or are you completely new to it?\nUser: Ты глупый. Я уже знал, что ты хочешь сделать.\nTutor: О, интересно! So you've encountered this before? That's great to know! Could you tell me a bit more about it? Maybe what you've studied before or where you learned that? I'm curious!\nUser: Не знаю. Потом э-э Fuck, I forgot how to say because. Can you tell me how to say because? Э-э because я изучаю в университете очень многие года, э-э вот 2 года.\nTutor: Ah, \"because\" is \"потому что\" in Russian. You said you've been studying at university for a while, like two years? That's great progress! So you already have a good foundation. What made you start learning in the first place?",
+    "rawResponse": "NUDGE: Focus on the \"two years\" comment to correct the usage of \"год\" (years) and \"много\" (many) through a natural follow-up. Ask if they spent a lot of time studying or if it was just a few classes to prompt a comparison.\n\nSUMMARY: User is intermediate but struggling with \"много\" and \"год\" (using \"многие года\" instead of \"много лет\"). They are comfortable with basic insults and conversational flow but hit a wall with connectors like \"потому что\"."
   },
   "subagentChats": [
     {
       "role": "Planner (Supervisor)",
-      "timestamp": 1783074290237,
+      "timestamp": 1784941988072,
       "prompt": "You are the strategist behind a voice language tutor. Every cycle you read the session state and steer the conversation agent with one nudge. You are the only agent that sees the whole session — the conversation agent only sees the last few turns and the latest errors, so your job is direction, not data.\n\nOutput — exactly these two lines (NOTE/PERSONA optional, see below):\nNUDGE: 1-3 sentences\nSUMMARY: 2-3 sentences\n\nNUDGE is strategy. Don't repeat errors or hints the agent already sees. Decide ",
-      "response": "thought\nNUDGE: Start with a warm, low-pressure greeting to establish rapport. Since he likes a challenge, acknowledge his ambition to speak Russian but keep the initial interaction very simple to build confidence.\n\nSUMMARY: First session starting. User is a beginner (A1) who enjoys a playful/challenging tone but struggles with complex sentence structures. Goal is to introduce \"вы\", \"кто\", and \"всё\" naturally."
+      "response": "NUDGE: Start with a warm, low-pressure welcome. Invite the user to share a tiny bit about themselves or their day to naturally elicit the use of \"I\" (я).\n\nSUMMARY: First session. User is a complete beginner in Russian. Goal is to introduce basic pronouns and negation."
     },
     {
       "role": "Processor",
-      "timestamp": 1783074313279,
+      "timestamp": 1784942017835,
       "prompt": "Listen to a English→Russian learner's utterance. Identify the Russian words they actually said and grade each one. Return JSON only.\n\nYour output becomes permanent spaced-repetition records. Precision beats coverage: if the audio is unclear, silent, or you can't make out real words, return an empty lexemes array. Never invent words you didn't clearly hear.\n\nTag ONLY these words:\n- Russian words the learner said: language=\"ru\".\n- English content words used IN PLACE of an expected Russian word: pe",
-      "response": "{\"language\":\"en\",\"lexemes\":[],\"supervisorTriggers\":[{\"type\":\"language_change\",\"value\":\"pt\",\"reason\":\"User wants to learn Portuguese\"}]}"
+      "response": "{\"language\":\"ru\",\"lexemes\":[{\"lemma\":\"ты\",\"form\":\"ты\",\"pos\":\"PRON\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"глупый\",\"form\":\"глупый\",\"pos\":\"ADJ\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"я\",\"form\":\"я\",\"pos\":\"PRON\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"уже\",\"form\":\"уже\",\"pos\":\"ADV\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"знать\",\"form\":\"знал\",\"pos\":\"VERB\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"что\",\"form\""
     },
     {
       "role": "Planner (Supervisor)",
-      "timestamp": 1783074318517,
+      "timestamp": 1784942044386,
       "prompt": "You are the strategist behind a voice language tutor. Every cycle you read the session state and steer the conversation agent with one nudge. You are the only agent that sees the whole session — the conversation agent only sees the last few turns and the latest errors, so your job is direction, not data.\n\nOutput — exactly these two lines (NOTE/PERSONA optional, see below):\nNUDGE: 1-3 sentences\nSUMMARY: 2-3 sentences\n\nNUDGE is strategy. Don't repeat errors or hints the agent already sees. Decide ",
-      "response": "thought\nNUDGE: Start the session in European Portuguese with a warm, playful greeting. Since he's a beginner, keep your initial questions very simple (e.g., \"How are you?\" or \"What is your name?\") to establish a baseline before moving into more complex topics.\n\nSUMMARY: First session in European Portuguese. The learner is a beginner (A1) who prefers a playful/challenging tone but often overreaches his current level. We need to build a baseline of comprehension using simplified prompts."
-    },
-    {
-      "role": "Planner (Supervisor)",
-      "timestamp": 1783074320742,
-      "prompt": "You are the strategist behind a voice language tutor. Every cycle you read the session state and steer the conversation agent with one nudge. You are the only agent that sees the whole session — the conversation agent only sees the last few turns and the latest errors, so your job is direction, not data.\n\nOutput — exactly these two lines (NOTE/PERSONA optional, see below):\nNUDGE: 1-3 sentences\nSUMMARY: 2-3 sentences\n\nNUDGE is strategy. Don't repeat errors or hints the agent already sees. Decide ",
-      "response": "thought\nNUDGE: Since the user is a beginner who likes a playful/challenging tone, start with a warm but slightly cheeky greeting in European Portuguese. Ask them what they already know or what they want to talk about first to gauge their baseline.\n\nSUMMARY: First session starting after a 9-hour gap. User is a beginner (A1) who prefers a playful/challenging tone but struggles with complex sentences. The goal is to establish a baseline of comprehension and introduce basic vocabulary naturally."
+      "response": "NUDGE: The user is far beyond a complete beginner; pivot immediately to an intermediate level. Shift to a conversational mode about their university studies to surface \"не\" naturally through opinions or contradictions.\n\nSUMMARY: User revealed they have 2 years of university Russian, contradicting the \"complete beginner\" status. They can form complex sentences but struggle with specific connectors like \"because.\"\n\nNOTE[level]: Intermediate; has university background.\n\nPERSONA: tone=neutral, teach"
     },
     {
       "role": "Processor",
-      "timestamp": 1783074383371,
-      "prompt": "Listen to a English→Portuguese learner's utterance. Identify the Portuguese words they actually said and grade each one. Return JSON only.\n\nYour output becomes permanent spaced-repetition records. Precision beats coverage: if the audio is unclear, silent, or you can't make out real words, return an empty lexemes array. Never invent words you didn't clearly hear.\n\nTag ONLY these words:\n- Portuguese words the learner said: language=\"pt\".\n- English content words used IN PLACE of an expected Portugu",
-      "response": "{\"language\":\"en\",\"lexemes\":[],\"supervisorTriggers\":[]}"
+      "timestamp": 1784942049806,
+      "prompt": "Listen to a English→Russian learner's utterance. Identify the Russian words they actually said and grade each one. Return JSON only.\n\nYour output becomes permanent spaced-repetition records. Precision beats coverage: if the audio is unclear, silent, or you can't make out real words, return an empty lexemes array. Never invent words you didn't clearly hear.\n\nTag ONLY these words:\n- Russian words the learner said: language=\"ru\".\n- English content words used IN PLACE of an expected Russian word: pe",
+      "response": "{\"language\":\"ru\",\"lexemes\":[{\"lemma\":\"не знать\",\"form\":\"не знаю\",\"pos\":\"VERB\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"потом\",\"form\":\"потом\",\"pos\":\"ADV\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"потому что\",\"form\":\"because\",\"pos\":\"CONJ\",\"language\":\"en\",\"performance\":\"native_substitution\",\"expectedTargetLemma\":\"потому что\"},{\"lemma\":\"я\",\"form\":\"я\",\"pos\":\"PRON\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"изучать\",\"form\":\"изучаю\",\"pos\":\"VERB\",\"langu"
+    },
+    {
+      "role": "Planner (Supervisor)",
+      "timestamp": 1784942072232,
+      "prompt": "You are the strategist behind a voice language tutor. Every cycle you read the session state and steer the conversation agent with one nudge. You are the only agent that sees the whole session — the conversation agent only sees the last few turns and the latest errors, so your job is direction, not data.\n\nOutput — exactly these two lines (NOTE/PERSONA optional, see below):\nNUDGE: 1-3 sentences\nSUMMARY: 2-3 sentences\n\nNUDGE is strategy. Don't repeat errors or hints the agent already sees. Decide ",
+      "response": "NUDGE: Focus on the \"two years\" comment to correct the usage of \"год\" (years) and \"много\" (many) through a natural follow-up. Ask if they spent a lot of time studying or if it was just a few classes to prompt a comparison.\n\nSUMMARY: User is intermediate but struggling with \"много\" and \"год\" (using \"многие года\" instead of \"много лет\"). They are comfortable with basic insults and conversational flow but hit a wall with connectors like \"потому что\"."
     }
   ],
   "sessionTrace": [
     {
-      "at": 1783074286312,
+      "at": 1784941980641,
       "event": "services.created",
-      "detail": "mode=local-gemma-audio stt=GemmaAudioSTT llm=GemmaAudioLLM tts=OmniVoiceTTS"
+      "detail": "mode=gemini stt=none llm=RealtimeModel tts=none"
     },
     {
-      "at": 1783074286312,
-      "event": "services.stt.capabilities",
-      "detail": "{\"streaming\":false,\"interimResults\":false}"
-    },
-    {
-      "at": 1783074286312,
-      "event": "services.tts.capabilities",
-      "detail": "{\"streaming\":true}"
-    },
-    {
-      "at": 1783074286312,
+      "at": 1784941980641,
       "event": "services.llm.capabilities",
-      "detail": "{}"
+      "detail": "{\"messageTruncation\":false,\"turnDetection\":true,\"userTranscription\":true,\"autoToolReplyGeneration\":true,\"audioOutput\":true}"
     },
     {
-      "at": 1783074286340,
+      "at": 1784941980667,
       "event": "planner.update.start",
       "detail": "reason=session_start"
     },
     {
-      "at": 1783074286340,
+      "at": 1784941980667,
       "event": "instructions.refresh"
     },
     {
-      "at": 1783074286341,
+      "at": 1784941980668,
       "event": "session.start.begin",
       "detail": "roomConnected=true"
     },
     {
-      "at": 1783074286359,
-      "event": "agent.sttNode.start",
-      "detail": "activityStt=GemmaAudioSTT capabilities={\"streaming\":false,\"interimResults\":false}"
-    },
-    {
-      "at": 1783074286367,
-      "event": "agent.sttNode.ready",
-      "detail": "hasStream=true"
-    },
-    {
-      "at": 1783074286369,
+      "at": 1784941980694,
       "event": "session.agent_state_changed",
       "detail": "listening"
     },
     {
-      "at": 1783074286371,
+      "at": 1784941980696,
       "event": "session.start.done"
     },
     {
-      "at": 1783074286371,
+      "at": 1784941980696,
       "event": "session.activity.ready",
-      "detail": "stt=GemmaAudioSTT tts=OmniVoiceTTS llm=GemmaAudioLLM"
+      "detail": "stt=none tts=none llm=RealtimeModel"
     },
     {
-      "at": 1783074286371,
+      "at": 1784941980696,
       "event": "session.generateReply.opening"
     },
     {
-      "at": 1783074286371,
+      "at": 1784941980696,
       "event": "session.generateReply",
       "detail": "args=[{\"userInput\":\"[system: the user has just connected — greet them and pick up where you left off]\"}]"
     },
     {
-      "at": 1783074286372,
+      "at": 1784941980697,
       "event": "session.speech_created",
       "detail": "source=generate_reply"
     },
     {
-      "at": 1783074286373,
-      "event": "activity.pipelineReplyTask.start",
-      "detail": "speechId=speech_1bef6f7f-314 interrupted=false scheduled=false"
-    },
-    {
-      "at": 1783074286373,
-      "event": "activity._pipelineReplyTaskImpl.start",
-      "detail": "speechId=speech_1bef6f7f-314 newMessage=\"[system: the user has just connected — greet them and pick up where you left off]\""
-    },
-    {
-      "at": 1783074286375,
-      "event": "agent.llmNode.start",
-      "detail": "items=2"
-    },
-    {
-      "at": 1783074286376,
-      "event": "agent.ttsNode.start"
-    },
-    {
-      "at": 1783074286377,
+      "at": 1784941980697,
       "event": "activity.scheduleSpeech",
-      "detail": "speechId=speech_1bef6f7f-314 priority=5 interrupted=false"
+      "detail": "speechId=speech_787cd464-6e3 priority=5 interrupted=false"
     },
     {
-      "at": 1783074286378,
-      "event": "agent.llmNode.ready",
-      "detail": "hasStream=true"
-    },
-    {
-      "at": 1783074286378,
-      "event": "agent.ttsNode.ready",
-      "detail": "hasStream=true"
-    },
-    {
-      "at": 1783074286380,
-      "event": "session.agent_state_changed",
-      "detail": "thinking"
-    },
-    {
-      "at": 1783074286866,
-      "event": "session.metrics_collected",
-      "detail": "{\"type\":\"llm_metrics\",\"timestamp\":1783074286864,\"requestId\":\"chatcmpl-a014640e2e293e10\",\"ttftMs\":170,\"durationMs\":489,\"cancelled\":false,\"label\":\"gemma-audio-llm\",\"completionTokens\":0,\"promptTokens\":0,"
-    },
-    {
-      "at": 1783074287233,
+      "at": 1784941981700,
       "event": "session.agent_state_changed",
       "detail": "speaking"
     },
     {
-      "at": 1783074287258,
-      "event": "session.metrics_collected",
-      "detail": "{\"type\":\"tts_metrics\",\"timestamp\":1783074287258,\"requestId\":\"d801dd28-529\",\"ttfbMs\":522,\"durationMs\":549,\"charactersCount\":15,\"audioDurationMs\":1100,\"cancelled\":true,\"label\":\"omnivoice.TTS\",\"inputToke"
-    },
-    {
-      "at": 1783074288334,
-      "event": "mix.measured",
-      "detail": "share=0.00 levelTarget=0.25 throttle=0"
-    },
-    {
-      "at": 1783074288335,
-      "event": "session.agent_state_changed",
-      "detail": "listening"
-    },
-    {
-      "at": 1783074288336,
-      "event": "activity._pipelineReplyTaskImpl.done",
-      "detail": "speechId=speech_1bef6f7f-314 scheduled=true interrupted=false"
-    },
-    {
-      "at": 1783074288336,
-      "event": "activity.pipelineReplyTask.done",
-      "detail": "speechId=speech_1bef6f7f-314 scheduled=true interrupted=false"
-    },
-    {
-      "at": 1783074290237,
+      "at": 1784941988072,
       "event": "instructions.refresh"
     },
     {
-      "at": 1783074290238,
+      "at": 1784941988073,
       "event": "planner.update.done",
       "detail": "reason=session_start"
     },
     {
-      "at": 1783074311405,
+      "at": 1784941988985,
       "event": "session.metrics_collected",
-      "detail": "{\"type\":\"stt_metrics\",\"requestId\":\"\",\"timestamp\":1783074311404,\"durationMs\":26,\"label\":\"gemma-audio-stt\",\"audioDurationMs\":4980,\"streamed\":false,\"metadata\":{\"modelProvider\":\"unknown\",\"modelName\":\"unkn"
+      "detail": "{\"type\":\"realtime_model_metrics\",\"timestamp\":1784941981565,\"requestId\":\"GR_18a59a3a-e62\",\"ttftMs\":134,\"durationMs\":7419,\"cancelled\":false,\"label\":\"google_realtime\",\"inputTokens\":1862,\"outputTokens\":27"
     },
     {
-      "at": 1783074311407,
-      "event": "session.user_input_transcribed",
-      "detail": "final=true transcript=\"[audio key=amr4senzg1 dur=4.48s]\""
+      "at": 1784941989343,
+      "event": "mix.measured",
+      "detail": "share=0.00 levelTarget=0.25 throttle=0"
     },
     {
-      "at": 1783074311410,
+      "at": 1784941993106,
       "event": "session.speech_created",
       "detail": "source=generate_reply"
     },
     {
-      "at": 1783074311410,
-      "event": "activity.pipelineReplyTask.start",
-      "detail": "speechId=speech_3f6d4c1e-470 interrupted=false scheduled=false"
-    },
-    {
-      "at": 1783074311410,
-      "event": "activity._pipelineReplyTaskImpl.start",
-      "detail": "speechId=speech_3f6d4c1e-470 newMessage=\"[audio key=amr4senzg1 dur=4.48s]\""
-    },
-    {
-      "at": 1783074311411,
-      "event": "agent.llmNode.start",
-      "detail": "items=4"
-    },
-    {
-      "at": 1783074311412,
-      "event": "agent.ttsNode.start"
-    },
-    {
-      "at": 1783074311416,
+      "at": 1784941993107,
       "event": "activity.scheduleSpeech",
-      "detail": "speechId=speech_3f6d4c1e-470 priority=5 interrupted=false"
+      "detail": "speechId=speech_b5768d9f-825 priority=5 interrupted=false"
     },
     {
-      "at": 1783074311416,
+      "at": 1784941993108,
+      "event": "session.user_input_transcribed",
+      "detail": "final=false transcript=\"Ты глупый. Я уже знал, что ты хочешь сделать.\""
+    },
+    {
+      "at": 1784942004188,
+      "event": "session.user_input_transcribed",
+      "detail": "final=true transcript=\"Ты глупый. Я уже знал, что ты хочешь сделать.\""
+    },
+    {
+      "at": 1784942004190,
       "event": "session.metrics_collected",
-      "detail": "{\"type\":\"eou_metrics\",\"timestamp\":1783074311416,\"endOfUtteranceDelayMs\":578,\"transcriptionDelayMs\":574,\"onUserTurnCompletedDelayMs\":1,\"lastSpeakingTimeMs\":1783074310835,\"speechId\":\"speech_3f6d4c1e-470"
+      "detail": "{\"type\":\"realtime_model_metrics\",\"timestamp\":1784941993106,\"requestId\":\"GR_ac329930-3e3\",\"ttftMs\":5,\"durationMs\":11082,\"cancelled\":false,\"label\":\"google_realtime\",\"inputTokens\":2237,\"outputTokens\":284"
     },
     {
-      "at": 1783074311417,
-      "event": "agent.llmNode.ready",
-      "detail": "hasStream=true"
+      "at": 1784942004193,
+      "event": "mix.measured",
+      "detail": "share=0.07 levelTarget=0.25 throttle=0"
     },
     {
-      "at": 1783074311417,
-      "event": "agent.ttsNode.ready",
-      "detail": "hasStream=true"
-    },
-    {
-      "at": 1783074311418,
-      "event": "session.agent_state_changed",
-      "detail": "thinking"
-    },
-    {
-      "at": 1783074313281,
-      "event": "instructions.refresh"
-    },
-    {
-      "at": 1783074313400,
-      "event": "session.metrics_collected",
-      "detail": "{\"type\":\"llm_metrics\",\"timestamp\":1783074313400,\"requestId\":\"chatcmpl-9769bc66e4828992\",\"ttftMs\":599,\"durationMs\":1989,\"cancelled\":false,\"label\":\"gemma-audio-llm\",\"completionTokens\":0,\"promptTokens\":0"
-    },
-    {
-      "at": 1783074313430,
-      "event": "instructions.refresh"
-    },
-    {
-      "at": 1783074313451,
-      "event": "planner.update.start",
-      "detail": "reason=user_request"
-    },
-    {
-      "at": 1783074314509,
-      "event": "session.agent_state_changed",
-      "detail": "speaking"
-    },
-    {
-      "at": 1783074314717,
-      "event": "session.metrics_collected",
-      "detail": "{\"type\":\"tts_metrics\",\"timestamp\":1783074314717,\"requestId\":\"320eea97-82d\",\"ttfbMs\":2341,\"durationMs\":2550,\"charactersCount\":136,\"audioDurationMs\":8210,\"cancelled\":true,\"label\":\"omnivoice.TTS\",\"inputT"
-    },
-    {
-      "at": 1783074316340,
-      "event": "planner.update.start",
-      "detail": "reason=timer"
-    },
-    {
-      "at": 1783074318518,
-      "event": "instructions.refresh"
-    },
-    {
-      "at": 1783074318518,
-      "event": "planner.update.done",
-      "detail": "reason=user_request"
-    },
-    {
-      "at": 1783074320742,
-      "event": "instructions.refresh"
-    },
-    {
-      "at": 1783074320742,
-      "event": "planner.update.done",
-      "detail": "reason=timer"
-    },
-    {
-      "at": 1783074322719,
+      "at": 1784942004193,
       "event": "session.agent_state_changed",
       "detail": "listening"
     },
     {
-      "at": 1783074322720,
-      "event": "activity._pipelineReplyTaskImpl.done",
-      "detail": "speechId=speech_3f6d4c1e-470 scheduled=true interrupted=false"
-    },
-    {
-      "at": 1783074322720,
-      "event": "activity.pipelineReplyTask.done",
-      "detail": "speechId=speech_3f6d4c1e-470 scheduled=true interrupted=false"
-    },
-    {
-      "at": 1783074382017,
-      "event": "session.metrics_collected",
-      "detail": "{\"type\":\"stt_metrics\",\"requestId\":\"\",\"timestamp\":1783074382017,\"durationMs\":10,\"label\":\"gemma-audio-stt\",\"audioDurationMs\":3508,\"streamed\":false,\"metadata\":{\"modelProvider\":\"unknown\",\"modelName\":\"unkn"
-    },
-    {
-      "at": 1783074382018,
-      "event": "session.user_input_transcribed",
-      "detail": "final=true transcript=\"[audio key=amr4sg6gx2 dur=3.01s]\""
-    },
-    {
-      "at": 1783074382020,
+      "at": 1784942005378,
       "event": "session.speech_created",
       "detail": "source=generate_reply"
     },
     {
-      "at": 1783074382020,
-      "event": "activity.pipelineReplyTask.start",
-      "detail": "speechId=speech_dcd23d7b-27a interrupted=false scheduled=false"
-    },
-    {
-      "at": 1783074382020,
-      "event": "activity._pipelineReplyTaskImpl.start",
-      "detail": "speechId=speech_dcd23d7b-27a newMessage=\"[audio key=amr4sg6gx2 dur=3.01s]\""
-    },
-    {
-      "at": 1783074382021,
-      "event": "agent.llmNode.start",
-      "detail": "items=6"
-    },
-    {
-      "at": 1783074382022,
-      "event": "agent.ttsNode.start"
-    },
-    {
-      "at": 1783074382024,
+      "at": 1784942005379,
       "event": "activity.scheduleSpeech",
-      "detail": "speechId=speech_dcd23d7b-27a priority=5 interrupted=false"
+      "detail": "speechId=speech_772c1844-872 priority=5 interrupted=false"
     },
     {
-      "at": 1783074382024,
-      "event": "session.metrics_collected",
-      "detail": "{\"type\":\"eou_metrics\",\"timestamp\":1783074382024,\"endOfUtteranceDelayMs\":567,\"transcriptionDelayMs\":564,\"onUserTurnCompletedDelayMs\":1,\"lastSpeakingTimeMs\":1783074381455,\"speechId\":\"speech_dcd23d7b-27a"
-    },
-    {
-      "at": 1783074382025,
-      "event": "agent.llmNode.ready",
-      "detail": "hasStream=true"
-    },
-    {
-      "at": 1783074382025,
-      "event": "agent.ttsNode.ready",
-      "detail": "hasStream=true"
-    },
-    {
-      "at": 1783074382026,
-      "event": "session.agent_state_changed",
-      "detail": "thinking"
-    },
-    {
-      "at": 1783074383372,
+      "at": 1784942017837,
       "event": "instructions.refresh"
     },
     {
-      "at": 1783074383801,
-      "event": "session.metrics_collected",
-      "detail": "{\"type\":\"llm_metrics\",\"timestamp\":1783074383801,\"requestId\":\"chatcmpl-aa13732877186647\",\"ttftMs\":841,\"durationMs\":1779,\"cancelled\":false,\"label\":\"gemma-audio-llm\",\"completionTokens\":0,\"promptTokens\":0"
+      "at": 1784942017841,
+      "event": "onboarding.signal.saved",
+      "detail": "{\"priorStudy\":\"none\",\"goals\":[\"other\"],\"selfRatedLevel\":\"pre_a1\"}"
     },
     {
-      "at": 1783074384158,
-      "event": "session.agent_state_changed",
-      "detail": "speaking"
-    },
-    {
-      "at": 1783074384252,
-      "event": "session.metrics_collected",
-      "detail": "{\"type\":\"tts_metrics\",\"timestamp\":1783074384252,\"requestId\":\"cf1da47c-538\",\"ttfbMs\":1136,\"durationMs\":1231,\"charactersCount\":67,\"audioDurationMs\":3750,\"cancelled\":true,\"label\":\"omnivoice.TTS\",\"inputTo"
-    },
-    {
-      "at": 1783074387909,
-      "event": "session.agent_state_changed",
-      "detail": "listening"
-    },
-    {
-      "at": 1783074387910,
-      "event": "activity._pipelineReplyTaskImpl.done",
-      "detail": "speechId=speech_dcd23d7b-27a scheduled=true interrupted=false"
-    },
-    {
-      "at": 1783074387910,
-      "event": "activity.pipelineReplyTask.done",
-      "detail": "speechId=speech_dcd23d7b-27a scheduled=true interrupted=false"
-    },
-    {
-      "at": 1783074393386,
-      "event": "session.metrics_collected",
-      "detail": "{\"type\":\"stt_metrics\",\"requestId\":\"\",\"timestamp\":1783074393386,\"durationMs\":19,\"label\":\"gemma-audio-stt\",\"audioDurationMs\":4276,\"streamed\":false,\"metadata\":{\"modelProvider\":\"unknown\",\"modelName\":\"unkn"
-    },
-    {
-      "at": 1783074393387,
+      "at": 1784942021005,
       "event": "session.user_input_transcribed",
-      "detail": "final=true transcript=\"[audio key=amr4sgf8p3 dur=3.78s]\""
+      "detail": "final=false transcript=\"Не знаю. Потом э-э Fuck, I forgot how to say because. Can you tell me how to say because? Э-э because я изучаю в университете очень многие года, э-э вот 2 года.\""
     },
     {
-      "at": 1783074393389,
+      "at": 1784942035582,
+      "event": "session.user_input_transcribed",
+      "detail": "final=true transcript=\"Не знаю. Потом э-э Fuck, I forgot how to say because. Can you tell me how to say because? Э-э because я изучаю в университете очень многие года, э-э вот 2 года.\""
+    },
+    {
+      "at": 1784942035583,
+      "event": "session.metrics_collected",
+      "detail": "{\"type\":\"realtime_model_metrics\",\"timestamp\":1784942005377,\"requestId\":\"GR_69fd5946-9f7\",\"ttftMs\":16033,\"durationMs\":30204,\"cancelled\":false,\"label\":\"google_realtime\",\"inputTokens\":3050,\"outputTokens\""
+    },
+    {
+      "at": 1784942035585,
+      "event": "mix.measured",
+      "detail": "share=0.05 levelTarget=0.25 throttle=0"
+    },
+    {
+      "at": 1784942040666,
+      "event": "planner.update.start",
+      "detail": "reason=timer"
+    },
+    {
+      "at": 1784942044380,
+      "event": "planner.note.written",
+      "detail": "level: Intermediate; has university background."
+    },
+    {
+      "at": 1784942044386,
+      "event": "planner.persona.patched",
+      "detail": "{\"tone\":\"neutral\",\"teachingMode\":\"conversational\",\"extraInstructions\":\"Skip basic introductions; focus on natural flow and correcting nuance.\"}"
+    },
+    {
+      "at": 1784942044386,
+      "event": "instructions.refresh"
+    },
+    {
+      "at": 1784942044386,
+      "event": "planner.update.done",
+      "detail": "reason=timer"
+    },
+    {
+      "at": 1784942049806,
+      "event": "instructions.refresh"
+    },
+    {
+      "at": 1784942070667,
+      "event": "planner.update.start",
+      "detail": "reason=timer"
+    },
+    {
+      "at": 1784942072233,
+      "event": "instructions.refresh"
+    },
+    {
+      "at": 1784942072233,
+      "event": "planner.update.done",
+      "detail": "reason=timer"
+    },
+    {
+      "at": 1784942125698,
+      "event": "demo.wrapup.nudge"
+    },
+    {
+      "at": 1784942125698,
+      "event": "session.generateReply",
+      "detail": "args=[{\"userInput\":\"[system: this demo session is almost out of time — wrap up the conversation warmly in this reply, thank them, and mention they can create a free account to keep going and save their progress]\"}]"
+    },
+    {
+      "at": 1784942125698,
       "event": "session.speech_created",
       "detail": "source=generate_reply"
     },
     {
-      "at": 1783074393389,
-      "event": "activity.pipelineReplyTask.start",
-      "detail": "speechId=speech_15e3ffeb-2e5 interrupted=false scheduled=false"
-    },
-    {
-      "at": 1783074393389,
-      "event": "activity._pipelineReplyTaskImpl.start",
-      "detail": "speechId=speech_15e3ffeb-2e5 newMessage=\"[audio key=amr4sgf8p3 dur=3.78s]\""
-    },
-    {
-      "at": 1783074393390,
-      "event": "agent.llmNode.start",
-      "detail": "items=8"
-    },
-    {
-      "at": 1783074393391,
-      "event": "agent.ttsNode.start"
-    },
-    {
-      "at": 1783074393394,
+      "at": 1784942125699,
       "event": "activity.scheduleSpeech",
-      "detail": "speechId=speech_15e3ffeb-2e5 priority=5 interrupted=false"
+      "detail": "speechId=speech_b127633c-e3b priority=5 interrupted=false"
     },
     {
-      "at": 1783074393394,
-      "event": "session.metrics_collected",
-      "detail": "{\"type\":\"eou_metrics\",\"timestamp\":1783074393394,\"endOfUtteranceDelayMs\":578,\"transcriptionDelayMs\":574,\"onUserTurnCompletedDelayMs\":0,\"lastSpeakingTimeMs\":1783074392814,\"speechId\":\"speech_15e3ffeb-2e5"
-    },
-    {
-      "at": 1783074393395,
-      "event": "agent.llmNode.ready",
-      "detail": "hasStream=true"
-    },
-    {
-      "at": 1783074393395,
-      "event": "agent.ttsNode.ready",
-      "detail": "hasStream=true"
-    },
-    {
-      "at": 1783074393396,
-      "event": "session.agent_state_changed",
-      "detail": "thinking"
-    },
-    {
-      "at": 1783074395376,
-      "event": "session.metrics_collected",
-      "detail": "{\"type\":\"llm_metrics\",\"timestamp\":1783074395375,\"requestId\":\"chatcmpl-8f3e4a3ab4b53516\",\"ttftMs\":339,\"durationMs\":1985,\"cancelled\":false,\"label\":\"gemma-audio-llm\",\"completionTokens\":0,\"promptTokens\":0"
-    },
-    {
-      "at": 1783074396402,
+      "at": 1784942126326,
       "event": "session.agent_state_changed",
       "detail": "speaking"
     },
     {
-      "at": 1783074396614,
+      "at": 1784942143185,
       "event": "session.metrics_collected",
-      "detail": "{\"type\":\"tts_metrics\",\"timestamp\":1783074396614,\"requestId\":\"dd510836-10d\",\"ttfbMs\":2517,\"durationMs\":2730,\"charactersCount\":132,\"audioDurationMs\":7730,\"cancelled\":true,\"label\":\"omnivoice.TTS\",\"inputT"
+      "detail": "{\"type\":\"realtime_model_metrics\",\"timestamp\":1784942126090,\"requestId\":\"GR_284f8eee-834\",\"ttftMs\":235,\"durationMs\":17095,\"cancelled\":false,\"label\":\"google_realtime\",\"inputTokens\":3568,\"outputTokens\":4"
+    },
+    {
+      "at": 1784942143188,
+      "event": "mix.measured",
+      "detail": "share=0.00 levelTarget=0.25 throttle=0"
+    },
+    {
+      "at": 1784942143188,
+      "event": "session.agent_state_changed",
+      "detail": "listening"
     }
   ],
-  "updatedAt": "2026-07-03T10:26:36.652Z"
+  "updatedAt": "2026-07-25T01:15:43.436Z"
 }
