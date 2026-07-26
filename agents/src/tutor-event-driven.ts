@@ -58,7 +58,7 @@ import { dbTools } from './tools/db-tools.js';
 import { ContextManager } from './lib/context.js';
 import { audioPayloadRegistry } from './stt/gemma-audio-stt.js';
 import { getLanguageConfig, nativeLanguageName, LANGUAGES } from './config/languages.js';
-import { buildInstructions, buildOnboardingInstructions } from './config/prompts/base.js';
+import { buildInstructions, buildOnboardingInstructions, PLATFORM_KNOWLEDGE } from './config/prompts/base.js';
 import { computeTargetShare, buildMixLine, measureTargetShare, targetShareForLevel, MAX_THROTTLE_NOTCHES } from './lib/language-mix.js';
 import { PLANNER_SYSTEM_PROMPT, buildPlannerPrompt } from './config/prompts/supervisor.js';
 import { readLearnerView, invalidateLearnerView } from './lib/learner-view.js';
@@ -678,7 +678,7 @@ export default defineAgent({
         nativeLanguage: usersNativeLanguage,
       });
 
-      return buildInstructions({
+      const instructions = buildInstructions({
         targetLanguage: langConfig.name,
         nativeLanguage: usersNativeLanguage,
         userLevel,
@@ -695,6 +695,12 @@ export default defineAgent({
         mixLine,
         adaptive,
       });
+
+      // Demo visitors are evaluating the product while they talk, so the
+      // tutor needs to be able to field "what is this / what's it cost"
+      // without guessing. Real accounts already know what they signed up
+      // for — no reason to spend their context window on it.
+      return isDemoSession ? `${instructions}\n\n${PLATFORM_KNOWLEDGE}` : instructions;
     };
 
     // === ONBOARDING VERDICT TOOL (§10) ===
