@@ -359,26 +359,16 @@ export default defineAgent({
     console.log(`[Tutor-ED] Starting session for user: ${userId}`);
     setSessionId(`room-${ctx.room.name}-${userId}`);
 
-    // === TARGET LANGUAGE FROM TOKEN METADATA ===
-    // Anonymous demo visitors pick their language on the landing page
-    // before connecting; the token endpoint validates that choice and
-    // bakes it into the participant metadata. Without this, every demo
-    // session fell back to DEFAULT_TARGET_LANGUAGE (Russian) and the tutor
-    // opened in a language the visitor never asked for.
     // Same signal the wrap-up/hard-stop timers below key off: this worker
     // is running the anonymous landing-page demo, not a real account.
     const isDemoSession = !!process.env.DEMO_SESSION_TIME_LIMIT_MS;
 
-    let requestedLang: string | null = null;
-    try {
-      const meta = participant.metadata ? JSON.parse(participant.metadata) : null;
-      if (meta && typeof meta.lang === 'string' && LANGUAGES[meta.lang]) {
-        requestedLang = meta.lang;
-        console.log(`[Tutor-ED] Target language from participant metadata: ${requestedLang}`);
-      }
-    } catch (err: any) {
-      console.warn('[Tutor-ED] Could not parse participant metadata:', err?.message);
-    }
+    // A demo visitor arrives having chosen nothing — the landing page's
+    // only control is "Start talking". The tutor asks what they want to
+    // learn as its opening line and commits the answer with the
+    // set_target_language tool, so until that fires the session's language
+    // is a placeholder, not a real choice.
+    let languageUndecided = isDemoSession;
 
     // === USER SETUP ===
     let user = await db.query.users.findFirst({
@@ -389,7 +379,7 @@ export default defineAgent({
       console.log(`[Tutor-ED] Creating new user: ${userId}`);
       await db.insert(users).values({
         id: userId,
-        targetLanguage: requestedLang || process.env.DEFAULT_TARGET_LANGUAGE || 'ru',
+        targetLanguage: process.env.DEFAULT_TARGET_LANGUAGE || 'ru',
         nativeLanguage: process.env.DEFAULT_NATIVE_LANGUAGE || 'en',
         proficiencyLevel: 'beginner',
       });
@@ -403,12 +393,7 @@ export default defineAgent({
     // === LANGUAGE CONFIG ===
     // Mutable: the processor can detect a language change request and
     // update this mid-session, then refresh instructions.
-    let targetLang = requestedLang || user.targetLanguage;
-    if (requestedLang && user.targetLanguage !== requestedLang) {
-      // Keep the DB in step with the pick — everything downstream (context
-      // manager, level inference, onboarding state) keys off it.
-      await db.update(users).set({ targetLanguage: requestedLang }).where(eq(users.id, userId));
-    }
+    let targetLang = user.targetLanguage;
     let langConfig = getLanguageConfig(targetLang);
     console.log(`[Tutor-ED] Language: ${langConfig.name}`);
     emitEvent('session.start', { userId, language: langConfig.name, mode: process.env.SERVICE_MODE || 'local' });
@@ -633,6 +618,7 @@ export default defineAgent({
           nativeName: langConfig.nativeName,
           nativeLanguage: usersNativeLanguage,
           demo: isDemoSession,
+          languageUndecided,
           existingData: onboardingState ? {
             priorStudy: onboardingState.priorStudy ?? undefined,
             studyDetails: onboardingState.studyDetails ?? undefined,
@@ -748,10 +734,31 @@ export default defineAgent({
     });
     const onboardingTools = { submit_onboarding_verdict: submitOnboardingVerdictTool };
 
+    // Demo only. The processor's language_change trigger can also switch
+    // languages, but it runs a turn behind and its own comments record it
+    // fumbling the value field — fine as a mid-conversation safety net,
+    // far too slow and too vague for the opening seconds of a 3-minute
+    // demo, where the visitor's answer to "what do you want to learn"
+    // has to take effect on the very next breath.
+    const setTargetLanguageTool = llm.tool({
+      description: "Set the language you are teaching. Call this the instant the learner tells you what they want to learn, before you reply to them. Only these are supported: es (Spanish), fr (French), pt (Portuguese), ru (Russian), ar (Arabic), en (English vocabulary). If they ask for anything else, don't call this — tell them it isn't available yet and offer the list.",
+      parameters: z.object({
+        language: z.enum(['es', 'fr', 'pt', 'ru', 'ar', 'en']).describe('ISO 639-1 code of the language the learner wants to learn'),
+      }),
+      execute: async (args: any) => {
+        const ok = await applyTargetLanguage(args.language, 'tool');
+        trace('lang.tool', `${args.language} ok=${ok}`);
+        return ok
+          ? { ok: true, language: getLanguageConfig(args.language).name }
+          : { ok: false, note: 'Already teaching that language — just carry on.' };
+      },
+    });
+    const demoTools = isDemoSession ? { set_target_language: setTargetLanguageTool } : {};
+
     // === CREATE AGENT ===
     const agent = new voice.Agent({
       instructions: await buildDynamicInstructions(),
-      tools: { ...dbTools, ...onboardingTools } as any,
+      tools: { ...dbTools, ...onboardingTools, ...demoTools } as any,
     });
 
     // === CREATE SERVICES (LOCAL, CLOUD, OR GEMINI) ===
@@ -900,6 +907,57 @@ export default defineAgent({
       await agent.updateChatCtx((agent as any)._chatCtx);
     };
 
+    // Single place that actually moves a session to another language, so
+    // the processor's language_change trigger and the tutor's own
+    // set_target_language tool can't drift apart. Returns false (leaving
+    // everything untouched) if the switch is impossible or a no-op, so
+    // callers can just carry on.
+    async function applyTargetLanguage(
+      newLang: string,
+      source: 'trigger' | 'tool',
+    ): Promise<boolean> {
+      if (!LANGUAGES[newLang]) {
+        console.warn(`[Lang:${source}] Unsupported language: ${newLang}`);
+        return false;
+      }
+      if (newLang === targetLang && !languageUndecided) return false;
+
+      const newConfig = getLanguageConfig(newLang);
+      try {
+        await db.update(users).set({ targetLanguage: newLang }).where(eq(users.id, userId));
+        console.log(`[Lang:${source}] Language set: ${targetLang} → ${newLang}`);
+      } catch (err) {
+        console.error(`[Lang:${source}] Failed to update DB:`, err);
+        return false;
+      }
+
+      const wasUndecided = languageUndecided;
+      targetLang = newLang;
+      langConfig = newConfig;
+      languageUndecided = false;
+
+      // Update TTS voice to match the new language
+      const ttsService = session.tts as any;
+      if (ttsService?.updateVoice) {
+        ttsService.updateVoice(newConfig.tts.omnivoiceVoice || 'auto', newConfig.tts.omnivoiceLanguage || newLang);
+      } else if (!isGemini) {
+        console.warn(`[Lang:${source}] TTS does not support updateVoice — voice will stay as the old language`);
+      }
+
+      await refreshDbContext();
+      invalidateLearnerView(userId, newLang);
+      setNudge(wasUndecided
+        // First answer of a demo, not a change of mind — there is nothing
+        // to switch away from, and framing it as a switch would have the
+        // tutor apologise for a language the visitor never asked for.
+        ? `They just told you they want to learn ${newConfig.name}. React with genuine delight, then immediately give them a short, real ${newConfig.name} phrase and ask them to say it back. Do not ask any more setup questions.`
+        : `The user just asked to switch to ${newConfig.name}. Switch immediately, no pushback — don't question it, joke about it, or make them justify it. That's not a teaching moment, it's a request to honor. Greet them warmly in ${newConfig.name} right now and find out what they know.`);
+      await refreshInstructions();
+      pendingSignals.push('language_changed');
+      updatePlanNow('user_request').catch(() => {});
+      return true;
+    }
+
     // === SUPERVISOR (background planner) ===
 
     // Cache DB context between planner cycles — SRS state doesn't shift much in 30s.
@@ -1010,33 +1068,8 @@ export default defineAgent({
             }
           }
 
-          if (!LANGUAGES[newLang]) {
-            console.warn(`[Trigger] Unsupported language: ${newLang}`);
-            continue;
-          }
-          const newConfig = getLanguageConfig(newLang);
-          try {
-            await db.update(users).set({ targetLanguage: newLang }).where(eq(users.id, userId));
-            console.log(`[Trigger] Language changed: ${targetLang} → ${newLang}`);
-          } catch (err) {
-            console.error(`[Trigger] Failed to update DB:`, err);
-            continue;
-          }
-          targetLang = newLang;
-          langConfig = newConfig;
-          // Update TTS voice to match the new language
-          const ttsService = session.tts as any;
-          if (ttsService?.updateVoice) {
-            ttsService.updateVoice(newConfig.tts.omnivoiceVoice || 'auto', newConfig.tts.omnivoiceLanguage || newLang);
-          } else {
-            console.warn('[Trigger] TTS does not support updateVoice — voice will stay as the old language');
-          }
-          await refreshDbContext();
-          invalidateLearnerView(userId, newLang);
-          setNudge(`The user just asked to switch to ${newConfig.name}. Switch immediately, no pushback — don't question it, joke about it, or make them justify it. That's not a teaching moment, it's a request to honor. Greet them warmly in ${newConfig.name} right now and find out what they know.`);
-          await refreshInstructions();
-          pendingSignals.push('language_changed');
-          updatePlanNow('user_request').catch(() => {});
+          const switched = await applyTargetLanguage(newLang, 'trigger');
+          if (!switched) continue;
         }
 
         if (trigger.type === 'difficulty_adjustment' && trigger.value) {
@@ -1852,10 +1885,10 @@ export default defineAgent({
     try {
       await session.generateReply({
         userInput: isDemoSession
-          // A demo visitor has no history to pick up from, and every second
-          // before they speak is a second of a 3-minute session gone — so
-          // the opening turn has to hand them something to say out loud.
-          ? `[system: a brand-new visitor just connected and chose ${langConfig.name} — run your opening turn now: greet them in ${langConfig.name}, translate it, invite them to say it back, and ask if they've studied it before. Keep it under 15 seconds.]`
+          // A demo visitor has no history to pick up from and has chosen
+          // nothing — the opening turn's whole job is to find out what
+          // they want to learn so the real conversation can start.
+          ? '[system: a brand-new visitor just connected, having chosen nothing — run your opening line now: say hello, ask what language they want to speak, and name the options. Keep it under 10 seconds, then stop and listen.]'
           : '[system: the user has just connected — greet them and pick up where you left off]',
       });
     } catch (err: any) {
