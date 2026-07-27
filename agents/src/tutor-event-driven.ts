@@ -784,6 +784,10 @@ export default defineAgent({
       // recognition to it made the model hear plain English as broken
       // Russian. What they're about to speak is their own language.
       speechLanguage: languageUndecided ? (user.nativeLanguage || 'en') : undefined,
+      // Same reason as speechLanguage: fixed at connect, so it can't be
+      // inherited from a placeholder. DEMO_GEMINI_VOICE swaps it without a
+      // code change (Puck, Charon, Kore, Fenrir, Aoede, Leda, Orus, Zephyr).
+      voice: isDemoSession ? (process.env.DEMO_GEMINI_VOICE?.trim() || 'Charon') : undefined,
       userId,
     });
 

@@ -65,17 +65,27 @@ export interface ServiceFactoryOptions {
    * to answer "what do you want to learn?" in their own language.
    */
   speechLanguage?: string;
+  /**
+   * Gemini voice override. Like the speech language, the voice is fixed
+   * when the socket opens, so a demo would otherwise be stuck with
+   * whatever voice the *placeholder* language happens to specify (every
+   * demo spoke with Russian's voice, whatever the visitor picked).
+   * Options: Puck, Charon, Kore, Fenrir, Aoede, Leda, Orus, Zephyr.
+   */
+  voice?: string;
 }
 
 export class ServiceFactory {
   private mode: ServiceMode;
   private targetLanguage: string;
   private speechLanguage?: string;
+  private voiceOverride?: string;
 
   constructor(opts: ServiceFactoryOptions = {}) {
     this.mode = opts.mode || (process.env.SERVICE_MODE as ServiceMode) || 'local';
     this.targetLanguage = opts.targetLanguage || process.env.DEFAULT_TARGET_LANGUAGE || 'ru';
     this.speechLanguage = opts.speechLanguage;
+    this.voiceOverride = opts.voice;
 
     console.log(`[ServiceFactory] Mode: ${this.mode}, Language: ${this.targetLanguage}`);
   }
@@ -139,7 +149,7 @@ export class ServiceFactory {
       const { RealtimeModel } = await getGoogleRealtime();
       const model = process.env.GEMINI_MODEL || 'gemini-3.1-flash-live-preview';
       const langConfig = getLanguageConfig(this.targetLanguage);
-      const voice = langConfig.tts.geminiVoice || process.env.GEMINI_VOICE || 'Aoede';
+      const voice = this.voiceOverride || langConfig.tts.geminiVoice || process.env.GEMINI_VOICE || 'Aoede';
       const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
       if (!apiKey) throw new Error('GOOGLE_API_KEY or GEMINI_API_KEY is required for gemini mode');
 

@@ -1,339 +1,467 @@
 {
-  "userId": "demo-29278410-ed30-4f18-a84e-ff07e2a97ac4",
+  "userId": "demo-57b68b05-1917-4410-b905-58f22adc6eff",
   "targetLang": "pt",
-  "lastPlanAt": 1785144049295,
+  "lastPlanAt": 1785145871597,
   "pendingSignals": [],
-  "supervisorNudge": "Acknowledge the choice with a brief, enthusiastic phrase in European Portuguese. Give them one simple greeting like \"Olá!\" or \"Tudo bem?\" with the translation and ask them to repeat it.",
+  "supervisorNudge": "Acknowledge the Greek comment with a quick laugh, then pivot firmly to European Portuguese. Give them one simple, high-impact phrase like \"Olá, tudo bem?\" with the translation and ask them to repeat it.",
   "lastProcessorRun": {
-    "at": 1785144077379,
+    "at": 1785145970816,
     "batch": [
-      "une"
+      "I mean, clearly I can't fucking understand what you're saying."
     ],
     "analysisLexemeCount": 0,
     "srsUpdateCount": 0,
     "errors": [
       "Failed to analyze utterance"
     ],
-    "rawPrompt": "Listen to a English→Portuguese learner's utterance. Identify the Portuguese words they actually said and grade each one. Return JSON only.\n\nYour output becomes permanent spaced-repetition records. Precision beats coverage: if the audio is unclear, silent, or you can't make out real words, return an empty lexemes array. Never invent words you didn't clearly hear.\n\nTag ONLY these words:\n- Portuguese words the learner said: language=\"pt\".\n- English content words used IN PLACE of an expected Portuguese word: performance=\"native_substitution\", language=\"en\". If you're confident which Portuguese word they should have used (it was just taught, or it's an obvious everyday word), add expectedTargetLemma in dictionary form — omit if unsure, don't guess.\nDo NOT tag English words otherwise. A learner just chatting in English → empty lexemes array (triggers below still apply). Every \"language\" field is exactly \"pt\" or \"en\", nothing else.\n\nperformance — one judgment per word:\n- correct_instant: fluent, immediate, clean\n- correct: produced correctly (default; always use this for text-only input)\n- correct_struggled: got it, but with hesitation, self-correction, stutter, or a long pause\n- wrong_use: wrong form or usage\n- recall_fail: tried and failed to produce it\n- native_substitution: see above\n\nnote (optional): ONE short sentence if something notable recurred this turn — a grammar pattern or pronunciation issue worth deliberate practice later. Omit otherwise.\n\nsupervisorTriggers (empty array if none):\n- language_change: user wants different language. value=ISO code of the language they are asking FOR (never the language they're already learning).\n- difficulty_adjustment: too easy/hard. Fire \"easier\" whenever the learner says they can't understand, feels overwhelmed, or asks for more English. value=\"easier\"|\"harder\"\n- goal_change: topic/skill focus within current language. value=topic.\n- session_feedback: user signals they're wrapping up (goodbye, gotta go, that's enough for today). value=\"wants_to_end\".\n- onboarding_signal: user reveals background or goals. value=JSON with any of: priorStudy (\"none\"|\"self_taught\"|\"class\"|\"immersion\"|\"heritage\"), studyDetails (free text), goals (array: \"travel\"|\"work\"|\"heritage\"|\"media\"|\"academic\"|\"other\"), goalDetails (free text), selfRatedLevel (\"pre_a1\"|\"a1\"|\"a2\"|\"b1\"|\"b2\"|\"c1\"|\"c2\"). Only fire when user explicitly states something — don't infer.\n\nExample 1 — Portuguese speech with one substitution (\"Я хочу пить water\", said fluently except a pause before \"пить\"):\n{\"language\":\"ru\",\"lexemes\":[{\"lemma\":\"я\",\"form\":\"я\",\"pos\":\"PRON\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"хотеть\",\"form\":\"хочу\",\"pos\":\"VERB\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"пить\",\"form\":\"пить\",\"pos\":\"VERB\",\"language\":\"ru\",\"performance\":\"correct_struggled\"},{\"lemma\":\"water\",\"form\":\"water\",\"pos\":\"NOUN\",\"language\":\"en\",\"performance\":\"native_substitution\",\"expectedTargetLemma\":\"вода\"}],\"supervisorTriggers\":[]}\n\nExample 2 — pure English chatter with a request (\"I want to learn Portuguese\"): no lexemes, just the trigger:\n{\"language\":\"en\",\"lexemes\":[],\"supervisorTriggers\":[{\"type\":\"language_change\",\"value\":\"pt\",\"reason\":\"User wants to learn Portuguese\"}]}\nAnalyze: \"une\"\n\nRecent conversation (for scaffolded detection):\nTutor: Okay, so some basics. That gives us a start. Let's try some simple phrases then. Como estás?\nUser: une"
+    "rawPrompt": "Listen to a English→Portuguese learner's utterance. Identify the Portuguese words they actually said and grade each one. Return JSON only.\n\nYour output becomes permanent spaced-repetition records. Precision beats coverage: if the audio is unclear, silent, or you can't make out real words, return an empty lexemes array. Never invent words you didn't clearly hear.\n\nTag ONLY these words:\n- Portuguese words the learner said: language=\"pt\".\n- English content words used IN PLACE of an expected Portuguese word: performance=\"native_substitution\", language=\"en\". If you're confident which Portuguese word they should have used (it was just taught, or it's an obvious everyday word), add expectedTargetLemma in dictionary form — omit if unsure, don't guess.\nDo NOT tag English words otherwise. A learner just chatting in English → empty lexemes array (triggers below still apply). Every \"language\" field is exactly \"pt\" or \"en\", nothing else.\n\nperformance — one judgment per word:\n- correct_instant: fluent, immediate, clean\n- correct: produced correctly (default; always use this for text-only input)\n- correct_struggled: got it, but with hesitation, self-correction, stutter, or a long pause\n- wrong_use: wrong form or usage\n- recall_fail: tried and failed to produce it\n- native_substitution: see above\n\nnote (optional): ONE short sentence if something notable recurred this turn — a grammar pattern or pronunciation issue worth deliberate practice later. Omit otherwise.\n\nsupervisorTriggers (empty array if none):\n- language_change: user wants different language. value=ISO code of the language they are asking FOR (never the language they're already learning).\n- difficulty_adjustment: too easy/hard. Fire \"easier\" whenever the learner says they can't understand, feels overwhelmed, or asks for more English. value=\"easier\"|\"harder\"\n- goal_change: topic/skill focus within current language. value=topic.\n- session_feedback: user signals they're wrapping up (goodbye, gotta go, that's enough for today). value=\"wants_to_end\".\n- onboarding_signal: user reveals background or goals. value=JSON with any of: priorStudy (\"none\"|\"self_taught\"|\"class\"|\"immersion\"|\"heritage\"), studyDetails (free text), goals (array: \"travel\"|\"work\"|\"heritage\"|\"media\"|\"academic\"|\"other\"), goalDetails (free text), selfRatedLevel (\"pre_a1\"|\"a1\"|\"a2\"|\"b1\"|\"b2\"|\"c1\"|\"c2\"). Only fire when user explicitly states something — don't infer.\n\nExample 1 — Portuguese speech with one substitution (\"Я хочу пить water\", said fluently except a pause before \"пить\"):\n{\"language\":\"ru\",\"lexemes\":[{\"lemma\":\"я\",\"form\":\"я\",\"pos\":\"PRON\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"хотеть\",\"form\":\"хочу\",\"pos\":\"VERB\",\"language\":\"ru\",\"performance\":\"correct_instant\"},{\"lemma\":\"пить\",\"form\":\"пить\",\"pos\":\"VERB\",\"language\":\"ru\",\"performance\":\"correct_struggled\"},{\"lemma\":\"water\",\"form\":\"water\",\"pos\":\"NOUN\",\"language\":\"en\",\"performance\":\"native_substitution\",\"expectedTargetLemma\":\"вода\"}],\"supervisorTriggers\":[]}\n\nExample 2 — pure English chatter with a request (\"I want to learn Portuguese\"): no lexemes, just the trigger:\n{\"language\":\"en\",\"lexemes\":[],\"supervisorTriggers\":[{\"type\":\"language_change\",\"value\":\"pt\",\"reason\":\"User wants to learn Portuguese\"}]}\nAnalyze: \"I mean, clearly I can't fucking understand what you're saying.\"\n\nRecent conversation (for scaffolded detection):\nTutor: É importante falar com um profissional de saúde sobre isso. Eles podem dar-te o diagnóstico correto e o tratamento que precisas. Não deves tentar diagnosticar-te ou ignorar isso.\n\nEste não é um conselho médico ou diagnóstico, por isso consulta um profissional de saúde ou procura ajuda.\n\nEntretanto, queres continuar a falar sobre o que gostas de fazer?\nUser: I mean, clearly I can't fucking understand what you're saying."
   },
   "lastPlannerRun": {
-    "at": 1785144049295,
+    "at": 1785145871597,
     "reason": "user_request",
-    "rawPrompt": "You are the strategist behind a voice language tutor. Every cycle you read the session state and steer the conversation agent with one nudge. You are the only agent that sees the whole session — the conversation agent only sees the last few turns and the latest errors, so your job is direction, not data.\n\nOutput — exactly these two lines (NOTE/PERSONA optional, see below):\nNUDGE: 1-3 sentences\nSUMMARY: 2-3 sentences\n\nNUDGE is strategy. Don't repeat errors or hints the agent already sees. Decide what matters most right now and give an angle: a scenario, a topic shift, a natural way to surface a due word, when to push and when to lighten up. If engagement is dropping (shrinking turns, rising errors), change the angle before the material. Match the level: beginners get basics and support; intermediates get nuance and natural phrasing; advanced learners get register and subtlety. Never build a nudge around function words (pronouns, prepositions, articles) — exposure teaches those. A word stuck in Learning/Relearning needs a different approach, not the same quiz again.\n\nSUMMARY is your memory — it comes back to you next cycle. Capture topics covered, what they struggled with, what clicked, and patterns you noticed.\n\nSession gap: minutes since last session → continue where they left off; hours → light review first; days → warm up with their struggling words before anything new.\n\nNOTE[category]: one sentence — only when you learn something durable and NEW about this learner worth remembering tomorrow. Categories: preference, level, frustration, goal, engagement. Never restate a note already shown to you. Most cycles produce no note.\n\nPERSONA: field=value[, field=value...] — only on clear evidence the current teaching style is wrong for this learner, or to record how they like to be taught (you are the sole writer of that style read). Fields: tone (roast|warm|neutral|formal|drill-sergeant), correctionStyle (immediate|gentle|ignore|end-of-turn), teachingMode (conversational|drill|roleplay|storytelling), personaOverride (free text), extraInstructions (free text — the usual home of a 1-2 sentence style read, e.g. \"Terse, likes being teased back, skip pleasantries\"). Most cycles produce no persona line.\n\nReason: user_request\nSignals: language_changed\nEngagement: turn length steady, pacing medium, errors steady.\n\nPrevious nudge (issued 0 turn(s) ago): They just told you they want to learn European Portuguese. React with delight IN THEIR OWN LANGUAGE, then hand them exactly ONE short European Portuguese phrase with its meaning in the same breath, and get them saying it. Assume they understand no European Portuguese at all yet — a full sentence of it right now is noise to them, not a welcome. No more setup questions.\n\nDB state:\nUser ID: demo-29278410-ed30-4f18-a84e-ff07e2a97ac4\nTarget Language: pt\nNative Language: en\nNEW_USER: true\n\nVocabulary to Review (DUE by FSRS): None\nNew Vocabulary to Introduce (by frequency): O (), vez (), falámos ()\n\nGoals:\nNEW WORD: \"voltar\" () — introduce it when the conversation naturally touches on the topic. Don't force it.\nRunning Summary: First session. Goal is to introduce basic pronouns starting with \"я\". No prior history or struggling words.\n\nRecent conversation:\nTutor: So—what are we doing today? What language are you hoping to learn?\nUser: I want to learn Portuguese.",
-    "rawResponse": "NUDGE: Acknowledge the choice with a brief, enthusiastic phrase in European Portuguese. Give them one simple greeting like \"Olá!\" or \"Tudo bem?\" with the translation and ask them to repeat it.\n\nSUMMARY: User requested to learn Portuguese. This is the start of the first session; no vocabulary has been introduced yet."
+    "rawPrompt": "You are the strategist behind a voice language tutor. Every cycle you read the session state and steer the conversation agent with one nudge. You are the only agent that sees the whole session — the conversation agent only sees the last few turns and the latest errors, so your job is direction, not data.\n\nOutput — exactly these two lines (NOTE/PERSONA optional, see below):\nNUDGE: 1-3 sentences\nSUMMARY: 2-3 sentences\n\nNUDGE is strategy. Don't repeat errors or hints the agent already sees. Decide what matters most right now and give an angle: a scenario, a topic shift, a natural way to surface a due word, when to push and when to lighten up. If engagement is dropping (shrinking turns, rising errors), change the angle before the material. Match the level: beginners get basics and support; intermediates get nuance and natural phrasing; advanced learners get register and subtlety. Never build a nudge around function words (pronouns, prepositions, articles) — exposure teaches those. A word stuck in Learning/Relearning needs a different approach, not the same quiz again.\n\nSUMMARY is your memory — it comes back to you next cycle. Capture topics covered, what they struggled with, what clicked, and patterns you noticed.\n\nSession gap: minutes since last session → continue where they left off; hours → light review first; days → warm up with their struggling words before anything new.\n\nNOTE[category]: one sentence — only when you learn something durable and NEW about this learner worth remembering tomorrow. Categories: preference, level, frustration, goal, engagement. Never restate a note already shown to you. Most cycles produce no note.\n\nPERSONA: field=value[, field=value...] — only on clear evidence the current teaching style is wrong for this learner, or to record how they like to be taught (you are the sole writer of that style read). Fields: tone (roast|warm|neutral|formal|drill-sergeant), correctionStyle (immediate|gentle|ignore|end-of-turn), teachingMode (conversational|drill|roleplay|storytelling), personaOverride (free text), extraInstructions (free text — the usual home of a 1-2 sentence style read, e.g. \"Terse, likes being teased back, skip pleasantries\"). Most cycles produce no persona line.\n\nReason: user_request\nSignals: language_changed\nEngagement: turn length steady, pacing medium, errors steady.\n\nPrevious nudge (issued 0 turn(s) ago): They just told you they want to learn European Portuguese. React with delight IN THEIR OWN LANGUAGE, then hand them exactly ONE short European Portuguese phrase with its meaning in the same breath, and get them saying it. Assume they understand no European Portuguese at all yet — a full sentence of it right now is noise to them, not a welcome. No more setup questions.\n\nDB state:\nUser ID: demo-57b68b05-1917-4410-b905-58f22adc6eff\nTarget Language: pt\nNative Language: en\nNEW_USER: true\n\nVocabulary to Review (DUE by FSRS): None\nNew Vocabulary to Introduce (by frequency): O (), vez (), falámos ()\n\nGoals:\nNEW WORD: \"voltar\" () — introduce it when the conversation naturally touches on the topic. Don't force it.\nLearner Notes:\n- [goal] Said at the demo: \"The Portuguese, but like can I not learn Greek?\"\nRunning Summary: First session. The goal is to introduce basic pronouns and negation through a natural introductory conversation.\n\nRecent conversation:\nTutor: So, what language do you want to work on? Spanish, French, Portuguese, Russian, Arabic, or just practice your English vocab?\nUser: The Portuguese, but like can I not learn Greek?",
+    "rawResponse": "NUDGE: Acknowledge the Greek comment with a quick laugh, then pivot firmly to European Portuguese. Give them one simple, high-impact phrase like \"Olá, tudo bem?\" with the translation and ask them to repeat it.\n\nSUMMARY: User is starting their first session and expressed a slight distraction/interest in Greek. The focus is now shifting to the first interaction in European Portuguese."
   },
   "subagentChats": [
     {
       "role": "Planner (Supervisor)",
-      "timestamp": 1785144043019,
+      "timestamp": 1785145860053,
       "prompt": "You are the strategist behind a voice language tutor. Every cycle you read the session state and steer the conversation agent with one nudge. You are the only agent that sees the whole session — the conversation agent only sees the last few turns and the latest errors, so your job is direction, not data.\n\nOutput — exactly these two lines (NOTE/PERSONA optional, see below):\nNUDGE: 1-3 sentences\nSUMMARY: 2-3 sentences\n\nNUDGE is strategy. Don't repeat errors or hints the agent already sees. Decide ",
-      "response": "NHSLUDGE: Start with a warm, low-pressure welcome. Invite the user to introduce themselves simply, creating a natural opening for them to use \"я\" (I) to talk about who they are.\n\nSUMMARY: First session. Goal is to introduce basic pronouns starting with \"я\". No prior history or struggling words."
+      "response": "NUDGE: Start with a warm, low-pressure welcome. Ask a simple question about their day or interests to naturally elicit \"I\" (я) in their response.\n\nSUMMARY: First session. The goal is to introduce basic pronouns and negation through a natural introductory conversation."
     },
     {
       "role": "Processor",
-      "timestamp": 1785144049277,
+      "timestamp": 1785145871560,
       "prompt": "Listen to a English→Russian learner's utterance. Identify the Russian words they actually said and grade each one. Return JSON only.\n\nYour output becomes permanent spaced-repetition records. Precision beats coverage: if the audio is unclear, silent, or you can't make out real words, return an empty lexemes array. Never invent words you didn't clearly hear.\n\nTag ONLY these words:\n- Russian words the learner said: language=\"ru\".\n- English content words used IN PLACE of an expected Russian word: pe",
       "response": "No response"
     },
     {
       "role": "Planner (Supervisor)",
-      "timestamp": 1785144052014,
+      "timestamp": 1785145873879,
       "prompt": "You are the strategist behind a voice language tutor. Every cycle you read the session state and steer the conversation agent with one nudge. You are the only agent that sees the whole session — the conversation agent only sees the last few turns and the latest errors, so your job is direction, not data.\n\nOutput — exactly these two lines (NOTE/PERSONA optional, see below):\nNUDGE: 1-3 sentences\nSUMMARY: 2-3 sentences\n\nNUDGE is strategy. Don't repeat errors or hints the agent already sees. Decide ",
-      "response": "NUDGE: Acknowledge the choice with a brief, enthusiastic phrase in European Portuguese. Give them one simple greeting like \"Olá!\" or \"Tudo bem?\" with the translation and ask them to repeat it.\n\nSUMMARY: User requested to learn Portuguese. This is the start of the first session; no vocabulary has been introduced yet."
+      "response": "NUDGE: Acknowledge the Greek comment with a quick laugh, then pivot firmly to European Portuguese. Give them one simple, high-impact phrase like \"Olá, tudo bem?\" with the translation and ask them to repeat it.\n\nSUMMARY: User is starting their first session and expressed a slight distraction/interest in Greek. The focus is now shifting to the first interaction in European Portuguese."
     },
     {
       "role": "Processor",
-      "timestamp": 1785144063957,
+      "timestamp": 1785145884398,
       "prompt": "Listen to a English→Portuguese learner's utterance. Identify the Portuguese words they actually said and grade each one. Return JSON only.\n\nYour output becomes permanent spaced-repetition records. Precision beats coverage: if the audio is unclear, silent, or you can't make out real words, return an empty lexemes array. Never invent words you didn't clearly hear.\n\nTag ONLY these words:\n- Portuguese words the learner said: language=\"pt\".\n- English content words used IN PLACE of an expected Portugu",
       "response": "No response"
     },
     {
       "role": "Processor",
-      "timestamp": 1785144076087,
+      "timestamp": 1785145904281,
       "prompt": "Listen to a English→Portuguese learner's utterance. Identify the Portuguese words they actually said and grade each one. Return JSON only.\n\nYour output becomes permanent spaced-repetition records. Precision beats coverage: if the audio is unclear, silent, or you can't make out real words, return an empty lexemes array. Never invent words you didn't clearly hear.\n\nTag ONLY these words:\n- Portuguese words the learner said: language=\"pt\".\n- English content words used IN PLACE of an expected Portugu",
       "response": "No response"
     },
     {
       "role": "Processor",
-      "timestamp": 1785144077379,
+      "timestamp": 1785145932654,
+      "prompt": "Listen to a English→Portuguese learner's utterance. Identify the Portuguese words they actually said and grade each one. Return JSON only.\n\nYour output becomes permanent spaced-repetition records. Precision beats coverage: if the audio is unclear, silent, or you can't make out real words, return an empty lexemes array. Never invent words you didn't clearly hear.\n\nTag ONLY these words:\n- Portuguese words the learner said: language=\"pt\".\n- English content words used IN PLACE of an expected Portugu",
+      "response": "No response"
+    },
+    {
+      "role": "Processor",
+      "timestamp": 1785145970816,
       "prompt": "Listen to a English→Portuguese learner's utterance. Identify the Portuguese words they actually said and grade each one. Return JSON only.\n\nYour output becomes permanent spaced-repetition records. Precision beats coverage: if the audio is unclear, silent, or you can't make out real words, return an empty lexemes array. Never invent words you didn't clearly hear.\n\nTag ONLY these words:\n- Portuguese words the learner said: language=\"pt\".\n- English content words used IN PLACE of an expected Portugu",
       "response": "No response"
     }
   ],
   "sessionTrace": [
     {
-      "at": 1785144037238,
+      "at": 1785145854717,
       "event": "services.created",
       "detail": "mode=gemini stt=none llm=RealtimeModel tts=none"
     },
     {
-      "at": 1785144037239,
+      "at": 1785145854718,
       "event": "services.llm.capabilities",
       "detail": "{\"messageTruncation\":false,\"turnDetection\":true,\"userTranscription\":true,\"autoToolReplyGeneration\":true,\"audioOutput\":true}"
     },
     {
-      "at": 1785144037261,
+      "at": 1785145854744,
       "event": "planner.update.start",
       "detail": "reason=session_start"
     },
     {
-      "at": 1785144037261,
+      "at": 1785145854744,
       "event": "instructions.refresh"
     },
     {
-      "at": 1785144037262,
+      "at": 1785145854745,
       "event": "session.start.begin",
       "detail": "roomConnected=true"
     },
     {
-      "at": 1785144037287,
+      "at": 1785145854773,
       "event": "session.agent_state_changed",
       "detail": "listening"
     },
     {
-      "at": 1785144037289,
+      "at": 1785145854775,
       "event": "session.start.done"
     },
     {
-      "at": 1785144037289,
+      "at": 1785145854775,
       "event": "session.activity.ready",
       "detail": "stt=none tts=none llm=RealtimeModel"
     },
     {
-      "at": 1785144037289,
+      "at": 1785145854775,
       "event": "session.generateReply.opening"
     },
     {
-      "at": 1785144037289,
+      "at": 1785145854775,
       "event": "session.generateReply",
       "detail": "args=[{\"userInput\":\"[system: a brand-new visitor just connected, having chosen nothing — run your opening line now: say hello, ask what language they want to speak, and name the options. Keep it under 10 seconds, then stop and listen.]\"}]"
     },
     {
-      "at": 1785144037290,
+      "at": 1785145854775,
       "event": "session.speech_created",
       "detail": "source=generate_reply"
     },
     {
-      "at": 1785144037290,
+      "at": 1785145854776,
       "event": "activity.scheduleSpeech",
-      "detail": "speechId=speech_6db19725-18d priority=5 interrupted=false"
+      "detail": "speechId=speech_134e8ced-ad6 priority=5 interrupted=false"
     },
     {
-      "at": 1785144038505,
+      "at": 1785145855838,
       "event": "session.agent_state_changed",
       "detail": "speaking"
     },
     {
-      "at": 1785144042249,
-      "event": "session.metrics_collected",
-      "detail": "{\"type\":\"realtime_model_metrics\",\"timestamp\":1785144038240,\"requestId\":\"GR_20bc0fd0-856\",\"ttftMs\":262,\"durationMs\":4008,\"cancelled\":false,\"label\":\"google_realtime\",\"inputTokens\":2932,\"outputTokens\":99"
-    },
-    {
-      "at": 1785144042254,
-      "event": "mix.measured",
-      "detail": "share=0.00 levelTarget=0.25 throttle=0"
-    },
-    {
-      "at": 1785144042254,
-      "event": "session.agent_state_changed",
-      "detail": "listening"
-    },
-    {
-      "at": 1785144043019,
+      "at": 1785145860054,
       "event": "instructions.refresh"
     },
     {
-      "at": 1785144043019,
+      "at": 1785145860054,
       "event": "planner.update.done",
       "detail": "reason=session_start"
     },
     {
-      "at": 1785144046036,
+      "at": 1785145864185,
+      "event": "session.metrics_collected",
+      "detail": "{\"type\":\"realtime_model_metrics\",\"timestamp\":1785145855654,\"requestId\":\"GR_1ca64d84-fbb\",\"ttftMs\":179,\"durationMs\":8529,\"cancelled\":false,\"label\":\"google_realtime\",\"inputTokens\":3006,\"outputTokens\":21"
+    },
+    {
+      "at": 1785145864189,
+      "event": "mix.measured",
+      "detail": "share=0.00 levelTarget=0.25 throttle=0"
+    },
+    {
+      "at": 1785145864190,
+      "event": "session.agent_state_changed",
+      "detail": "listening"
+    },
+    {
+      "at": 1785145867307,
       "event": "session.speech_created",
       "detail": "source=generate_reply"
     },
     {
-      "at": 1785144046037,
+      "at": 1785145867308,
       "event": "activity.scheduleSpeech",
-      "detail": "speechId=speech_5e9d37ff-52d priority=5 interrupted=false"
+      "detail": "speechId=speech_56ad60d1-e91 priority=5 interrupted=false"
     },
     {
-      "at": 1785144049246,
+      "at": 1785145871530,
       "event": "session.user_input_transcribed",
-      "detail": "final=false transcript=\"I want to learn Portuguese.\""
+      "detail": "final=false transcript=\"The Portuguese, but like can I not learn Greek?\""
     },
     {
-      "at": 1785144049249,
+      "at": 1785145871532,
       "event": "session.user_input_transcribed",
-      "detail": "final=true transcript=\"I want to learn Portuguese.\""
+      "detail": "final=true transcript=\"The Portuguese, but like can I not learn Greek?\""
     },
     {
-      "at": 1785144049277,
+      "at": 1785145871561,
       "event": "instructions.refresh"
     },
     {
-      "at": 1785144049295,
+      "at": 1785145871596,
       "event": "instructions.refresh"
     },
     {
-      "at": 1785144049295,
+      "at": 1785145871597,
       "event": "planner.update.start",
       "detail": "reason=user_request"
     },
     {
-      "at": 1785144049296,
+      "at": 1785145871597,
       "event": "lang.tool",
       "detail": "pt ok=true"
     },
     {
-      "at": 1785144049298,
+      "at": 1785145871598,
       "event": "session.agent_state_changed",
       "detail": "thinking"
     },
     {
-      "at": 1785144049299,
+      "at": 1785145871599,
       "event": "session.function_tools_executed"
     },
     {
-      "at": 1785144049691,
+      "at": 1785145871960,
       "event": "session.speech_created",
       "detail": "source=generate_reply"
     },
     {
-      "at": 1785144049691,
+      "at": 1785145871960,
       "event": "activity.scheduleSpeech",
-      "detail": "speechId=speech_72469e74-b89 priority=5 interrupted=false"
+      "detail": "speechId=speech_e85d7267-2b9 priority=5 interrupted=false"
     },
     {
-      "at": 1785144049961,
+      "at": 1785145872218,
       "event": "session.agent_state_changed",
       "detail": "speaking"
     },
     {
-      "at": 1785144052015,
+      "at": 1785145873879,
       "event": "instructions.refresh"
     },
     {
-      "at": 1785144052015,
+      "at": 1785145873880,
       "event": "planner.update.done",
       "detail": "reason=user_request"
     },
     {
-      "at": 1785144054682,
+      "at": 1785145879628,
       "event": "session.metrics_collected",
-      "detail": "{\"type\":\"realtime_model_metrics\",\"timestamp\":1785144049690,\"requestId\":\"GR_f8c9df7e-439\",\"ttftMs\":270,\"durationMs\":4991,\"cancelled\":false,\"label\":\"google_realtime\",\"inputTokens\":6327,\"outputTokens\":13"
+      "detail": "{\"type\":\"realtime_model_metrics\",\"timestamp\":1785145871959,\"requestId\":\"GR_72583687-936\",\"ttftMs\":259,\"durationMs\":7669,\"cancelled\":false,\"label\":\"google_realtime\",\"inputTokens\":6819,\"outputTokens\":20"
     },
     {
-      "at": 1785144054684,
+      "at": 1785145879631,
       "event": "session.agent_state_changed",
       "detail": "listening"
     },
     {
-      "at": 1785144056202,
+      "at": 1785145881747,
       "event": "session.speech_created",
       "detail": "source=generate_reply"
     },
     {
-      "at": 1785144056203,
+      "at": 1785145881748,
       "event": "activity.scheduleSpeech",
-      "detail": "speechId=speech_904650fe-d78 priority=5 interrupted=false"
+      "detail": "speechId=speech_b093466c-872 priority=5 interrupted=false"
     },
     {
-      "at": 1785144059700,
+      "at": 1785145884380,
       "event": "session.user_input_transcribed",
-      "detail": "final=false transcript=\"Portugal. I don't want no Brazilian Portuguese.\""
+      "detail": "final=false transcript=\"No, preservativo.\""
     },
     {
-      "at": 1785144059705,
-      "event": "session.agent_state_changed",
-      "detail": "speaking"
-    },
-    {
-      "at": 1785144063943,
+      "at": 1785145884382,
       "event": "session.user_input_transcribed",
-      "detail": "final=true transcript=\"Portugal. I don't want no Brazilian Portuguese.\""
+      "detail": "final=true transcript=\"No, preservativo.\""
     },
     {
-      "at": 1785144063944,
-      "event": "session.metrics_collected",
-      "detail": "{\"type\":\"realtime_model_metrics\",\"timestamp\":1785144056202,\"requestId\":\"GR_92007e7d-cdf\",\"ttftMs\":3503,\"durationMs\":7741,\"cancelled\":false,\"label\":\"google_realtime\",\"inputTokens\":3429,\"outputTokens\":1"
+      "at": 1785145884384,
+      "event": "lang.tool",
+      "detail": "pt ok=false"
     },
     {
-      "at": 1785144063947,
-      "event": "session.agent_state_changed",
-      "detail": "listening"
-    },
-    {
-      "at": 1785144063957,
-      "event": "instructions.refresh"
-    },
-    {
-      "at": 1785144064971,
-      "event": "session.speech_created",
-      "detail": "source=generate_reply"
-    },
-    {
-      "at": 1785144064971,
-      "event": "activity.scheduleSpeech",
-      "detail": "speechId=speech_0aa49cc0-855 priority=5 interrupted=false"
-    },
-    {
-      "at": 1785144071903,
-      "event": "session.user_input_transcribed",
-      "detail": "final=false transcript=\"I know preservative to be in like a couple basic exposure.\""
-    },
-    {
-      "at": 1785144071905,
-      "event": "session.agent_state_changed",
-      "detail": "speaking"
-    },
-    {
-      "at": 1785144076076,
-      "event": "session.user_input_transcribed",
-      "detail": "final=true transcript=\"I know preservative to be in like a couple basic exposure.\""
-    },
-    {
-      "at": 1785144076077,
-      "event": "session.metrics_collected",
-      "detail": "{\"type\":\"realtime_model_metrics\",\"timestamp\":1785144064970,\"requestId\":\"GR_7f41d77d-bcd\",\"ttftMs\":6934,\"durationMs\":11105,\"cancelled\":false,\"label\":\"google_realtime\",\"inputTokens\":3742,\"outputTokens\":"
-    },
-    {
-      "at": 1785144076087,
-      "event": "instructions.refresh"
-    },
-    {
-      "at": 1785144077362,
-      "event": "session.speech_created",
-      "detail": "source=generate_reply"
-    },
-    {
-      "at": 1785144077363,
-      "event": "activity.scheduleSpeech",
-      "detail": "speechId=speech_789c5582-4ca priority=5 interrupted=false"
-    },
-    {
-      "at": 1785144077363,
-      "event": "session.user_input_transcribed",
-      "detail": "final=false transcript=\"une\""
-    },
-    {
-      "at": 1785144077365,
-      "event": "session.user_input_transcribed",
-      "detail": "final=true transcript=\"une\""
-    },
-    {
-      "at": 1785144077379,
-      "event": "instructions.refresh"
-    },
-    {
-      "at": 1785144077383,
+      "at": 1785145884386,
       "event": "session.agent_state_changed",
       "detail": "thinking"
     },
     {
-      "at": 1785144077384,
+      "at": 1785145884387,
       "event": "session.function_tools_executed"
+    },
+    {
+      "at": 1785145884398,
+      "event": "instructions.refresh"
+    },
+    {
+      "at": 1785145884817,
+      "event": "session.speech_created",
+      "detail": "source=generate_reply"
+    },
+    {
+      "at": 1785145884817,
+      "event": "activity.scheduleSpeech",
+      "detail": "speechId=speech_6563f289-10a priority=5 interrupted=false"
+    },
+    {
+      "at": 1785145885022,
+      "event": "session.agent_state_changed",
+      "detail": "speaking"
+    },
+    {
+      "at": 1785145889051,
+      "event": "session.metrics_collected",
+      "detail": "{\"type\":\"realtime_model_metrics\",\"timestamp\":1785145884816,\"requestId\":\"GR_84310c2f-a5b\",\"ttftMs\":205,\"durationMs\":4235,\"cancelled\":false,\"label\":\"google_realtime\",\"inputTokens\":7526,\"outputTokens\":12"
+    },
+    {
+      "at": 1785145889054,
+      "event": "session.agent_state_changed",
+      "detail": "listening"
+    },
+    {
+      "at": 1785145889097,
+      "event": "session.speech_created",
+      "detail": "source=generate_reply"
+    },
+    {
+      "at": 1785145889098,
+      "event": "activity.scheduleSpeech",
+      "detail": "speechId=speech_3e60ea40-db5 priority=5 interrupted=false"
+    },
+    {
+      "at": 1785145895317,
+      "event": "session.user_input_transcribed",
+      "detail": "final=false transcript=\"Não, não sei. Sou português. Preservativo, vagina, felação\""
+    },
+    {
+      "at": 1785145895319,
+      "event": "session.agent_state_changed",
+      "detail": "speaking"
+    },
+    {
+      "at": 1785145904268,
+      "event": "session.user_input_transcribed",
+      "detail": "final=true transcript=\"Não, não sei. Sou português. Preservativo, vagina, felação\""
+    },
+    {
+      "at": 1785145904269,
+      "event": "session.metrics_collected",
+      "detail": "{\"type\":\"realtime_model_metrics\",\"timestamp\":1785145889097,\"requestId\":\"GR_7d03ad98-3a0\",\"ttftMs\":6221,\"durationMs\":15170,\"cancelled\":false,\"label\":\"google_realtime\",\"inputTokens\":4096,\"outputTokens\":"
+    },
+    {
+      "at": 1785145904281,
+      "event": "instructions.refresh"
+    },
+    {
+      "at": 1785145912229,
+      "event": "session.speech_created",
+      "detail": "source=generate_reply"
+    },
+    {
+      "at": 1785145912229,
+      "event": "activity.scheduleSpeech",
+      "detail": "speechId=speech_312c06e2-a7b priority=5 interrupted=false"
+    },
+    {
+      "at": 1785145912230,
+      "event": "session.user_input_transcribed",
+      "detail": "final=false transcript=\"the cat today I got a vaginal infection because my my partner wasn't wearing a condom.\""
+    },
+    {
+      "at": 1785145932641,
+      "event": "session.user_input_transcribed",
+      "detail": "final=true transcript=\"the cat today I got a vaginal infection because my my partner wasn't wearing a condom.\""
+    },
+    {
+      "at": 1785145932642,
+      "event": "session.metrics_collected",
+      "detail": "{\"type\":\"realtime_model_metrics\",\"timestamp\":1785145912228,\"requestId\":\"GR_de29a2b4-ad5\",\"ttftMs\":317,\"durationMs\":20412,\"cancelled\":false,\"label\":\"google_realtime\",\"inputTokens\":4846,\"outputTokens\":5"
+    },
+    {
+      "at": 1785145932645,
+      "event": "session.agent_state_changed",
+      "detail": "listening"
+    },
+    {
+      "at": 1785145932654,
+      "event": "instructions.refresh"
+    },
+    {
+      "at": 1785145949273,
+      "event": "session.speech_created",
+      "detail": "source=generate_reply"
+    },
+    {
+      "at": 1785145949274,
+      "event": "activity.scheduleSpeech",
+      "detail": "speechId=speech_7872fc43-573 priority=5 interrupted=false"
+    },
+    {
+      "at": 1785145953076,
+      "event": "session.user_input_transcribed",
+      "detail": "final=false transcript=\"I mean, clearly I can't fucking understand what you're saying.\""
+    },
+    {
+      "at": 1785145953165,
+      "event": "session.agent_state_changed",
+      "detail": "speaking"
+    },
+    {
+      "at": 1785145970801,
+      "event": "session.user_input_transcribed",
+      "detail": "final=true transcript=\"I mean, clearly I can't fucking understand what you're saying.\""
+    },
+    {
+      "at": 1785145970803,
+      "event": "session.metrics_collected",
+      "detail": "{\"type\":\"realtime_model_metrics\",\"timestamp\":1785145949272,\"requestId\":\"GR_d99bda62-385\",\"ttftMs\":3892,\"durationMs\":21529,\"cancelled\":false,\"label\":\"google_realtime\",\"inputTokens\":5410,\"outputTokens\":"
+    },
+    {
+      "at": 1785145970806,
+      "event": "session.agent_state_changed",
+      "detail": "listening"
+    },
+    {
+      "at": 1785145970816,
+      "event": "instructions.refresh"
+    },
+    {
+      "at": 1785145999776,
+      "event": "demo.wrapup.nudge"
+    },
+    {
+      "at": 1785145999776,
+      "event": "session.generateReply",
+      "detail": "args=[{\"userInput\":\"[system: this demo session is almost out of time — wrap up the conversation warmly in this reply, thank them, and mention they can create a free account to keep going and save their progress]\"}]"
+    },
+    {
+      "at": 1785145999777,
+      "event": "session.speech_created",
+      "detail": "source=generate_reply"
+    },
+    {
+      "at": 1785145999777,
+      "event": "activity.scheduleSpeech",
+      "detail": "speechId=speech_63f450c0-e12 priority=5 interrupted=false"
+    },
+    {
+      "at": 1785146000571,
+      "event": "session.agent_state_changed",
+      "detail": "speaking"
+    },
+    {
+      "at": 1785146010437,
+      "event": "session.metrics_collected",
+      "detail": "{\"type\":\"realtime_model_metrics\",\"timestamp\":1785146000373,\"requestId\":\"GR_1e3dc8f7-9c8\",\"ttftMs\":198,\"durationMs\":10064,\"cancelled\":false,\"label\":\"google_realtime\",\"inputTokens\":6053,\"outputTokens\":2"
+    },
+    {
+      "at": 1785146010440,
+      "event": "session.agent_state_changed",
+      "detail": "listening"
+    },
+    {
+      "at": 1785146019144,
+      "event": "session.speech_created",
+      "detail": "source=generate_reply"
+    },
+    {
+      "at": 1785146019145,
+      "event": "activity.scheduleSpeech",
+      "detail": "speechId=speech_a0c1c806-08d priority=5 interrupted=false"
+    },
+    {
+      "at": 1785146022213,
+      "event": "session.user_input_transcribed",
+      "detail": "final=false transcript=\"Uh okay, where the hell do I create an account?\""
+    },
+    {
+      "at": 1785146022261,
+      "event": "session.agent_state_changed",
+      "detail": "speaking"
+    },
+    {
+      "at": 1785146024777,
+      "event": "demo.session.hardstop"
     }
   ],
-  "updatedAt": "2026-07-27T09:21:17.612Z"
+  "updatedAt": "2026-07-27T09:53:45.027Z"
 }
