@@ -535,9 +535,17 @@ export class RealtimeSession extends llm.RealtimeSession {
     const appendCtx = llm.ChatContext.empty();
     for (const [, itemId] of diffOps.toCreate) {
       const item = chatCtx.getById(itemId);
-      if (item) {
-        appendCtx.items.push(item);
-      }
+      if (!item) continue;
+      // Never push the agent's own replies back to Gemini. The session
+      // appends every spoken agent turn to the local chat context, so any
+      // refresh after the agent talks put a role="model" turn in this
+      // diff — and echoing Gemini's own output back at it as client
+      // content is rejected outright: the socket dies with code 1007
+      // "Request contains an invalid argument", killing the conversation
+      // mid-sentence. It has this content already; only what came from
+      // OUR side is news to it.
+      if (item.type === 'message' && item.role === 'assistant') continue;
+      appendCtx.items.push(item);
     }
 
     if (appendCtx.items.length > 0) {
@@ -763,7 +771,7 @@ export class RealtimeSession extends llm.RealtimeSession {
               }
             },
             onclose: (event: CloseEvent) => {
-              this.#logger.debug('Gemini Live session closed:', event.code, event.reason);
+              this.#logger.debug(`Gemini Live session closed: code=${event.code} reason=${event.reason}`);
               this.markCurrentGenerationDone();
             },
           },
@@ -883,8 +891,13 @@ export class RealtimeSession extends llm.RealtimeSession {
           case 'realtime_input':
             const { mediaChunks, activityStart, activityEnd } = msg.value;
             if (mediaChunks) {
+              // `{ media: ... }` serializes to the deprecated `mediaChunks`
+              // wire field, which Gemini's server now hard-rejects (closes
+              // the session with code 1007). `{ audio: ... }` takes the same
+              // { mimeType, data } shape and serializes to the field the
+              // server actually still accepts.
               for (const mediaChunk of mediaChunks) {
-                await session.sendRealtimeInput({ media: mediaChunk });
+                await session.sendRealtimeInput({ audio: mediaChunk });
               }
             }
             if (activityStart) await session.sendRealtimeInput({ activityStart });

@@ -28,10 +28,12 @@
 import * as openai from '@livekit/agents-plugin-openai';
 import * as silero from '@livekit/agents-plugin-silero';
 import { Modality } from '@google/genai';
+import { llm as llmRuntime } from '@livekit/agents';
 import type { llm, stt, tts } from '@livekit/agents';
 
 import { createTTS } from '../tts/fallback.js';
 import { getLanguageConfig } from '../config/languages.js';
+import { resolveVoice } from '../config/voices.js';
 import { GemmaAudioSTT } from '../stt/gemma-audio-stt.js';
 import { OpenRouterLLM } from '../llm/openrouter-llm.js';
 import { GemmaAudioLLM } from '../llm/gemma-audio-llm.js';
@@ -46,6 +48,24 @@ async function getGoogleRealtime() {
   if (!_googleRealtime) {
     const googlePlugin = await import('@livekit/agents-plugin-google');
     _googleRealtime = googlePlugin.beta.realtime;
+
+    // Workaround: agents-plugin-google's RealtimeModel ends up extending a
+    // *different* loaded copy of @livekit/agents' RealtimeModel class than
+    // the one @livekit/agents' own AgentActivity checks against internally
+    // (`this.llm instanceof RealtimeModel` in agent_activity.js) — confirmed
+    // via a standalone repro, same lockfile-resolved package version on
+    // disk, just two distinct class objects at runtime (likely a tsx/dynamic
+    // -import module-instance split, root cause not fully pinned down).
+    // Without this, that instanceof check silently fails, AgentActivity
+    // never opens a realtime session, and the whole gemini-mode demo hangs
+    // in total silence with no error anywhere. Re-parenting the plugin
+    // class's prototype chain (not per-instance) fixes `instanceof` for
+    // every instance while leaving all of the plugin's own methods intact.
+    Object.setPrototypeOf(
+      Object.getPrototypeOf(_googleRealtime.RealtimeModel.prototype),
+      llmRuntime.RealtimeModel.prototype,
+    );
+    Object.setPrototypeOf(_googleRealtime.RealtimeModel, llmRuntime.RealtimeModel);
   }
   return _googleRealtime;
 }
@@ -60,17 +80,37 @@ export interface ServiceFactoryOptions {
    *  lib/google-budget.ts. Overrides GOOGLE_API_KEY/GEMINI_API_KEY for
    *  gemini mode only when set. */
   googleApiKey?: string;
+  /**
+   * ISO 639-1 override for the speech/transcription language, when the
+   * language the user will actually SPEAK isn't the target language.
+   * Needed by the anonymous demo, which connects before the visitor has
+   * chosen anything: the target is still a placeholder, but they're about
+   * to answer "what do you want to learn?" in their own language.
+   */
+  speechLanguage?: string;
+  /**
+   * Gemini voice override. Like the speech language, the voice is fixed
+   * when the socket opens, so a demo would otherwise be stuck with
+   * whatever voice the *placeholder* language happens to specify (every
+   * demo spoke with Russian's voice, whatever the visitor picked).
+   * Options: Puck, Charon, Kore, Fenrir, Aoede, Leda, Orus, Zephyr.
+   */
+  voice?: string;
 }
 
 export class ServiceFactory {
   private mode: ServiceMode;
   private targetLanguage: string;
   private googleApiKey?: string;
+  private speechLanguage?: string;
+  private voiceOverride?: string;
 
   constructor(opts: ServiceFactoryOptions = {}) {
     this.mode = opts.mode || (process.env.SERVICE_MODE as ServiceMode) || 'local';
     this.targetLanguage = opts.targetLanguage || process.env.DEFAULT_TARGET_LANGUAGE || 'ru';
     this.googleApiKey = opts.googleApiKey;
+    this.speechLanguage = opts.speechLanguage;
+    this.voiceOverride = opts.voice;
 
     console.log(`[ServiceFactory] Mode: ${this.mode}, Language: ${this.targetLanguage}`);
   }
@@ -174,8 +214,11 @@ export class ServiceFactory {
       const { RealtimeModel } = await getGoogleRealtime();
       const model = process.env.GEMINI_MODEL || 'gemini-3.1-flash-live-preview';
       const langConfig = getLanguageConfig(this.targetLanguage);
-      const voice = langConfig.tts.geminiVoice || process.env.GEMINI_VOICE || 'Aoede';
       const apiKey = this.googleApiKey || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
+      // The per-user/session voice wins; otherwise the shared default (see
+      // config/voices.ts). langConfig's geminiVoice is the legacy per-language
+      // pick that made the demo and the app greet the same person differently.
+      const voice = resolveVoice(this.voiceOverride ?? langConfig.tts.geminiVoice);
       if (!apiKey) throw new Error('GOOGLE_API_KEY or GEMINI_API_KEY is required for gemini mode');
 
       // Map language codes to BCP-47 format for Gemini Realtime API
@@ -187,7 +230,13 @@ export class ServiceFactory {
         'pt': 'pt-PT',  // European Portuguese
         'ar': 'ar-SA',
       };
-      const language = bcp47Languages[this.targetLanguage] || 'en-US';
+      // Gemini fixes this at connect and it can't be changed for the life
+      // of the session, so it has to reflect what the user will actually
+      // SPEAK, not what they'll eventually be learning. Getting this wrong
+      // is not subtle: a demo pinned to ru-RU transcribed a visitor's plain
+      // English into invented Russian ("Да, я хочу подъём лыж"), which the
+      // tutor then answered as if it were real.
+      const language = bcp47Languages[this.speechLanguage || this.targetLanguage] || 'en-US';
 
       console.log(`[ServiceFactory] LLM: Gemini Realtime (${model}, voice: ${voice}, language: ${language})`);
       return new RealtimeModel({

@@ -55,11 +55,15 @@ import http from 'node:http';
 
 import { runProcessor, transcribeAudioWithLocalLLM } from './tools/supervisor-functions.js';
 import { transcribeAudioWithQwen3ASR } from './stt/qwen3-asr-client.js';
+import { resolveAnalysisEndpoint } from './llm/analysis-endpoint.js';
+import { resolveVoice } from './config/voices.js';
+import { readPersona } from './lib/persona.js';
 import { dbTools } from './tools/db-tools.js';
 import { ContextManager } from './lib/context.js';
 import { audioPayloadRegistry, setAudioTranscript, GemmaAudioSTT } from './stt/gemma-audio-stt.js';
-import { getLanguageConfig, nativeLanguageName, LANGUAGES } from './config/languages.js';
-import { buildInstructions, buildOnboardingInstructions } from './config/prompts/base.js';
+import { getLanguageConfig, nativeLanguageName, LANGUAGES, resolveLanguageConfig } from './config/languages.js';
+import { buildInstructions, buildCoachNote, buildOnboardingInstructions, PLATFORM_KNOWLEDGE } from './config/prompts/base.js';
+import type { PromptContext } from './config/prompts/base.js';
 import { computeTargetShare, buildMixLine, measureTargetShare, targetShareForLevel, MAX_THROTTLE_NOTCHES, findForeignScriptChar } from './lib/language-mix.js';
 import { PLANNER_SYSTEM_PROMPT, buildPlannerPrompt } from './config/prompts/supervisor.js';
 import { readLearnerView, invalidateLearnerView, formatWordList } from './lib/learner-view.js';
@@ -470,6 +474,18 @@ export default defineAgent({
     console.log(`[Tutor-ED] Starting session for user: ${userId}`);
     setSessionId(`room-${ctx.room.name}-${userId}`);
 
+    // Same signal the wrap-up/hard-stop timers below key off: this worker
+    // is running the anonymous landing-page demo, not a real account.
+    const isDemoSession = !!process.env.DEMO_SESSION_TIME_LIMIT_MS;
+
+    // A demo visitor arrives having chosen nothing — the landing page's
+    // only control is "Start talking". The tutor asks what they want to
+    // learn as its opening line and commits the answer with the
+    // set_target_language tool, so until that fires the session's language
+    // is a placeholder, not a real choice.
+    let languageUndecided = isDemoSession;
+    let demoIntentCaptured = false;
+
     // === USER SETUP ===
     let user = await db.query.users.findFirst({
       where: eq(users.id, userId)
@@ -542,8 +558,12 @@ export default defineAgent({
     const onboardingLadder = inOnboarding ? await getOnboardingLadder(targetLang) : [];
     if (inOnboarding) {
       console.log(`[Tutor-ED] Onboarding incomplete for ${userId}/${targetLang} — running intake flow (ladder: ${onboardingLadder.map((w) => w.lemma).join(', ') || 'none — falling back to unanchored'})`);
-      // Ensure the onboarding row exists (upsert with startedAt)
-      await saveOnboardingData(userId, targetLang, {});
+      // While the demo's language is still undecided, targetLang is only a
+      // placeholder — writing the intake row now files it under a language
+      // the visitor never asked for (every demo pt session had its intake
+      // stored under 'ru'). applyTargetLanguage() creates it for real once
+      // they say what they want.
+      if (!languageUndecided) await saveOnboardingData(userId, targetLang, {});
     } else {
       console.log(`[Tutor-ED] Onboarding complete for ${userId}/${targetLang}`);
     }
@@ -557,6 +577,12 @@ export default defineAgent({
     // === DYNAMIC INSTRUCTIONS (Supervisor-driven teaching plan) ===
     let supervisorNudge = '';
     let nudgeIssuedAtTurn: number | null = null;
+    // Realtime sessions deliver the volatile tail as injected context
+    // rather than a system-prompt rewrite; these hold the last context
+    // built and the last note actually sent, so identical guidance isn't
+    // re-injected turn after turn.
+    let lastPromptContext: PromptContext | null = null;
+    let lastCoachNote: string | null = null;
     let runningSummary = '';
     let lastPlanAt = 0;
     const sessionStartedAt = new Date();
@@ -767,6 +793,10 @@ export default defineAgent({
           targetLanguage: langConfig.name,
           nativeName: langConfig.nativeName,
           nativeLanguage: usersNativeLanguage,
+          demo: isDemoSession,
+          languageUndecided,
+          // Hand-written hook, if one is configured — see DEMO_OPENING_LINE.
+          openingLine: process.env.DEMO_OPENING_LINE?.trim() || undefined,
           existingData: onboardingState ? {
             priorStudy: onboardingState.priorStudy ?? undefined,
             studyDetails: onboardingState.studyDetails ?? undefined,
@@ -813,7 +843,7 @@ export default defineAgent({
         nativeLanguage: usersNativeLanguage,
       });
 
-      return buildInstructions({
+      const promptCtx = {
         targetLanguage: langConfig.name,
         nativeLanguage: usersNativeLanguage,
         userLevel,
@@ -845,7 +875,19 @@ export default defineAgent({
         mixLine,
         adaptive,
         specialInstructions: langConfig.pedagogy.specialInstructions,
-      });
+        realtime: isGemini,
+      };
+      // Stashed so the realtime path can rebuild just the volatile tail as
+      // an injected [COACH] note — under Gemini the system prompt this
+      // returns is only ever read once, at connect.
+      lastPromptContext = promptCtx;
+      const instructions = buildInstructions(promptCtx);
+
+      // Demo visitors are evaluating the product while they talk, so the
+      // tutor needs to be able to field "what is this / what's it cost"
+      // without guessing. Real accounts already know what they signed up
+      // for — no reason to spend their context window on it.
+      return isDemoSession ? `${instructions}\n\n${PLATFORM_KNOWLEDGE}` : instructions;
     };
 
     // === ONBOARDING VERDICT TOOL (§10, revised 2026-07-10 per learner-field
@@ -900,6 +942,34 @@ export default defineAgent({
     });
     const onboardingTools = [submitOnboardingVerdictTool];
 
+    // Demo only. The processor's language_change trigger can also switch
+    // languages, but it runs a turn behind and its own comments record it
+    // fumbling the value field — fine as a mid-conversation safety net,
+    // far too slow and too vague for the opening seconds of a 3-minute
+    // demo, where the visitor's answer to "what do you want to learn"
+    // has to take effect on the very next breath.
+    const setTargetLanguageTool = llm.tool({
+      name: 'set_target_language',
+      description: "Set the language you are teaching. Call this the instant the learner names what they want to learn, before you reply to them. Pass the ISO 639-1 code — most widely-spoken languages work (es, fr, pt, ru, ar, de, it, ja, ko, zh, hi, uk, pl, tr, vi, th, sv, el, he and more). If the tool comes back unsupported, tell the learner that one isn't available yet and ask what else they'd like; never teach a language the tool rejected.",
+      parameters: z.object({
+        language: z.string().describe('ISO 639-1 code of the language the learner wants to learn, e.g. "es", "ja", "de"'),
+      }),
+      execute: async (args: any) => {
+        const code = String(args.language || '').toLowerCase().trim();
+        const cfg = resolveLanguageConfig(code);
+        if (!cfg) {
+          trace('lang.tool', `${code} unsupported`);
+          return { ok: false, unsupported: true, note: `${code} isn't available yet — ask them to pick another language.` };
+        }
+        const ok = await applyTargetLanguage(code, 'tool');
+        trace('lang.tool', `${code} ok=${ok}`);
+        return ok
+          ? { ok: true, language: cfg.name }
+          : { ok: false, note: 'Already teaching that language — just carry on.' };
+      },
+    });
+    const demoTools = isDemoSession ? [setTargetLanguageTool] : [];
+
     // === CREATE AGENT ===
     // 2026-07-09: @livekit/agents 1.5.0 broke the old `Record<string,
     // FunctionTool>` map shape for Agent({ tools }) — it now requires a
@@ -911,14 +981,29 @@ export default defineAgent({
     // media_chunks deprecation fixed by the upgrade itself.
     const agent = new voice.Agent({
       instructions: await buildDynamicInstructions(),
-      tools: [...dbTools, ...onboardingTools],
+      tools: [...dbTools, ...onboardingTools, ...demoTools],
     });
 
     // === CREATE SERVICES (LOCAL, CLOUD, OR GEMINI) ===
     const { ServiceFactory } = await import('./services/factory.js');
+    // Voice is connect-time provider config, so it has to be resolved
+    // before the factory is built — the per-turn learner view comes too
+    // late to influence it. Anonymous demo visitors have no saved setting.
+    const sessionPersona = isDemoSession ? null : await readPersona(userId, targetLang);
+
     const serviceFactory = new ServiceFactory({
       mode: resolvedMode,
       targetLanguage: targetLang,
+      // A demo connects before the visitor has chosen anything, so
+      // targetLang is still the placeholder default — pinning speech
+      // recognition to it made the model hear plain English as broken
+      // Russian. What they're about to speak is their own language.
+      speechLanguage: languageUndecided ? (user.nativeLanguage || 'en') : undefined,
+      // Same reason as speechLanguage: fixed at connect, so it can't be
+      // inherited from a placeholder. One default across demo and app so
+      // signing up doesn't change who the user is talking to; a signed-in
+      // user's saved setting wins. See config/voices.ts.
+      voice: resolveVoice(sessionPersona?.voice),
       userId,
       googleApiKey,
     });
@@ -1148,7 +1233,92 @@ export default defineAgent({
       // sessions (instructions-only, no chat-item churn) and to the normal
       // in-place instructions patch otherwise — correct for both modes.
       await agent.updateInstructions(await buildDynamicInstructions());
+
+      // Under a realtime model that call is inert by design: Gemini Live
+      // takes its system instruction once, in the setup message, and the
+      // plugin's updateInstructions() only marks the session for restart.
+      // So the adaptive tail (planner nudge, frontier words, error
+      // treatment, mix line) has to travel as conversation instead —
+      // updateChatCtx DOES deliver mid-session. Without this the whole
+      // adaptive loop runs, logs, and changes nothing the learner hears.
+      //
+      // It goes to the realtime session directly rather than through
+      // agent.updateChatCtx(), which calls removeInstructions() on the
+      // copy first and hands Gemini a diff containing a removal it can't
+      // honour. Building on the plugin's own chat context instead makes
+      // the diff exactly one added message.
+      if (isGemini && lastPromptContext) {
+        const note = buildCoachNote(lastPromptContext, lastCoachNote);
+        if (note) {
+          const realtimeSession = (agent as any)._activity?.realtimeSession;
+          if (realtimeSession) {
+            lastCoachNote = note;
+            const ctx = realtimeSession.chatCtx;
+            ctx.addMessage({ role: 'user', content: note });
+            await realtimeSession.updateChatCtx(ctx);
+            trace('coach.note', note);
+          }
+        }
+      }
     };
+
+    // Single place that actually moves a session to another language, so
+    // the processor's language_change trigger and the tutor's own
+    // set_target_language tool can't drift apart. Returns false (leaving
+    // everything untouched) if the switch is impossible or a no-op, so
+    // callers can just carry on.
+    async function applyTargetLanguage(
+      newLang: string,
+      source: 'trigger' | 'tool',
+    ): Promise<boolean> {
+      const resolved = resolveLanguageConfig(newLang);
+      if (!resolved) {
+        console.warn(`[Lang:${source}] Unsupported language: ${newLang}`);
+        return false;
+      }
+      if (newLang === targetLang && !languageUndecided) return false;
+
+      const newConfig = resolved;
+      try {
+        await db.update(users).set({ targetLanguage: newLang }).where(eq(users.id, userId));
+        console.log(`[Lang:${source}] Language set: ${targetLang} → ${newLang}`);
+      } catch (err) {
+        console.error(`[Lang:${source}] Failed to update DB:`, err);
+        return false;
+      }
+
+      const wasUndecided = languageUndecided;
+      targetLang = newLang;
+      langConfig = newConfig;
+      languageUndecided = false;
+
+      // Update TTS voice to match the new language
+      const ttsService = session.tts as any;
+      if (ttsService?.updateVoice) {
+        ttsService.updateVoice(newConfig.tts.omnivoiceVoice || 'auto', newConfig.tts.omnivoiceLanguage || newLang);
+      } else if (!isGemini) {
+        console.warn(`[Lang:${source}] TTS does not support updateVoice — voice will stay as the old language`);
+      }
+
+      // Now that the language is real, open the intake record against it.
+      if (wasUndecided) {
+        await saveOnboardingData(userId, newLang, {}).catch((err: any) =>
+          console.warn('[Lang] Could not open onboarding row:', err?.message));
+      }
+
+      await refreshDbContext();
+      invalidateLearnerView(userId, newLang);
+      setNudge(wasUndecided
+        // First answer of a demo, not a change of mind — there is nothing
+        // to switch away from, and framing it as a switch would have the
+        // tutor apologise for a language the visitor never asked for.
+        ? `They just told you they want to learn ${newConfig.name}. React with delight IN THEIR OWN LANGUAGE, then hand them exactly ONE short ${newConfig.name} phrase with its meaning in the same breath, and get them saying it. Assume they understand no ${newConfig.name} at all yet — a full sentence of it right now is noise to them, not a welcome. No more setup questions.`
+        : `The user just asked to switch to ${newConfig.name}. Switch immediately, no pushback — don't question it, joke about it, or make them justify it. That's not a teaching moment, it's a request to honor. Greet them warmly in ${newConfig.name} right now and find out what they know.`);
+      await refreshInstructions();
+      pendingSignals.push('language_changed');
+      updatePlanNow('user_request').catch(() => {});
+      return true;
+    }
 
     // === SUPERVISOR (background planner) ===
 
@@ -1260,33 +1430,8 @@ export default defineAgent({
             }
           }
 
-          if (!LANGUAGES[newLang]) {
-            console.warn(`[Trigger] Unsupported language: ${newLang}`);
-            continue;
-          }
-          const newConfig = getLanguageConfig(newLang);
-          try {
-            await db.update(users).set({ targetLanguage: newLang }).where(eq(users.id, userId));
-            console.log(`[Trigger] Language changed: ${targetLang} → ${newLang}`);
-          } catch (err) {
-            console.error(`[Trigger] Failed to update DB:`, err);
-            continue;
-          }
-          targetLang = newLang;
-          langConfig = newConfig;
-          // Update TTS voice to match the new language
-          const ttsService = session.tts as any;
-          if (ttsService?.updateVoice) {
-            ttsService.updateVoice(newConfig.tts.omnivoiceVoice || 'auto', newConfig.tts.omnivoiceLanguage || newLang);
-          } else {
-            console.warn('[Trigger] TTS does not support updateVoice — voice will stay as the old language');
-          }
-          await refreshDbContext();
-          invalidateLearnerView(userId, newLang);
-          setNudge(`The user just asked to switch to ${newConfig.name}. Switch immediately, no pushback — don't question it, joke about it, or make them justify it. That's not a teaching moment, it's a request to honor. Greet them warmly in ${newConfig.name} right now and find out what they know.`);
-          await refreshInstructions();
-          pendingSignals.push('language_changed');
-          updatePlanNow('user_request').catch(() => {});
+          const switched = await applyTargetLanguage(newLang, 'trigger');
+          if (!switched) continue;
         }
 
         if (trigger.type === 'difficulty_adjustment' && trigger.value) {
@@ -1806,6 +1951,22 @@ export default defineAgent({
         emitEvent('user.transcript', { text: combined, isFinal: true, turnSeq, audioIds });
       }
 
+      // The visitor's first real answer is the single most valuable thing
+      // the demo produces: it's them saying, unprompted and in their own
+      // words, why they're here ("I'm going to Japan in April", "I want to
+      // talk to my grandmother"). Vocabulary can be re-earned in a minute
+      // of conversation; this can't, and it's what lets their first real
+      // session pick up where the demo left off instead of starting cold.
+      if (isDemoSession && !demoIntentCaptured && transcription.trim().split(/\s+/).length >= 3) {
+        demoIntentCaptured = true;
+        const intent = transcription.trim().slice(0, 200);
+        ContextManager.writeNote(userId, 'goal', `Said at the demo: "${intent}"`, 'demo')
+          .catch((err: any) => console.warn('[Demo] intent note failed:', err?.message));
+        saveOnboardingData(userId, targetLang, { goalDetails: intent })
+          .catch((err: any) => console.warn('[Demo] intent onboarding save failed:', err?.message));
+        console.log(`[Demo] Captured stated intent: "${intent}"`);
+      }
+
       pendingUserTurns.push(transcription);
       if (pendingUserTurns.length > PROCESSOR_TURN_INTERVAL) {
         pendingUserTurns.shift();
@@ -1857,18 +2018,19 @@ export default defineAgent({
       // the local processor URL (port 8082/8093) is unreachable during an
       // audex session.
       const usesTextOnlyProcessor = isGemini || mode === 'audex';
-      runProcessor(userId, batchUtterance, lastExchange, {
+      // Within the local branch, prefer whichever analysis model is already
+      // warm and fall back to OpenRouter when none is — see
+      // analysis-endpoint.ts. Resolved per batch, not once at startup: a
+      // session outlives any given local model's residency, and a cold
+      // local model would otherwise stall a live turn on a 15GB load.
+      resolveAnalysisEndpoint('PROCESSOR', { allowCloud: usesTextOnlyProcessor }).then((endpoint) => {
+        console.log(`[Processor] Analysis via ${endpoint.source}: ${endpoint.model}`);
+        return runProcessor(userId, batchUtterance, lastExchange, {
         maxLexemes,
         useGemini: false,
-        llmUrl: usesTextOnlyProcessor
-          ? (process.env.CLOUD_PROCESSOR_LLM_URL || 'https://openrouter.ai/api/v1')
-          : (process.env.PROCESSOR_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1'),
-        llmModel: usesTextOnlyProcessor
-          ? (process.env.CLOUD_PROCESSOR_LLM_MODEL || 'google/gemma-4-26b-a4b-it')
-          : (process.env.PROCESSOR_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma4-26b'),
-        llmKey: usesTextOnlyProcessor
-          ? (process.env.CLOUD_PROCESSOR_LLM_KEY || '')
-          : (process.env.PROCESSOR_LLM_KEY || process.env.LOCAL_LLM_KEY || ''),
+        llmUrl: endpoint.url,
+        llmModel: endpoint.model,
+        llmKey: endpoint.key,
         recentHistory: lastExchange,
         historyMessages,
         tutorRecentText: history.getRecentTutorText(),
@@ -2007,6 +2169,34 @@ export default defineAgent({
           response: (result.rawResponse || '').substring(0, 4000),
         });
 
+        // === DEMO MODE: mirror the processor's tracked words onto the
+        // LiveKit data channel so the marketing site's live memory graph
+        // can render them in real time. Only active when
+        // DEMO_SESSION_TIME_LIMIT_MS is set (this worktree only — see
+        // ROADMAP.md in the marketing-site repo; production's own copy of
+        // this file is untouched). Deliberately reads the same
+        // decoratedLexemes the dashboard's SSE stream already gets, just
+        // delivered over the room's own (already-public) data channel
+        // instead of the admin dashboard's not-yet-exposed SSE endpoint.
+        if (process.env.DEMO_SESSION_TIME_LIMIT_MS && decoratedLexemes.length > 0) {
+          try {
+            const payload = JSON.stringify({
+              type: 'linglang.demo.words',
+              lexemes: decoratedLexemes.map((lex: any) => ({
+                lemma: lex.lemma,
+                translation: lex.translation,
+                tracking: lex.tracking,
+              })),
+            });
+            ctx.room.localParticipant?.publishData(new TextEncoder().encode(payload), {
+              reliable: true,
+              topic: 'linglang-demo-events',
+            });
+          } catch (err: any) {
+            console.warn('[Tutor-ED] demo word-event publish failed:', err?.message);
+          }
+        }
+
         if (result.errors.length) {
           console.warn('[Processor] Errors:', result.errors);
         }
@@ -2045,6 +2235,7 @@ export default defineAgent({
       }).catch((err) => {
         console.error('[Processor] Failed:', err);
         trace('processor.error', String(err));
+      });
       });
     });
 
@@ -2374,16 +2565,68 @@ export default defineAgent({
     // the LLM reads as "the user has just connected." Plain "..." was
     // too vague and the LLM defaulted to a generic "Olá, tudo bem?"
     console.log('[Tutor-ED] Sending initial greeting (LLM-generated)...');
-    if (!isGemini) {
-      trace('session.generateReply.opening');
-      try {
-        await session.generateReply({
-          userInput: '[system: the user has just connected — greet them and pick up where you left off]',
-        });
-      } catch (err: any) {
-        console.warn('[Tutor-ED] generateReply failed, falling back to hardcoded greeting:', err?.message);
-        session.say(langConfig.prompts.greeting);
-      }
+    trace('session.generateReply.opening');
+    try {
+      await session.generateReply({
+        userInput: isDemoSession
+          // A demo visitor has no history to pick up from and has chosen
+          // nothing — the opening turn's whole job is to find out what
+          // they want to learn so the real conversation can start.
+          ? '[system: a brand-new visitor just connected, having chosen nothing — run your opening line now: say hello, ask what language they want to speak, and name the options. Keep it under 10 seconds, then stop and listen.]'
+          : '[system: the user has just connected — greet them and pick up where you left off]',
+      });
+    } catch (err: any) {
+      console.warn('[Tutor-ED] generateReply failed:', err?.message);
+      // session.say() isn't supported on the RealtimeModel (Gemini) path —
+      // only fall back to it for the STT/TTS pipeline modes, where a silent
+      // demo session is otherwise unrecoverable.
+      if (!isGemini) session.say(langConfig.prompts.greeting);
+    }
+
+    // === DEMO MODE: graceful session wrap-up before the hard token expiry ===
+    // Only active when DEMO_SESSION_TIME_LIMIT_MS is set (the anonymous demo
+    // worker only, see ROADMAP.md in the marketing-site repo — production
+    // never sets this, so this block is a no-op there). Nudges the model to
+    // wrap up warmly ~30s before the LiveKit token's hard TTL, then force-
+    // disconnects a few seconds before the token actually expires so the
+    // session ends cleanly instead of getting cut off mid-sentence.
+    const demoLimitMs = process.env.DEMO_SESSION_TIME_LIMIT_MS
+      ? parseInt(process.env.DEMO_SESSION_TIME_LIMIT_MS, 10)
+      : null;
+    if (demoLimitMs && demoLimitMs > 0) {
+      const wrapUpAt = Math.max(0, demoLimitMs - 30_000);
+      const hardStopAt = Math.max(0, demoLimitMs - 5_000);
+      setTimeout(() => {
+        trace('demo.wrapup.nudge');
+        // Tell the page we're wrapping up, so it can put the create-account
+        // button on screen NOW. The tutor is about to say "you can make a
+        // free account" out loud, and until this existed the button didn't
+        // appear until the session actually ended half a minute later,
+        // leaving people asking where they were supposed to click.
+        try {
+          ctx.room.localParticipant?.publishData(
+            new TextEncoder().encode(JSON.stringify({ type: 'linglang.demo.wrapup' })),
+            { reliable: true, topic: 'linglang-demo-events' },
+          );
+        } catch (err: any) {
+          console.warn('[Tutor-ED] demo wrap-up publish failed:', err?.message);
+        }
+        (async () => {
+          try {
+            await session.generateReply({
+              userInput:
+                '[system: this demo session is almost out of time — wrap up the conversation warmly in this reply, thank them, and mention they can create a free account to keep going and save their progress]',
+            });
+          } catch (err: any) {
+            console.warn('[Tutor-ED] demo wrap-up generateReply failed:', err?.message);
+          }
+        })();
+      }, wrapUpAt);
+      setTimeout(() => {
+        trace('demo.session.hardstop');
+        console.log('[Tutor-ED] Demo session time limit reached, disconnecting');
+        ctx.room.disconnect();
+      }, hardStopAt);
     }
 
     // === LLM TOKEN STREAM → DASHBOARD ===
