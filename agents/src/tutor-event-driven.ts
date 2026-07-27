@@ -1959,6 +1959,19 @@ export default defineAgent({
       const hardStopAt = Math.max(0, demoLimitMs - 5_000);
       setTimeout(() => {
         trace('demo.wrapup.nudge');
+        // Tell the page we're wrapping up, so it can put the create-account
+        // button on screen NOW. The tutor is about to say "you can make a
+        // free account" out loud, and until this existed the button didn't
+        // appear until the session actually ended half a minute later,
+        // leaving people asking where they were supposed to click.
+        try {
+          ctx.room.localParticipant?.publishData(
+            new TextEncoder().encode(JSON.stringify({ type: 'linglang.demo.wrapup' })),
+            { reliable: true, topic: 'linglang-demo-events' },
+          );
+        } catch (err: any) {
+          console.warn('[Tutor-ED] demo wrap-up publish failed:', err?.message);
+        }
         (async () => {
           try {
             await session.generateReply({
