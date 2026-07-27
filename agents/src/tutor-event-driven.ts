@@ -766,6 +766,11 @@ export default defineAgent({
     const serviceFactory = new ServiceFactory({
       mode: (process.env.SERVICE_MODE as 'local' | 'cloud' | 'local-gemma-audio' | 'gemini') || 'local',
       targetLanguage: targetLang,
+      // A demo connects before the visitor has chosen anything, so
+      // targetLang is still the placeholder default — pinning speech
+      // recognition to it made the model hear plain English as broken
+      // Russian. What they're about to speak is their own language.
+      speechLanguage: languageUndecided ? (user.nativeLanguage || 'en') : undefined,
       userId,
     });
 

@@ -57,15 +57,25 @@ export interface ServiceFactoryOptions {
   mode?: ServiceMode;
   targetLanguage?: string;
   userId?: string;
+  /**
+   * ISO 639-1 override for the speech/transcription language, when the
+   * language the user will actually SPEAK isn't the target language.
+   * Needed by the anonymous demo, which connects before the visitor has
+   * chosen anything: the target is still a placeholder, but they're about
+   * to answer "what do you want to learn?" in their own language.
+   */
+  speechLanguage?: string;
 }
 
 export class ServiceFactory {
   private mode: ServiceMode;
   private targetLanguage: string;
+  private speechLanguage?: string;
 
   constructor(opts: ServiceFactoryOptions = {}) {
     this.mode = opts.mode || (process.env.SERVICE_MODE as ServiceMode) || 'local';
     this.targetLanguage = opts.targetLanguage || process.env.DEFAULT_TARGET_LANGUAGE || 'ru';
+    this.speechLanguage = opts.speechLanguage;
 
     console.log(`[ServiceFactory] Mode: ${this.mode}, Language: ${this.targetLanguage}`);
   }
@@ -142,7 +152,13 @@ export class ServiceFactory {
         'pt': 'pt-PT',  // European Portuguese
         'ar': 'ar-SA',
       };
-      const language = bcp47Languages[this.targetLanguage] || 'en-US';
+      // Gemini fixes this at connect and it can't be changed for the life
+      // of the session, so it has to reflect what the user will actually
+      // SPEAK, not what they'll eventually be learning. Getting this wrong
+      // is not subtle: a demo pinned to ru-RU transcribed a visitor's plain
+      // English into invented Russian ("Да, я хочу подъём лыж"), which the
+      // tutor then answered as if it were real.
+      const language = bcp47Languages[this.speechLanguage || this.targetLanguage] || 'en-US';
 
       console.log(`[ServiceFactory] LLM: Gemini Realtime (${model}, voice: ${voice}, language: ${language})`);
       return new RealtimeModel({
