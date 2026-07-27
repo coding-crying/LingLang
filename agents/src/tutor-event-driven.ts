@@ -369,6 +369,7 @@ export default defineAgent({
     // set_target_language tool, so until that fires the session's language
     // is a placeholder, not a real choice.
     let languageUndecided = isDemoSession;
+    let demoIntentCaptured = false;
 
     // === USER SETUP ===
     let user = await db.query.users.findFirst({
@@ -428,8 +429,12 @@ export default defineAgent({
     let inOnboarding = !onboardingState?.isComplete;
     if (inOnboarding) {
       console.log(`[Tutor-ED] Onboarding incomplete for ${userId}/${targetLang} — running intake flow`);
-      // Ensure the onboarding row exists (upsert with startedAt)
-      await saveOnboardingData(userId, targetLang, {});
+      // While the demo's language is still undecided, targetLang is only a
+      // placeholder — writing the intake row now files it under a language
+      // the visitor never asked for (every demo pt session had its intake
+      // stored under 'ru'). applyTargetLanguage() creates it for real once
+      // they say what they want.
+      if (!languageUndecided) await saveOnboardingData(userId, targetLang, {});
     } else {
       console.log(`[Tutor-ED] Onboarding complete for ${userId}/${targetLang}`);
     }
@@ -956,6 +961,12 @@ export default defineAgent({
         ttsService.updateVoice(newConfig.tts.omnivoiceVoice || 'auto', newConfig.tts.omnivoiceLanguage || newLang);
       } else if (!isGemini) {
         console.warn(`[Lang:${source}] TTS does not support updateVoice — voice will stay as the old language`);
+      }
+
+      // Now that the language is real, open the intake record against it.
+      if (wasUndecided) {
+        await saveOnboardingData(userId, newLang, {}).catch((err: any) =>
+          console.warn('[Lang] Could not open onboarding row:', err?.message));
       }
 
       await refreshDbContext();
@@ -1490,6 +1501,22 @@ export default defineAgent({
       // order or timestamps (see Task 4a — useConversationStream rewrite).
       const turnSeq = totalUserTurns;
       emitEvent('user.transcript', { text: transcription, isFinal: true, turnSeq });
+
+      // The visitor's first real answer is the single most valuable thing
+      // the demo produces: it's them saying, unprompted and in their own
+      // words, why they're here ("I'm going to Japan in April", "I want to
+      // talk to my grandmother"). Vocabulary can be re-earned in a minute
+      // of conversation; this can't, and it's what lets their first real
+      // session pick up where the demo left off instead of starting cold.
+      if (isDemoSession && !demoIntentCaptured && transcription.trim().split(/\s+/).length >= 3) {
+        demoIntentCaptured = true;
+        const intent = transcription.trim().slice(0, 200);
+        ContextManager.writeNote(userId, 'goal', `Said at the demo: "${intent}"`, 'demo')
+          .catch((err: any) => console.warn('[Demo] intent note failed:', err?.message));
+        saveOnboardingData(userId, targetLang, { goalDetails: intent })
+          .catch((err: any) => console.warn('[Demo] intent onboarding save failed:', err?.message));
+        console.log(`[Demo] Captured stated intent: "${intent}"`);
+      }
 
       pendingUserTurns.push(transcription);
       if (pendingUserTurns.length > PROCESSOR_TURN_INTERVAL) {
