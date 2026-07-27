@@ -828,6 +828,14 @@ export interface SRSUpdate {
   grade: FSRSGrade;
   /** Index into the source `analysis.lexemes` array — lets the caller match updates back to lexemes. */
   lexemeIndex: number;
+  /**
+   * True when this graded use created the learner's first record for the
+   * word. Combined with the echo gate above it separates the two cases a
+   * learner actually cares about seeing: a word the tutor handed them
+   * (echoed → `exposed`, never reaches here) from one they produced on
+   * their own for the first time (spontaneous, graded, brand new).
+   */
+  isNew: boolean;
 }
 
 /**
@@ -1081,6 +1089,7 @@ export async function updateSRSFromAnalysis(
           newState: result.state,
           grade,
           lexemeIndex: idx,
+          isNew: !currentVocab,
         });
         tracking[idx] = 'tracked';
 
@@ -1341,6 +1350,7 @@ export async function updateSRSFromAnalysis(
       newState: result.state,
       grade,
       lexemeIndex: idx,
+      isNew: !currentVocab,
     });
     tracking[idx] = 'tracked';
 

@@ -2180,13 +2180,35 @@ export default defineAgent({
         // instead of the admin dashboard's not-yet-exposed SSE endpoint.
         if (process.env.DEMO_SESSION_TIME_LIMIT_MS && decoratedLexemes.length > 0) {
           try {
+            // The graph is the only proof a visitor gets that anything
+            // was actually processed, so it needs the two distinctions the
+            // processor already makes and used to discard here:
+            //   - `exposed` — the tutor said it and they repeated it. New
+            //     to them, not yet evidence of knowing it (echo gate,
+            //     supervisor-functions.ts §3.3).
+            //   - `tracked` + isNew — they produced it unprompted, first
+            //     time. That's the good one, and it should look like it.
+            // Mastery comes from FSRS state (0 new / 1 learning / 2 review
+            // / 3 relearning) and the grade the word just earned, matched
+            // back through lexemeIndex.
+            const updateByIndex = new Map<number, any>(
+              (result.srsUpdates || []).map((u: any) => [u.lexemeIndex, u]),
+            );
             const payload = JSON.stringify({
               type: 'linglang.demo.words',
-              lexemes: decoratedLexemes.map((lex: any) => ({
-                lemma: lex.lemma,
-                translation: lex.translation,
-                tracking: lex.tracking,
-              })),
+              lexemes: decoratedLexemes.map((lex: any, i: number) => {
+                const upd = updateByIndex.get(i);
+                return {
+                  lemma: lex.lemma,
+                  translation: lex.translation,
+                  tracking: lex.tracking,
+                  // Tutor-introduced, or produced cold for the first time.
+                  isNew: lex.tracking === 'exposed' ? true : upd?.isNew ?? false,
+                  // Only meaningful for graded words; absent for exposures.
+                  grade: upd?.grade,
+                  state: upd?.newState,
+                };
+              }),
             });
             ctx.room.localParticipant?.publishData(new TextEncoder().encode(payload), {
               reliable: true,
