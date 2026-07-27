@@ -54,6 +54,7 @@ import { writeFile, rename } from 'node:fs/promises';
 import http from 'node:http';
 
 import { runProcessor } from './tools/supervisor-functions.js';
+import { resolveAnalysisEndpoint } from './llm/analysis-endpoint.js';
 import { dbTools } from './tools/db-tools.js';
 import { ContextManager } from './lib/context.js';
 import { audioPayloadRegistry } from './stt/gemma-audio-stt.js';
@@ -1555,14 +1556,20 @@ export default defineAgent({
         ? Math.max(2, Math.round(audioAttachment.durationSec * 3))
         : batchUtterance.split(/\s+/).filter(w => w.length > 0).length + 2;
 
-      runProcessor(userId, batchUtterance, lastExchange, {
-        maxLexemes,
-        useGemini: false,
-        llmUrl: process.env.PROCESSOR_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1',
-        llmModel: process.env.PROCESSOR_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma4-26b',
-        llmKey: process.env.PROCESSOR_LLM_KEY || process.env.LOCAL_LLM_KEY || '',
-        recentHistory: lastExchange,
-        historyMessages,
+      // Local when that model is already warm, OpenRouter otherwise — see
+      // analysis-endpoint.ts. Resolved per batch, not once at startup: a
+      // session outlives any given local model's residency.
+      resolveAnalysisEndpoint('PROCESSOR', { allowCloud: isGemini }).then((endpoint) => {
+        console.log(`[Processor] Analysis via ${endpoint.source}: ${endpoint.model}`);
+        return runProcessor(userId, batchUtterance, lastExchange, {
+          maxLexemes,
+          useGemini: false,
+          llmUrl: endpoint.url,
+          llmModel: endpoint.model,
+          llmKey: endpoint.key,
+          recentHistory: lastExchange,
+          historyMessages,
+        });
       }).then((result) => {
         lastProcessorRun = {
           at: Date.now(),
