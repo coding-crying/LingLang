@@ -619,6 +619,8 @@ export default defineAgent({
           nativeLanguage: usersNativeLanguage,
           demo: isDemoSession,
           languageUndecided,
+          // Hand-written hook, if one is configured — see DEMO_OPENING_LINE.
+          openingLine: process.env.DEMO_OPENING_LINE?.trim() || undefined,
           existingData: onboardingState ? {
             priorStudy: onboardingState.priorStudy ?? undefined,
             studyDetails: onboardingState.studyDetails ?? undefined,
