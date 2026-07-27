@@ -962,7 +962,7 @@ export default defineAgent({
         // First answer of a demo, not a change of mind — there is nothing
         // to switch away from, and framing it as a switch would have the
         // tutor apologise for a language the visitor never asked for.
-        ? `They just told you they want to learn ${newConfig.name}. React with genuine delight, then immediately give them a short, real ${newConfig.name} phrase and ask them to say it back. Do not ask any more setup questions.`
+        ? `They just told you they want to learn ${newConfig.name}. React with delight IN THEIR OWN LANGUAGE, then hand them exactly ONE short ${newConfig.name} phrase with its meaning in the same breath, and get them saying it. Assume they understand no ${newConfig.name} at all yet — a full sentence of it right now is noise to them, not a welcome. No more setup questions.`
         : `The user just asked to switch to ${newConfig.name}. Switch immediately, no pushback — don't question it, joke about it, or make them justify it. That's not a teaching moment, it's a request to honor. Greet them warmly in ${newConfig.name} right now and find out what they know.`);
       await refreshInstructions();
       pendingSignals.push('language_changed');
