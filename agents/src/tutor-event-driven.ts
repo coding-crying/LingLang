@@ -57,7 +57,7 @@ import { runProcessor } from './tools/supervisor-functions.js';
 import { dbTools } from './tools/db-tools.js';
 import { ContextManager } from './lib/context.js';
 import { audioPayloadRegistry } from './stt/gemma-audio-stt.js';
-import { getLanguageConfig, nativeLanguageName, LANGUAGES } from './config/languages.js';
+import { getLanguageConfig, nativeLanguageName, LANGUAGES, resolveLanguageConfig } from './config/languages.js';
 import { buildInstructions, buildOnboardingInstructions, PLATFORM_KNOWLEDGE } from './config/prompts/base.js';
 import { computeTargetShare, buildMixLine, measureTargetShare, targetShareForLevel, MAX_THROTTLE_NOTCHES } from './lib/language-mix.js';
 import { PLANNER_SYSTEM_PROMPT, buildPlannerPrompt } from './config/prompts/supervisor.js';
@@ -741,15 +741,21 @@ export default defineAgent({
     // demo, where the visitor's answer to "what do you want to learn"
     // has to take effect on the very next breath.
     const setTargetLanguageTool = llm.tool({
-      description: "Set the language you are teaching. Call this the instant the learner tells you what they want to learn, before you reply to them. Only these are supported: es (Spanish), fr (French), pt (Portuguese), ru (Russian), ar (Arabic), en (English vocabulary). If they ask for anything else, don't call this — tell them it isn't available yet and offer the list.",
+      description: "Set the language you are teaching. Call this the instant the learner names what they want to learn, before you reply to them. Pass the ISO 639-1 code — most widely-spoken languages work (es, fr, pt, ru, ar, de, it, ja, ko, zh, hi, uk, pl, tr, vi, th, sv, el, he and more). If the tool comes back unsupported, tell the learner that one isn't available yet and ask what else they'd like; never teach a language the tool rejected.",
       parameters: z.object({
-        language: z.enum(['es', 'fr', 'pt', 'ru', 'ar', 'en']).describe('ISO 639-1 code of the language the learner wants to learn'),
+        language: z.string().describe('ISO 639-1 code of the language the learner wants to learn, e.g. "es", "ja", "de"'),
       }),
       execute: async (args: any) => {
-        const ok = await applyTargetLanguage(args.language, 'tool');
-        trace('lang.tool', `${args.language} ok=${ok}`);
+        const code = String(args.language || '').toLowerCase().trim();
+        const cfg = resolveLanguageConfig(code);
+        if (!cfg) {
+          trace('lang.tool', `${code} unsupported`);
+          return { ok: false, unsupported: true, note: `${code} isn't available yet — ask them to pick another language.` };
+        }
+        const ok = await applyTargetLanguage(code, 'tool');
+        trace('lang.tool', `${code} ok=${ok}`);
         return ok
-          ? { ok: true, language: getLanguageConfig(args.language).name }
+          ? { ok: true, language: cfg.name }
           : { ok: false, note: 'Already teaching that language — just carry on.' };
       },
     });
@@ -921,13 +927,14 @@ export default defineAgent({
       newLang: string,
       source: 'trigger' | 'tool',
     ): Promise<boolean> {
-      if (!LANGUAGES[newLang]) {
+      const resolved = resolveLanguageConfig(newLang);
+      if (!resolved) {
         console.warn(`[Lang:${source}] Unsupported language: ${newLang}`);
         return false;
       }
       if (newLang === targetLang && !languageUndecided) return false;
 
-      const newConfig = getLanguageConfig(newLang);
+      const newConfig = resolved;
       try {
         await db.update(users).set({ targetLanguage: newLang }).where(eq(users.id, userId));
         console.log(`[Lang:${source}] Language set: ${targetLang} → ${newLang}`);
