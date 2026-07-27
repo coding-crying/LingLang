@@ -58,7 +58,39 @@ export interface PromptContext {
   mixLine?: string
   /** Optional: adaptive signals for prompt composition. */
   adaptive?: AdaptiveContext
+  /**
+   * Session runs on a realtime model (Gemini Live). Two consequences:
+   * the system prompt is frozen at connect, so this build has to be
+   * self-sufficient; and the per-turn tail arrives as injected context
+   * instead, which the model needs to be told how to read.
+   */
+  realtime?: boolean
 }
+
+/**
+ * Standing note for realtime sessions.
+ *
+ * Gemini Live takes its system instruction in the setup message and never
+ * again: the plugin's updateInstructions() marks the session for restart
+ * rather than applying anything (realtime_api.ts). updateChatCtx(), on the
+ * other hand, works fine mid-session and appends real turns. So the
+ * adaptive tail is delivered through the conversation instead of the
+ * system prompt, and the model has to know those lines are direction from
+ * its own coaching layer, not something the learner said out loud. Without
+ * this, it answers them.
+ */
+const REALTIME_STANDING = `## Notes during the session
+
+Lines that arrive marked [COACH] are private direction for you, from the
+system tracking this learner's progress. They are NOT spoken by the learner
+and the learner cannot see them.
+
+- Never read one aloud, quote it, answer it, or acknowledge it exists.
+- Never say "I've been told to" or otherwise reveal where guidance came from.
+- Just let it change what you do next. A [COACH] note about a word to reach
+  for means work that word in naturally; one about an error means handle
+  that error the way it says.
+- The most recent [COACH] note wins over any earlier one it contradicts.`
 
 /**
  * Length line: combines level baseline with session phase and pacing.
@@ -165,6 +197,12 @@ export function buildInstructions(context: PromptContext): string {
     `You have tools to look up words and check the learner's progress. Use them when you need to, not every turn.`,
     `Correct the underlying pattern, not just the individual word.`,
     `Follow the learner's topic. Any vocabulary guidance below is about which words to reach for, never what to talk about.`,
+    // The tone work was written for the demo and left the signed-in tutor
+    // sounding like a different, blander product the moment someone signed
+    // up. Same rules both sides now.
+    '',
+    VOICE_RULES,
+    ...(context.realtime ? ['', REALTIME_STANDING] : []),
   ].join('\n')
 
   // ── Volatile tail (hard budget: ~8 short lines) ──────────────────
@@ -201,6 +239,40 @@ export function buildInstructions(context: PromptContext): string {
   tail.push(computeLengthLine(levelKey, adaptive.sessionPhase, adaptive.pacing))
 
   return `${core}\n\n${tail.filter(Boolean).join('\n')}`
+}
+
+/**
+ * The volatile tail on its own, formatted for mid-session injection.
+ *
+ * Same signals buildInstructions() puts at the end of the system prompt,
+ * but for realtime sessions, where rewriting the system prompt is a no-op
+ * (see REALTIME_STANDING). Returns null when nothing has changed worth
+ * sending: every injection is a real turn in the model's context, so
+ * sending the same guidance twice both wastes context and reads to the
+ * model as fresh emphasis on something it already did.
+ */
+export function buildCoachNote(
+  context: PromptContext,
+  previous?: string | null,
+): string | null {
+  const adaptive = context.adaptive ?? defaultAdaptive()
+  const lines: string[] = []
+
+  if (context.goalUpdate?.trim()) lines.push(context.goalUpdate.trim())
+  if (context.frontier.newWords) lines.push(`reach for: ${context.frontier.newWords}`)
+
+  const errorLine = computeErrorTreatment(adaptive.errorDensity, context.recentErrors?.trim() || '')
+  if (errorLine) lines.push(errorLine)
+
+  if (context.grammarHints?.trim() && context.grammarHints !== 'None') {
+    lines.push(`model this, don't lecture it: ${context.grammarHints}`)
+  }
+  if (context.mixLine) lines.push(context.mixLine)
+  if (adaptive.sessionPhase === 'wrapup') lines.push('Wrap up naturally now, no new material.')
+
+  if (lines.length === 0) return null
+  const note = `[COACH] ${lines.join(' | ')}`
+  return note === previous ? null : note
 }
 
 // ── Onboarding prompt ────────────────────────────────────────────────────────

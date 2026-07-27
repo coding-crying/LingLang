@@ -27,6 +27,8 @@ export interface PersonaRow {
   correctionStyle: string | null;
   teachingMode: string | null;
   extraInstructions: string | null;
+  /** Realtime voice; null = shared default. Applies from the next session. */
+  voice: string | null;
   source: string;
   updatedAt: Date;
 }
@@ -37,6 +39,7 @@ export interface PersonaPatch {
   correctionStyle?: string | null;
   teachingMode?: string | null;
   extraInstructions?: string | null;
+  voice?: string | null;
   source?: string;
 }
 
@@ -102,6 +105,7 @@ export async function readPersona(
     correctionStyle: specific?.correctionStyle ?? global?.correctionStyle ?? null,
     teachingMode: specific?.teachingMode ?? global?.teachingMode ?? null,
     extraInstructions: specific?.extraInstructions ?? global?.extraInstructions ?? null,
+    voice: specific?.voice ?? global?.voice ?? null,
     source: specific?.source ?? global?.source ?? 'system',
     updatedAt: specific?.updatedAt ?? global?.updatedAt ?? new Date(),
     merged: true,
@@ -138,6 +142,7 @@ export async function writePersona(
       correctionStyle: patch.correctionStyle ?? null,
       teachingMode: patch.teachingMode ?? null,
       extraInstructions: patch.extraInstructions ?? null,
+      voice: patch.voice ?? null,
       source: patch.source ?? 'system',
       updatedAt: now,
     });
@@ -149,6 +154,7 @@ export async function writePersona(
     if ('correctionStyle' in patch) update.correctionStyle = patch.correctionStyle ?? null;
     if ('teachingMode' in patch) update.teachingMode = patch.teachingMode ?? null;
     if ('extraInstructions' in patch) update.extraInstructions = patch.extraInstructions ?? null;
+    if ('voice' in patch) update.voice = patch.voice ?? null;
 
     await db
       .update(userPersona)

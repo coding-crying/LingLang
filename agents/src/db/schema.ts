@@ -303,6 +303,12 @@ export const userPersona = pgTable('user_persona', {
   teachingMode: text('teaching_mode'),       // 'conversational' | 'drill' | 'roleplay' | 'storytelling'
   extraInstructions: text('extra_instructions'), // freeform: "always use tu form", "pretend we're at a café"
 
+  // Realtime TTS voice (Gemini Live: Puck, Charon, Kore, Fenrir, Aoede,
+  // Leda, Orus, Zephyr). Null means the shared default. This is connect-time
+  // provider config and cannot change mid-session, so a change here takes
+  // effect on the user's NEXT session, not the one they're in.
+  voice: text('voice'),
+
   source: text('source').notNull().default('system'), // 'system' | 'supervisor' | 'user_voice' | 'ui'
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({

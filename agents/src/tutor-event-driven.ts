@@ -55,11 +55,14 @@ import http from 'node:http';
 
 import { runProcessor } from './tools/supervisor-functions.js';
 import { resolveAnalysisEndpoint } from './llm/analysis-endpoint.js';
+import { resolveVoice } from './config/voices.js';
+import { readPersona } from './lib/persona.js';
 import { dbTools } from './tools/db-tools.js';
 import { ContextManager } from './lib/context.js';
 import { audioPayloadRegistry } from './stt/gemma-audio-stt.js';
 import { getLanguageConfig, nativeLanguageName, LANGUAGES, resolveLanguageConfig } from './config/languages.js';
-import { buildInstructions, buildOnboardingInstructions, PLATFORM_KNOWLEDGE } from './config/prompts/base.js';
+import { buildInstructions, buildCoachNote, buildOnboardingInstructions, PLATFORM_KNOWLEDGE } from './config/prompts/base.js';
+import type { PromptContext } from './config/prompts/base.js';
 import { computeTargetShare, buildMixLine, measureTargetShare, targetShareForLevel, MAX_THROTTLE_NOTCHES } from './lib/language-mix.js';
 import { PLANNER_SYSTEM_PROMPT, buildPlannerPrompt } from './config/prompts/supervisor.js';
 import { readLearnerView, invalidateLearnerView } from './lib/learner-view.js';
@@ -449,6 +452,12 @@ export default defineAgent({
     // === DYNAMIC INSTRUCTIONS (Supervisor-driven teaching plan) ===
     let supervisorNudge = '';
     let nudgeIssuedAtTurn: number | null = null;
+    // Realtime sessions deliver the volatile tail as injected context
+    // rather than a system-prompt rewrite; these hold the last context
+    // built and the last note actually sent, so identical guidance isn't
+    // re-injected turn after turn.
+    let lastPromptContext: PromptContext | null = null;
+    let lastCoachNote: string | null = null;
     let runningSummary = '';
     let lastPlanAt = 0;
     const sessionStartedAt = new Date();
@@ -672,7 +681,7 @@ export default defineAgent({
         nativeLanguage: usersNativeLanguage,
       });
 
-      const instructions = buildInstructions({
+      const promptCtx = {
         targetLanguage: langConfig.name,
         nativeLanguage: usersNativeLanguage,
         userLevel,
@@ -688,7 +697,13 @@ export default defineAgent({
         previousSessionContext: greetingContext,
         mixLine,
         adaptive,
-      });
+        realtime: isGemini,
+      };
+      // Stashed so the realtime path can rebuild just the volatile tail as
+      // an injected [COACH] note — under Gemini the system prompt this
+      // returns is only ever read once, at connect.
+      lastPromptContext = promptCtx;
+      const instructions = buildInstructions(promptCtx);
 
       // Demo visitors are evaluating the product while they talk, so the
       // tutor needs to be able to field "what is this / what's it cost"
@@ -777,6 +792,11 @@ export default defineAgent({
 
     // === CREATE SERVICES (LOCAL, CLOUD, OR GEMINI) ===
     const { ServiceFactory } = await import('./services/factory.js');
+    // Voice is connect-time provider config, so it has to be resolved
+    // before the factory is built — the per-turn learner view comes too
+    // late to influence it. Anonymous demo visitors have no saved setting.
+    const sessionPersona = isDemoSession ? null : await readPersona(userId, targetLang);
+
     const serviceFactory = new ServiceFactory({
       mode: (process.env.SERVICE_MODE as 'local' | 'cloud' | 'local-gemma-audio' | 'gemini') || 'local',
       targetLanguage: targetLang,
@@ -786,9 +806,10 @@ export default defineAgent({
       // Russian. What they're about to speak is their own language.
       speechLanguage: languageUndecided ? (user.nativeLanguage || 'en') : undefined,
       // Same reason as speechLanguage: fixed at connect, so it can't be
-      // inherited from a placeholder. DEMO_GEMINI_VOICE swaps it without a
-      // code change (Puck, Charon, Kore, Fenrir, Aoede, Leda, Orus, Zephyr).
-      voice: isDemoSession ? (process.env.DEMO_GEMINI_VOICE?.trim() || 'Charon') : undefined,
+      // inherited from a placeholder. One default across demo and app so
+      // signing up doesn't change who the user is talking to; a signed-in
+      // user's saved setting wins. See config/voices.ts.
+      voice: resolveVoice(sessionPersona?.voice),
       userId,
     });
 
@@ -927,7 +948,24 @@ export default defineAgent({
     const refreshInstructions = async () => {
       trace('instructions.refresh');
       (agent as any)._instructions = await buildDynamicInstructions();
-      await agent.updateChatCtx((agent as any)._chatCtx);
+
+      // Under a realtime model the line above is inert: Gemini Live takes
+      // its system instruction once, in the setup message, and the
+      // plugin's updateInstructions() only marks the session for restart.
+      // The adaptive tail (planner nudge, frontier words, error treatment,
+      // mix line) therefore has to travel as conversation, which
+      // updateChatCtx DOES deliver mid-session. Without this the whole
+      // adaptive loop runs, logs, and changes nothing the learner hears.
+      const chatCtx = (agent as any)._chatCtx;
+      if (isGemini && lastPromptContext) {
+        const note = buildCoachNote(lastPromptContext, lastCoachNote);
+        if (note) {
+          lastCoachNote = note;
+          chatCtx.addMessage({ role: 'user', content: note });
+          trace('coach.note', note);
+        }
+      }
+      await agent.updateChatCtx(chatCtx);
     };
 
     // Single place that actually moves a session to another language, so
