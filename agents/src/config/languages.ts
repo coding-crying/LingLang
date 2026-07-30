@@ -342,6 +342,22 @@ export function resolveSessionLanguage(
 export const SESSION_FALLBACK_LANGUAGE = 'en'
 
 /**
+ * True for a language the demo will happily teach but local speech services
+ * can't: known here, but with no curated ASR/TTS pinning.
+ *
+ * This exists for the demo → account handover. A visitor asks the demo for
+ * Greek, it obliges (the realtime model needs nothing but the name), and the
+ * row is saved with targetLanguage 'el'. The app then starts sessions in
+ * `local` by default, where 'el' has no voice — so without this the learner
+ * signs up off the back of a Greek conversation and gets greeted in English.
+ * Callers should upgrade the *mode* rather than downgrade the language: which
+ * speech stack runs is an implementation detail, the language is the product.
+ */
+export function isRealtimeOnlyLanguage(code: string): boolean {
+  return !LANGUAGES[code] && !!DYNAMIC_LANGUAGES[code]
+}
+
+/**
  * Modes where the realtime model does its own STT and TTS, so a language
  * needs nothing but its English name. Every other mode drives local Qwen
  * ASR and a MossTTS/OmniVoice clone, which have to be pinned per language
@@ -349,6 +365,9 @@ export const SESSION_FALLBACK_LANGUAGE = 'en'
  * voice to speak with.
  */
 const REALTIME_MODES = new Set(['gemini', 'cloud'])
+
+/** The same set, exported for callers reconciling a mode against a language. */
+export const REALTIME_MODE_NAMES: ReadonlySet<string> = REALTIME_MODES
 // ─── Dynamic languages (demo / realtime-model sessions only) ───
 //
 // The curated LANGUAGES entries above exist mostly to pin *local* speech

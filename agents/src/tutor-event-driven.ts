@@ -61,7 +61,7 @@ import { readPersona } from './lib/persona.js';
 import { dbTools } from './tools/db-tools.js';
 import { ContextManager } from './lib/context.js';
 import { audioPayloadRegistry, setAudioTranscript, GemmaAudioSTT } from './stt/gemma-audio-stt.js';
-import { getLanguageConfig, nativeLanguageName, LANGUAGES, resolveLanguageConfig, resolveSessionLanguage } from './config/languages.js';
+import { getLanguageConfig, nativeLanguageName, LANGUAGES, resolveLanguageConfig, resolveSessionLanguage, isRealtimeOnlyLanguage, REALTIME_MODE_NAMES } from './config/languages.js';
 import { buildInstructions, buildCoachNote, buildOnboardingInstructions, PLATFORM_KNOWLEDGE } from './config/prompts/base.js';
 import type { PromptContext } from './config/prompts/base.js';
 import { computeTargetShare, buildMixLine, measureTargetShare, targetShareForLevel, MAX_THROTTLE_NOTCHES, findForeignScriptChar } from './lib/language-mix.js';
@@ -449,7 +449,9 @@ export default defineAgent({
     await ctx.connect();
     console.log('[Tutor-ED] Connected to room');
 
-    const resolvedMode = resolveServiceMode(ctx);
+    // `let`, because a realtime-only target language upgrades it below —
+    // see the demo → account handover note further down.
+    let resolvedMode = resolveServiceMode(ctx);
     // 2026-07-17: job metadata can carry a user's real Google API key (see
     // resolveGoogleBilling below) — never log it verbatim. Redact before
     // printing rather than dropping the log line, since the rest of the
@@ -467,16 +469,6 @@ export default defineAgent({
     }
     console.log(`[Tutor-ED] Resolved service mode: ${resolvedMode} (job metadata: ${redactedMetadata})`);
     const { googleApiKey, billGoogleUsage } = resolveGoogleBilling(ctx);
-    const geminiSessionStartedAt = resolvedMode === 'gemini' ? Date.now() : null;
-    // Declared here, not next to the ServiceFactory below, because
-    // buildDynamicInstructions() closes over it and is first *called* while
-    // constructing the Agent — which happens before the factory exists. As
-    // a `const` further down that's a temporal dead zone, and it threw
-    // "Cannot access 'isGemini' before initialization" on every session,
-    // killing the job in the entry function before the learner heard
-    // anything. The factory is always constructed with `mode: resolvedMode`,
-    // so deriving it here is the same value, just available in time.
-    const isGemini = resolvedMode === 'gemini';
 
     const participant = await ctx.waitForParticipant();
     const userId = participant.identity || 'test-user';
@@ -519,6 +511,27 @@ export default defineAgent({
     // Mutable: the processor can detect a language change request and
     // update this mid-session, then refresh instructions.
     let targetLang = user.targetLanguage;
+
+    // Demo → account handover. The demo runs in gemini and will teach any
+    // language the realtime model knows; the app then defaults to `local`,
+    // which only has voices for the seven curated ones. Someone who signed
+    // up off the back of a Greek demo would therefore be dropped to English
+    // on their first real session — the language they came for, silently
+    // discarded to keep a speech stack happy.
+    //
+    // Upgrade the mode instead. Which STT/TTS runs is an implementation
+    // detail; the language is the reason they're here. Only reached when
+    // the code is one we actually know (isRealtimeOnlyLanguage), so a typo
+    // or a junk code still falls through to the fallback below rather than
+    // silently forcing a paid cloud session.
+    if (isRealtimeOnlyLanguage(targetLang) && !REALTIME_MODE_NAMES.has(resolvedMode)) {
+      console.log(
+        `[Tutor-ED] "${targetLang}" has no local voice — running this session in gemini ` +
+        `instead of ${resolvedMode}, rather than dropping the learner to English.`,
+      );
+      resolvedMode = 'gemini';
+    }
+
     // Never getLanguageConfig() here: it throws for anything outside the
     // curated table, and throwing in the entry function drops the job before
     // the participant is ever spoken to. See resolveSessionLanguage().
@@ -531,6 +544,16 @@ export default defineAgent({
       );
       targetLang = langConfig.code;
     }
+    // Both derived only now: the language reconciliation above can still
+    // change resolvedMode, and buildDynamicInstructions() closes over
+    // isGemini and is first *called* while constructing the Agent — far
+    // below, but well before the ServiceFactory that used to define it.
+    // As a const down there it was a temporal dead zone that threw
+    // "Cannot access 'isGemini' before initialization" out of the entry
+    // function on every session.
+    const isGemini = resolvedMode === 'gemini';
+    const geminiSessionStartedAt = isGemini ? Date.now() : null;
+
     console.log(`[Tutor-ED] Language: ${langConfig.name}`);
     emitEvent('session.start', { userId, language: langConfig.name, mode: resolvedMode });
 
