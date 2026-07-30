@@ -61,7 +61,7 @@ import { readPersona } from './lib/persona.js';
 import { dbTools } from './tools/db-tools.js';
 import { ContextManager } from './lib/context.js';
 import { audioPayloadRegistry, setAudioTranscript, GemmaAudioSTT } from './stt/gemma-audio-stt.js';
-import { getLanguageConfig, nativeLanguageName, LANGUAGES, resolveLanguageConfig } from './config/languages.js';
+import { getLanguageConfig, nativeLanguageName, LANGUAGES, resolveLanguageConfig, resolveSessionLanguage } from './config/languages.js';
 import { buildInstructions, buildCoachNote, buildOnboardingInstructions, PLATFORM_KNOWLEDGE } from './config/prompts/base.js';
 import type { PromptContext } from './config/prompts/base.js';
 import { computeTargetShare, buildMixLine, measureTargetShare, targetShareForLevel, MAX_THROTTLE_NOTCHES, findForeignScriptChar } from './lib/language-mix.js';
@@ -510,7 +510,18 @@ export default defineAgent({
     // Mutable: the processor can detect a language change request and
     // update this mid-session, then refresh instructions.
     let targetLang = user.targetLanguage;
-    let langConfig = getLanguageConfig(targetLang);
+    // Never getLanguageConfig() here: it throws for anything outside the
+    // curated table, and throwing in the entry function drops the job before
+    // the participant is ever spoken to. See resolveSessionLanguage().
+    const resolvedLang = resolveSessionLanguage(targetLang, resolvedMode);
+    let langConfig = resolvedLang.config;
+    if (resolvedLang.fellBackFrom) {
+      console.error(
+        `[Tutor-ED] Cannot run "${resolvedLang.fellBackFrom}" in ${resolvedMode} mode — ` +
+        `starting in ${langConfig.name} instead. The learner should be told and asked to pick again.`,
+      );
+      targetLang = langConfig.code;
+    }
     console.log(`[Tutor-ED] Language: ${langConfig.name}`);
     emitEvent('session.start', { userId, language: langConfig.name, mode: resolvedMode });
 

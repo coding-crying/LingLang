@@ -22,6 +22,7 @@ import { ContextManager } from '../lib/context.js';
 import { fsrsReview, voiceToGrade, type FSRSGrade, type FSRSCard, type VoicePerformance } from '../lib/fsrs.js';
 import { embedText, lexemeEmbedText } from '../lib/embedding.js';
 import { passesDictionaryGate } from '../lib/dictionary.js';
+import { nativeLanguageName } from '../config/languages.js';
 
 // ============================================================================
 // CONSTANTS
@@ -1507,18 +1508,17 @@ export async function runProcessor(
     const user = await db.query.users.findFirst({
       where: eq(users.id, userId)
     });
-    const langNames: Record<string, string> = {
-      ru: 'Russian', es: 'Spanish', fr: 'French', pt: 'Portuguese',
-      ar: 'Arabic', de: 'German', zh: 'Chinese', ja: 'Japanese',
-      ko: 'Korean', it: 'Italian', en: 'English',
-    };
+    // Names come from config/languages.ts, not a local map. The map that
+    // used to live here had no 'el', so a Greek learner's grading prompt
+    // read "Identify the el words" — and "el" is the Spanish article, so
+    // the utterances came back analysed as Spanish.
     if (user?.targetLanguage) {
       targetIso = user.targetLanguage;
-      targetLanguage = langNames[user.targetLanguage] || user.targetLanguage;
+      targetLanguage = nativeLanguageName(user.targetLanguage);
     }
     if (user?.nativeLanguage) {
       nativeIso = user.nativeLanguage;
-      nativeLanguage = langNames[user.nativeLanguage] || user.nativeLanguage;
+      nativeLanguage = nativeLanguageName(user.nativeLanguage);
     }
   } catch { /* non-fatal — fall back to defaults */ }
 

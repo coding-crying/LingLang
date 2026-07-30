@@ -5,6 +5,7 @@ import * as z from 'zod';
 import { llm } from '@livekit/agents';
 import OpenAI from 'openai';
 import { buildFullPrompt } from './supervisor-functions.js';
+import { nativeLanguageName } from '../config/languages.js';
 
 // Lazy init — avoids reading env vars before dotenv.config() runs in tutor.ts
 let _client: OpenAI | null = null;
@@ -36,9 +37,11 @@ export async function analyzeTurn({ userId, userUtterance, context }: TurnInput)
     where: eq(users.id, userId)
   });
 
-  const ISO_TO_NAME: Record<string, string> = { ru: 'Russian', es: 'Spanish', fr: 'French', pt: 'Portuguese', ar: 'Arabic', en: 'English' };
-  const targetLangName = ISO_TO_NAME[user?.targetLanguage || 'ru'] || 'Russian';
-  const nativeLangName = ISO_TO_NAME[user?.nativeLanguage || 'en'] || 'English';
+  // Same single source of truth as everywhere else. The local map this
+  // replaces defaulted to 'Russian', so any language it didn't list — Greek
+  // included — was silently analysed as Russian.
+  const targetLangName = nativeLanguageName(user?.targetLanguage || 'ru');
+  const nativeLangName = nativeLanguageName(user?.nativeLanguage || 'en');
 
   // 1. Call Step 3.5 Flash via OpenRouter for Analysis
   const model = process.env.SUPERVISOR_LLM_MODEL || 'stepfun/step-3.5-flash:free';

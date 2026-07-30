@@ -279,29 +279,76 @@ export function getSupportedLanguages(): LanguageConfig[] {
   return Object.values(LANGUAGES)
 }
 
-/** Map ISO 639-1 codes to English names for prompt generation. */
-const LANGUAGE_NAMES: Record<string, string> = {
-  en: 'English',
-  ru: 'Russian',
-  es: 'Spanish',
-  fr: 'French',
-  pt: 'Portuguese',
-  ar: 'Arabic',
-  de: 'German',
-  zh: 'Chinese',
-  ja: 'Japanese',
-  ko: 'Korean',
-  it: 'Italian',
-  nl: 'Dutch',
-  pl: 'Polish',
-  tr: 'Turkish',
-  hi: 'Hindi',
+/**
+ * Convert an ISO code like 'en' to a display name like 'English'.
+ *
+ * The single source of truth for language names. There used to be four
+ * separate maps — one here, one in supervisor-functions.ts, one in
+ * supervisor.ts, plus DYNAMIC_LANGUAGES — and they disagreed. A Greek
+ * learner ('el') got "Greek" in the tutor prompt (from langConfig.name),
+ * the bare code "el" in the grading prompt (missing from the processor's
+ * map, so it fell through to the raw code and read as the Spanish article),
+ * and "Russian" in the supervisor (whose map defaulted to it). Names now
+ * come from the config tables that already have to be right for a session
+ * to run at all, so they cannot drift apart again.
+ *
+ * Returns the raw code for something genuinely unknown, and says so — a
+ * silent wrong-language default is far more expensive to debug than a
+ * prompt that reads oddly.
+ */
+export function nativeLanguageName(code: string): string {
+  const known = LANGUAGES[code] || DYNAMIC_LANGUAGES[code]
+  // A curated `name` is a product label, not purely a language name — 'en'
+  // is "English (Power Vocabulary)". The parenthetical is meaningless to a
+  // grading model and actively confusing in a sentence like "identify the
+  // ${name} words", so trailing parentheticals come off. Genuine
+  // qualifiers stay: "European Portuguese" is what we want a prompt to say.
+  if (known) return known.name.replace(/\s*\([^)]*\)\s*$/, '')
+  console.warn(`[languages] no name for "${code}" — prompts will use the raw code`)
+  return code
 }
 
-/** Convert an ISO code like 'en' to a display name like 'English'. Falls back to the code itself. */
-export function nativeLanguageName(code: string): string {
-  return LANGUAGE_NAMES[code] || code.charAt(0).toUpperCase() + code.slice(1)
+/**
+ * The config a real session should start with.
+ *
+ * Curated languages always work. A dynamic language only works when the
+ * realtime model handles STT/TTS itself (gemini mode); in local mode there
+ * is no ASR language or voice to pin, so it would start and then misbehave.
+ *
+ * Deliberately never throws. getLanguageConfig() did, straight out of the
+ * agent's entry function, which meant a user row carrying a language the
+ * curated table didn't have killed the job before it ever reached the
+ * participant — the client just saw a connection that never came up. The
+ * demo's set_target_language accepts the wider DYNAMIC_LANGUAGES set and
+ * persists it, and signup claims that same row, so a demo visitor who
+ * asked for Greek and then made an account could never connect again.
+ * Starting in the wrong language is recoverable in one sentence; a session
+ * that never starts is not.
+ */
+export function resolveSessionLanguage(
+  code: string,
+  mode: string,
+): { config: LanguageConfig; fellBackFrom?: string } {
+  const curated = LANGUAGES[code]
+  if (curated) return { config: curated }
+  if (REALTIME_MODES.has(mode)) {
+    const dynamic = resolveLanguageConfig(code)
+    if (dynamic) return { config: dynamic }
+  }
+  return { config: LANGUAGES[SESSION_FALLBACK_LANGUAGE]!, fellBackFrom: code }
 }
+
+/** Where resolveSessionLanguage() lands when it can't honour the request. */
+export const SESSION_FALLBACK_LANGUAGE = 'en'
+
+/**
+ * Modes where the realtime model does its own STT and TTS, so a language
+ * needs nothing but its English name. Every other mode drives local Qwen
+ * ASR and a MossTTS/OmniVoice clone, which have to be pinned per language
+ * in LANGUAGES above — a dynamic language there starts fine and then has no
+ * voice to speak with.
+ */
+const REALTIME_MODES = new Set(['gemini', 'cloud'])
 // ─── Dynamic languages (demo / realtime-model sessions only) ───
 //
 // The curated LANGUAGES entries above exist mostly to pin *local* speech
