@@ -468,6 +468,15 @@ export default defineAgent({
     console.log(`[Tutor-ED] Resolved service mode: ${resolvedMode} (job metadata: ${redactedMetadata})`);
     const { googleApiKey, billGoogleUsage } = resolveGoogleBilling(ctx);
     const geminiSessionStartedAt = resolvedMode === 'gemini' ? Date.now() : null;
+    // Declared here, not next to the ServiceFactory below, because
+    // buildDynamicInstructions() closes over it and is first *called* while
+    // constructing the Agent — which happens before the factory exists. As
+    // a `const` further down that's a temporal dead zone, and it threw
+    // "Cannot access 'isGemini' before initialization" on every session,
+    // killing the job in the entry function before the learner heard
+    // anything. The factory is always constructed with `mode: resolvedMode`,
+    // so deriving it here is the same value, just available in time.
+    const isGemini = resolvedMode === 'gemini';
 
     const participant = await ctx.waitForParticipant();
     const userId = participant.identity || 'test-user';
@@ -1020,7 +1029,6 @@ export default defineAgent({
     });
 
     const mode = serviceFactory.getMode();
-    const isGemini = mode === 'gemini';
 
     const sttService = isGemini ? undefined : serviceFactory.createSTT();
 
