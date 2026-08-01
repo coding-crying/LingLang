@@ -10,7 +10,13 @@
  * on every request.
  */
 
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
+// `import.meta.env` is a Vite injection: under plain node/tsx it is
+// undefined, and reading a property off it throws at module load. That
+// mattered because the *.test.ts scripts import modules which transitively
+// import this one — AppState.test.ts died here before asserting anything.
+// Optional chaining costs nothing in a Vite build (the whole expression is
+// statically replaced) and keeps this file importable outside a bundler.
+export const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL ?? '';
 
 export function apiUrl(path: string): string {
   return `${API_BASE_URL}${path}`;

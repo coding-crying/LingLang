@@ -1,6 +1,7 @@
 /**
- * Unit tests for AppState's theme-resolution priority logic
- * (localStorage → prefers-color-scheme → default 'dark').
+ * Unit tests for AppState's two pure resolvers: theme
+ * (localStorage → prefers-color-scheme → default 'dark') and service mode
+ * (localStorage → default 'cloud').
  *
  * Plain assertion script (matches the repo's existing test-architecture.ts /
  * useConversationStream.test.ts convention — no test framework is configured
@@ -15,7 +16,7 @@
  */
 
 import assert from 'node:assert';
-import { resolveInitialTheme } from './AppState';
+import { resolveInitialServiceMode, resolveInitialTheme } from './AppState';
 
 function fakeStorage(value: string | null): Pick<Storage, 'getItem'> {
   return { getItem: () => value };
@@ -71,6 +72,37 @@ assert.strictEqual(
   resolveInitialTheme(fakeStorage(null), null),
   'dark',
   'storage present but empty, matchMedia unavailable → default dark',
+);
+
+// ── Service mode ──────────────────────────────────────────────────────────
+// A stored 'local' is honoured; everything else means cloud. The asymmetry is
+// deliberate: local requires a GPU speech stack this repo doesn't ship, so it
+// has to be a choice someone made, never something they inherit by default.
+
+assert.strictEqual(
+  resolveInitialServiceMode(fakeStorage('local')),
+  'local',
+  'an explicit stored local choice is honoured',
+);
+assert.strictEqual(
+  resolveInitialServiceMode(fakeStorage('cloud')),
+  'cloud',
+  'an explicit stored cloud choice is honoured',
+);
+assert.strictEqual(
+  resolveInitialServiceMode(fakeStorage(null)),
+  'cloud',
+  'fresh install with nothing stored → cloud, not local',
+);
+assert.strictEqual(
+  resolveInitialServiceMode(fakeStorage('nonsense')),
+  'cloud',
+  'garbage stored value falls back to cloud rather than local',
+);
+assert.strictEqual(
+  resolveInitialServiceMode(null),
+  'cloud',
+  'no storage available at all (SSR-like) → cloud',
 );
 
 console.log('AppState.test.ts: all assertions passed');

@@ -45,9 +45,21 @@ export type SheetState =
 const THEME_STORAGE_KEY = 'linglang-theme';
 const SERVICE_MODE_STORAGE_KEY = 'linglang-service-mode';
 
-function resolveInitialServiceMode(storage: Pick<Storage, 'getItem'> | null | undefined): ServiceMode {
+/**
+ * Cloud is the default for anyone who has never picked a mode. Local needs a
+ * GPU speech stack that does not ship with this repo, so on a fresh install
+ * it isn't merely offline — it can never come up. Defaulting to it meant a
+ * new deployment's first connect went out as `local` and failed, in the
+ * window before the health poll bounced it back.
+ *
+ * Local stays fully available, just opt-in: pick it once and this remembers
+ * it, exactly as before.
+ */
+export function resolveInitialServiceMode(
+  storage: Pick<Storage, 'getItem'> | null | undefined,
+): ServiceMode {
   const stored = storage?.getItem(SERVICE_MODE_STORAGE_KEY);
-  return stored === 'cloud' ? 'cloud' : 'local';
+  return stored === 'local' ? 'local' : 'cloud';
 }
 
 /**
