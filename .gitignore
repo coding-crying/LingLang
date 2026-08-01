@@ -261,3 +261,10 @@ local_services/
 # package-lock.json (using pnpm)
 package-lock.json
 agents/package-lock.json
+
+# Any derivative of an env file — backups, pre-rotation copies, dated
+# snapshots. The original credential leak was a stale *copy* of env
+# values, not the env file itself, so match broadly on purpose.
+.env*
+!.env.example
+*.env
