@@ -13,7 +13,6 @@
     "api:check": "api-extractor run --typescript-compiler-folder ../node_modules/typescript",
     "api:update": "api-extractor run --local --typescript-compiler-folder ../node_modules/typescript --verbose",
     "dev:tutor": "tsx src/tutor.ts dev",
-    "dev:tutor-duolingo": "tsx src/tutor_duolingo.ts dev",
     "dev:tutor-ed": "tsx src/tutor-event-driven.ts dev",
     "dev:demo": "tsx src/demo.ts dev",
     "dev:matrix-bot": "tsx src/scripts/matrix-call-bot.ts",
