@@ -56,14 +56,15 @@ async function main() {
       const embeddings = await embedBatch(batch.map((r) => r.transcript));
 
       for (let j = 0; j < batch.length; j++) {
+        const row = batch[j];
         const emb = embeddings[j];
         // embedBatch returns an empty array per text it couldn't embed
         // rather than throwing, so count those instead of writing a
         // zero-length vector the column would reject anyway.
-        if (emb && emb.length > 0) {
+        if (row && emb && emb.length > 0) {
           await db.update(schema.utterances)
             .set({ embedding: emb })
-            .where(eq(schema.utterances.id, batch[j].id));
+            .where(eq(schema.utterances.id, row.id));
         } else {
           failed++;
         }

@@ -840,6 +840,39 @@ export interface SRSUpdate {
 }
 
 /**
+ * Canonical Universal-Dependencies-style tag for a POS the LLM produced.
+ *
+ * Lexeme identity is `lang:lemma:pos`, and the lemma was already lowercased
+ * while the tag was passed through raw — so `es:casa:NOUN` and `es:casa:noun`
+ * were two different primary keys for one word, splitting a learner's SRS
+ * state across two rows and showing the planner two half-known words instead
+ * of one known one.
+ *
+ * The tag is free text from a language model, and it drifts in three ways at
+ * once: case (`noun`), spelled-out names (`adjective`), and competing
+ * schemes (`INTERJ` vs `INTJ`, `ADP` vs `PREP`). One live row even came back
+ * as `trợ_verb`, the model answering in Vietnamese. Uppercasing alone
+ * therefore isn't enough; the aliases have to collapse too.
+ *
+ * Unknown tags are uppercased and kept rather than forced to GENERAL: a tag
+ * this doesn't know is still a real distinction most of the time, and
+ * flattening it would merge genuinely different words.
+ */
+const POS_ALIASES: Record<string, string> = {
+  ADVERB: 'ADV', ADJECTIVE: 'ADJ',
+  INTERJ: 'INTJ', INTERJECTION: 'INTJ', NUMERAL: 'NUM', NUMBER: 'NUM',
+  ADP: 'PREP', PREPOSITION: 'PREP', PRONOUN: 'PRON', CONJUNCTION: 'CONJ',
+  DETERMINER: 'DET', ARTICLE: 'ART', PARTICLE: 'PART', AUXILIARY: 'AUX',
+  PROPERNOUN: 'PROPN', PROPER_NOUN: 'PROPN',
+};
+
+export function normalizePos(raw: string | null | undefined): string {
+  const t = (raw || '').trim().toUpperCase().replace(/[\s-]+/g, '_');
+  if (!t) return 'GENERAL';
+  return POS_ALIASES[t] ?? t;
+}
+
+/**
  * Deterministic echo test — learner-field spec §3.3. Word-boundary,
  * case-insensitive containment of the lemma OR surface form in the tutor's
  * recent text. Deliberately simple (no stemming/fuzzy match): a false
@@ -937,8 +970,8 @@ export async function updateSRSFromAnalysis(
       // native-side lexeme for the habit record and skip the FSRS penalty
       // for the target side.
       const safeLemma = (item.lemma || '').trim();
-      const safePos = (item.pos || 'GENERAL').trim() || 'GENERAL';
-      const isFunctionWord = FUNCTION_WORD_POS.has(safePos.toUpperCase()) || isLikelyFunctionToken(safeLemma);
+      const safePos = normalizePos(item.pos);
+      const isFunctionWord = FUNCTION_WORD_POS.has(safePos) || isLikelyFunctionToken(safeLemma);
 
       if (isFunctionWord) {
         console.log(
@@ -1157,7 +1190,7 @@ export async function updateSRSFromAnalysis(
     if (!existingLexeme) {
       // Auto-create target-language lexeme
       const safeLemma = (item.lemma || '').trim();
-      const safePos = (item.pos || 'GENERAL').trim() || 'GENERAL';
+      const safePos = normalizePos(item.pos);
       const lexemeId = `${targetLang}:${safeLemma.toLowerCase()}:${safePos}`;
 
       console.log(`[Processor] Auto-creating lexeme: ${safeLemma} (${safePos}) [${targetLang}]`);

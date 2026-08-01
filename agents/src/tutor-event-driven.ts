@@ -346,7 +346,29 @@ async function persistSessionSummaryAsync(
     errorMap.set(e.lemma, e.rule || 'error');
   }
   const errorsPattern = [...errorMap.entries()].map(([lemma, rule]) => `${lemma}: ${rule}`).join('; ') || null;
-  const nextHint = stats.allHints.length > 0 ? [...new Set(stats.allHints)].slice(-3).join('; ') : null;
+
+  // nextSessionHint is the whole continuity mechanism: it is the ONLY field
+  // the next session's greeting reads, so when it's null the tutor opens
+  // cold no matter how much history is stored. It used to come solely from
+  // the processor's grammarHints, which it emits rarely — 9 stored
+  // Portuguese sessions had produced 0 hints, so "pick up where you left
+  // off" had never once fired for the language actually being learned.
+  //
+  // Fall back to the words that actually gave trouble. They're already
+  // computed above for errorsPattern, so this needs no extra work and no
+  // extra LLM call — the data was being written to a field nothing reads
+  // while the field everything reads sat empty.
+  //
+  // Deliberately still null for a clean session. A hint has to name
+  // something worth returning to; padding it would make the next greeting
+  // announce a plan to focus on nothing, which is worse than opening
+  // normally.
+  const hintFromGrammar = stats.allHints.length > 0
+    ? [...new Set(stats.allHints)].slice(-3).join('; ')
+    : null;
+  const troubleWords = [...errorMap.keys()].slice(-3);
+  const nextHint = hintFromGrammar
+    ?? (troubleWords.length > 0 ? `words that gave trouble: ${troubleWords.join(', ')}` : null);
 
   // The planner has been maintaining a running summary all session — use it directly.
   const summary = runningSummary || `Session lasted ${durationMinutes}min with ${stats.totalSrsUpdates} word reviews.`;
