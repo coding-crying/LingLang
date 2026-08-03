@@ -11,6 +11,60 @@ services:
     volumes:
       - linglang-pgdata:/var/lib/postgresql/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U linglang"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: pushes agents/src/db/schema.ts onto linglang-db. Runs on every
+  # `docker compose up`; a no-op if the schema already matches. See the
+  # README section "Use drizzle-kit push, not migrate" for why this is push,
+  # not migrate.
+  linglang-migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    env_file:
+      - agents/.env.local
+    environment:
+      DATABASE_URL: postgresql://linglang:${LL_DB_PASSWORD:-linglang_dev}@linglang-db:5432/linglang
+    command: ["pnpm", "drizzle-kit", "push"]
+    depends_on:
+      linglang-db:
+        condition: service_healthy
+
+  linglang-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    container_name: linglang-dashboard
+    env_file:
+      - agents/.env.local
+    environment:
+      DATABASE_URL: postgresql://linglang:${LL_DB_PASSWORD:-linglang_dev}@linglang-db:5432/linglang
+    ports:
+      - "3001:3001"
+    command: ["pnpm", "dashboard"]
+    depends_on:
+      linglang-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  linglang-tutor:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    container_name: linglang-tutor
+    env_file:
+      - agents/.env.local
+    environment:
+      DATABASE_URL: postgresql://linglang:${LL_DB_PASSWORD:-linglang_dev}@linglang-db:5432/linglang
+    command: ["pnpm", "dev:tutor-ed"]
+    depends_on:
+      linglang-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
 
 volumes:
   linglang-pgdata:

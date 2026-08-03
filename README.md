@@ -56,6 +56,21 @@ pnpm dev:tutor-ed                  # the tutor agent worker
 
 Open <http://localhost:3001>, make an account, and press the mic.
 
+### Or run the whole stack in Docker
+
+`docker-compose.yml` also has `linglang-dashboard` and `linglang-tutor`
+services built from `Dockerfile.agent`, plus a one-shot `linglang-migrate`
+service that runs `drizzle-kit push` before either starts. Fill in
+`agents/.env.local` as above, then:
+
+```bash
+docker compose up -d --build
+```
+
+This is a bigger, less-transparent box than the two-terminal `pnpm` flow
+above — prefer that one while developing, and this one for handing the
+whole thing to a machine you don't want to babysit.
+
 `.env.example` documents every variable, but only these are required:
 `DATABASE_URL`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`,
 `GEMINI_API_KEY`, `API_KEY_ENCRYPTION_SECRET`, and `DASHBOARD_PASSWORD_SALT`.
@@ -129,8 +144,10 @@ Stated plainly, because finding these yourself at 1am is worse:
   from-scratch install on a clean machine.** The required variables are certain.
   Whether that's the *complete* set is not yet verified. If you hit a gap, an
   issue would genuinely help.
-* **No Dockerfile yet.** You run the agent and dashboard as node processes;
-  `docker-compose.yml` covers Postgres only.
+* **The Docker path is newer and less battle-tested than the two-terminal
+  `pnpm` flow.** `Dockerfile.agent` builds the whole pnpm workspace, so the
+  image is large and slow to build for now — see the `node_modules`
+  duplication note below.
 * **No reconnect on dropout.** If the audio connection dies mid-session you
   reconnect by hand.
 * **`node_modules` is large** (~3 GB), mostly duplicated ONNX runtime copies
