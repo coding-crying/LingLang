@@ -161,4 +161,11 @@ quickstart on a machine that isn't mine. See `CONTRIBUTING.md`.
 
 ## Licence
 
-See `LICENSE`.
+This project is dual-licensed:
+
+- The underlying LiveKit agents SDK (everything outside `agents/`) is
+  **Apache-2.0** — see `LICENSE` and `NOTICE`.
+- The LingLang tutor application itself (`agents/`) is **AGPL-3.0-or-later**
+  — see `agents/LICENSE`. This means if you run a modified version of the
+  tutor as a network service for others, you must make your modified source
+  available to them. Running it yourself, self-hosted, is unaffected.

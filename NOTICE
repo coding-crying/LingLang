@@ -11,3 +11,15 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+---
+
+This repository is a fork of LiveKit's agents-js SDK. The SDK code
+(everything outside agents/) remains under the Apache License, Version 2.0
+above, with LiveKit, Inc.'s copyright and notices intact as required by
+that license.
+
+The LingLang tutor application itself — everything under agents/ — is
+original work by the LingLang contributors and is separately licensed
+under the GNU Affero General Public License v3.0 or later. See
+agents/LICENSE for the full text.
