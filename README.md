@@ -150,8 +150,9 @@ Stated plainly, because finding these yourself at 1am is worse:
   duplication note below.
 * **No reconnect on dropout.** If the audio connection dies mid-session you
   reconnect by hand.
-* **`node_modules` is large** (~3 GB), mostly duplicated ONNX runtime copies
-  pulled in by speech plugins you won't use in cloud mode.
+* **`node_modules` is large** (~2 GB), dominated by the ONNX runtime native
+  binaries (~500 MB) pulled in by speech plugins you won't use in cloud
+  mode.
 
 ---
 
