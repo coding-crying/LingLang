@@ -140,10 +140,14 @@ implementation detail, the language is the point.
 
 Stated plainly, because finding these yourself at 1am is worse:
 
-* **The quickstart above is derived from reading the source, not from a
-  from-scratch install on a clean machine.** The required variables are certain.
-  Whether that's the *complete* set is not yet verified. If you hit a gap, an
-  issue would genuinely help.
+* **The quickstart above hasn't run end-to-end on a clean machine with real
+  credentials.** Every `process.env.*` read in `agents/src` was cross-checked
+  against `.env.example`, which caught one real bug: the Processor's
+  Gemini-mode check only recognized `GOOGLE_API_KEY`, not the documented
+  `GEMINI_API_KEY`, so it silently fell back to a local LLM that doesn't
+  exist in cloud mode (fixed). What's *not* verified is an actual boot with
+  live LiveKit/Gemini credentials — do that before trusting this fully. If
+  you hit a gap, an issue would genuinely help.
 * **The Docker path is newer and less battle-tested than the two-terminal
   `pnpm` flow.** `Dockerfile.agent` builds the whole pnpm workspace, so the
   image is large and slow to build for now — see the `node_modules`
