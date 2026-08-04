@@ -1342,13 +1342,27 @@ export default defineAgent({
       if (isGemini && lastPromptContext) {
         const note = buildCoachNote(lastPromptContext, lastCoachNote);
         if (note) {
-          const realtimeSession = (agent as any)._activity?.realtimeSession;
+          // 2026-08-04: this read `_activity`, which has NEVER existed on
+          // the SDK's Agent — the field is `_agentActivity` in both
+          // @livekit/agents 1.2.3 and 1.5.0 (see agent.js's
+          // getActivityOrThrow). Optional chaining made it fail silently,
+          // so on every Gemini session the whole adaptive loop — planner
+          // nudge, frontier words, error treatment, grammar hints, mix
+          // line, wrapup — was computed, logged, and dropped. Live logs
+          // showed 9 instructions.refresh and 0 coach.note, ever. Since
+          // this is the ONLY channel that reaches a realtime session
+          // mid-call (the system prompt is frozen at connect), the tutor
+          // was effectively running on its opening prompt all session.
+          // The failure is now traced instead of swallowed.
+          const realtimeSession = (agent as any)._agentActivity?.realtimeSession;
           if (realtimeSession) {
             lastCoachNote = note;
             const ctx = realtimeSession.chatCtx;
             ctx.addMessage({ role: 'user', content: note });
             await realtimeSession.updateChatCtx(ctx);
             trace('coach.note', note);
+          } else {
+            trace('coach.note.undeliverable', 'no realtimeSession on agent._agentActivity');
           }
         }
       }

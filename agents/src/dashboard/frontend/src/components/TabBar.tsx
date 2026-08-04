@@ -48,18 +48,31 @@ function ProfileGlyph() {
   );
 }
 
+function DebugGlyph() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 22 22" fill="none" aria-hidden="true">
+      <circle cx="11" cy="11" r="7.5" stroke="currentColor" strokeWidth="2" />
+      <circle cx="11" cy="11" r="2.4" fill="currentColor" />
+      <path d="M11 1.5v3M11 17.5v3M1.5 11h3M17.5 11h3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 const TABS: TabDef[] = [
   { tab: 'library', label: 'Library', glyph: LibraryGlyph },
   { tab: 'voice', label: 'Voice', glyph: VoiceGlyph },
   { tab: 'profile', label: 'Profile', glyph: ProfileGlyph },
 ];
 
-export default function TabBar() {
+const DEBUG_TAB: TabDef = { tab: 'debug', label: 'Debug', glyph: DebugGlyph };
+
+export default function TabBar({ showDebug = false }: { showDebug?: boolean }) {
   const { activeTab, setTab } = useAppState();
+  const tabs = showDebug ? [...TABS, DEBUG_TAB] : TABS;
 
   return (
     <nav className="tab-bar">
-      {TABS.map(({ tab, label, glyph: Glyph }) => {
+      {tabs.map(({ tab, label, glyph: Glyph }) => {
         const active = tab === activeTab;
         return (
           <ToggleButton

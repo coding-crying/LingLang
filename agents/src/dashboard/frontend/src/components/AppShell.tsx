@@ -23,6 +23,7 @@ import OnboardingGate from '../OnboardingGate';
 import VoiceTab from '../tabs/VoiceTab';
 import ProfileTab from '../tabs/ProfileTab';
 import LibraryTab from '../tabs/LibraryTab';
+import DebugTab from '../tabs/DebugTab';
 import LanguageSheet from '../sheets/LanguageSheet';
 import CurriculumSheet from '../sheets/CurriculumSheet';
 import ChunkBrowserSheet from '../sheets/ChunkBrowserSheet';
@@ -48,6 +49,10 @@ function AppShellInner({ onLogout }: { onLogout: () => void }) {
     );
   }
 
+  // Admin-only debug surface. This is cosmetic gating — GET /api/runtime
+  // enforces the same check server-side, so a forced tab shows nothing.
+  const isAdmin = onboarding.userId === 'will';
+
   let otherTabContent: ReactElement | null = null;
   switch (activeTab) {
     case 'library':
@@ -55,6 +60,9 @@ function AppShellInner({ onLogout }: { onLogout: () => void }) {
       break;
     case 'profile':
       otherTabContent = <ProfileTab onLogout={onLogout} />;
+      break;
+    case 'debug':
+      otherTabContent = isAdmin ? <DebugTab /> : null;
       break;
   }
 
@@ -68,7 +76,7 @@ function AppShellInner({ onLogout }: { onLogout: () => void }) {
         <VoiceTab userId={onboarding.userId} targetLang={onboarding.targetLang} />
       </div>
       {otherTabContent}
-      <TabBar />
+      <TabBar showDebug={isAdmin} />
       <Sheet>
         {activeSheet?.kind === 'language' ? (
           <LanguageSheet

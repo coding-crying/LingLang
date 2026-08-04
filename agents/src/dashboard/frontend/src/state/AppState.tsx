@@ -26,7 +26,9 @@ import {
 import { apiFetch } from '../lib/api';
 
 export type Theme = 'dark' | 'light';
-export type Tab = 'voice' | 'library' | 'profile';
+// 'debug' is admin-only and hidden from TabBar for everyone else; the
+// data behind it (GET /api/runtime) is gated server-side regardless.
+export type Tab = 'voice' | 'library' | 'profile' | 'debug';
 /** Which backend stack a connect picks — see server.ts's /api/token
  *  `mode` param (`local` = locally hosted pipeline, `cloud` =
  *  Gemini Live). Room names are per-mode (`linglang-<userId>-<mode>`),
