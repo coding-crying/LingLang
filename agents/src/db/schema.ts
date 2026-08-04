@@ -104,6 +104,20 @@ export const users = pgTable('users', {
   googleUsagePeriodStart: timestamp('google_usage_period_start', { withTimezone: true }).notNull().defaultNow(),
 });
 
+// 2026-08-03: anonymous public-demo traffic has no auth and no per-user
+// budget of its own — every visitor is a throwaway users row, so the
+// per-user google-budget table above resets to a fresh allowance for each
+// one and caps nothing in aggregate. Covers demo.ts's ElevenLabs fallback
+// and the live anonymous demo worker's forced Gemini-realtime usage
+// against the shared production key. Single global row, same lazy-reset
+// shape as google-budget above — see lib/demo-budget.ts.
+export const demoBudget = pgTable('demo_budget', {
+  id: text('id').primaryKey().default('global'),
+  spentMicros: integer('spent_micros').notNull().default(0),
+  limitMicros: integer('limit_micros').notNull().default(500000), // $0.50/period
+  periodStart: timestamp('period_start', { withTimezone: true }).notNull().defaultNow(),
+});
+
 // 2026-06-25: per-language proficiency replaces the global field for
 // tutor-level lookups. The global `users.proficiencyLevel` is kept as
 // a fallback only. Source of truth is this table.

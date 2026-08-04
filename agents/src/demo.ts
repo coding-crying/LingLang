@@ -3,6 +3,7 @@ dotenv.config({ path: '.env.local' });
 
 import { type JobContext, type JobProcess, WorkerOptions, cli, defineAgent, voice } from '@livekit/agents';
 import * as openai from '@livekit/agents-plugin-openai';
+import * as elevenlabs from '@livekit/agents-plugin-elevenlabs';
 import * as silero from '@livekit/agents-plugin-silero';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -11,8 +12,10 @@ import { getLanguageConfig, getSupportedLanguages } from './config/languages.js'
 import { buildInstructions } from './config/prompts/base.js';
 import { createTTS } from './tts/fallback.js';
 import { createSTT } from './stt/fallback.js';
+import { ElevenLabsRealtimeSTT } from './stt/elevenlabs-realtime.js';
 import { db } from './db/index.js';
 import { users } from './db/schema.js';
+import { getDemoBudgetStatus, recordDemoUsage } from './lib/demo-budget.js';
 
 type LangMatch = { code: string; name: string };
 
@@ -83,6 +86,23 @@ export default defineAgent({
   },
 
   entry: async (ctx: JobContext) => {
+    // This demo has no auth and no per-user budget row — it's a public,
+    // unauthenticated entry point that (unlike the dashboard flow) can
+    // silently fall through to paid ElevenLabs TTS/STT with nothing
+    // tracking or capping the spend. See lib/demo-budget.ts. Checked
+    // before any TTS/STT is created, so an exhausted budget costs nothing
+    // beyond this one query.
+    const budget = await getDemoBudgetStatus();
+    if (budget.overBudget) {
+      console.warn(`[Demo] Global demo budget exhausted (${budget.spentMicros}/${budget.limitMicros} micros) — declining session`);
+      await ctx.connect();
+      await ctx.room.disconnect();
+      return;
+    }
+
+    const sessionStartedAt = Date.now();
+    let usedElevenLabs = false;
+
     await ctx.connect();
     const participant = await ctx.waitForParticipant();
     const defaultLang = getLanguageConfig(process.env.DEFAULT_TARGET_LANGUAGE || 'pt');
@@ -93,6 +113,7 @@ export default defineAgent({
       createTTS(englishLang),
       createSTT(englishLang),
     ]);
+    if (englishTTS instanceof elevenlabs.TTS || englishSTT instanceof ElevenLabsRealtimeSTT) usedElevenLabs = true;
     console.log(`[Demo] Bootstrap TTS: ${(englishTTS as any).label || englishTTS.constructor.name}`);
     console.log(`[Demo] Bootstrap STT: ${(englishSTT as any).label || englishSTT.constructor.name}`);
 
@@ -217,6 +238,7 @@ Do not teach. Do not explain. Do not add anything else.`,
       createTTS(langConfig),
       createSTT(langConfig),
     ]);
+    if (tutorTTS instanceof elevenlabs.TTS || tutorSTT instanceof ElevenLabsRealtimeSTT) usedElevenLabs = true;
     console.log(`[Demo] Tutor TTS: ${(tutorTTS as any).label || tutorTTS.constructor.name}`);
     console.log(`[Demo] Tutor STT: ${(tutorSTT as any).label || tutorSTT.constructor.name}`);
     const agent = new voice.Agent({ instructions });
@@ -236,6 +258,21 @@ Do not teach. Do not explain. Do not add anything else.`,
 
     console.log('[Demo] Tutor session started');
     await session.say(langConfig.prompts.greeting);
+
+    // Estimated cost accrual against the global demo budget — see this
+    // function's opening comment and lib/demo-budget.ts. Only ElevenLabs
+    // segments cost anything; local OmniVoice/MossTTS/Qwen3-ASR are free,
+    // so a session that never fell back records nothing.
+    ctx.addShutdownCallback(async () => {
+      if (!usedElevenLabs) return;
+      try {
+        const seconds = (Date.now() - sessionStartedAt) / 1000;
+        const ratePerSecond = parseInt(process.env.DEMO_ELEVENLABS_MICROS_PER_SECOND || '200', 10);
+        await recordDemoUsage(Math.round(seconds * ratePerSecond));
+      } catch (err) {
+        console.warn('[Demo] Usage accrual failed in shutdown:', String(err).slice(0, 120));
+      }
+    });
   },
 });
 
