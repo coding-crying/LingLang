@@ -50,9 +50,9 @@
   "pnpm": {
     "patchedDependencies": {
       "@changesets/assemble-release-plan": "patches/@changesets__assemble-release-plan.patch"
+    },
+    "overrides": {
+      "onnxruntime-node": "1.21.0"
     }
-  },
-  "dependencies": {
-    "onnxruntime-node": "1.18.0"
   }
 }

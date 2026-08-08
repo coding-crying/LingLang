@@ -335,8 +335,22 @@ export function buildCoachNote(
   const adaptive = context.adaptive ?? defaultAdaptive()
   const lines: string[] = []
 
+  // demandWords first: it's the most perishable signal in the system —
+  // the learner reached for their native word *this turn* and the window
+  // to hand them the target one closes almost immediately. 2026-08-04:
+  // this was missing entirely, so on realtime sessions (where this note
+  // is the only mid-session channel) the signal was computed every turn
+  // and never delivered once.
+  if (context.demandWords?.trim()) {
+    lines.push(`they just reached for the ${context.nativeLanguage} word — hand them: ${context.demandWords}`)
+  }
   if (context.goalUpdate?.trim()) lines.push(context.goalUpdate.trim())
   if (context.frontier.newWords) lines.push(`reach for: ${context.frontier.newWords}`)
+  // Due words shift mid-session as the processor grades turns, and under
+  // a realtime model the system prompt's copy is frozen at connect — so
+  // without this the spaced-repetition payload is whatever it was when
+  // the call started, for the entire call.
+  if (context.frontier.dueWords) lines.push(`scaffold with what they know: ${context.frontier.dueWords}`)
 
   const errorLine = computeErrorTreatment(adaptive.errorDensity, context.recentErrors?.trim() || '')
   if (errorLine) lines.push(errorLine)

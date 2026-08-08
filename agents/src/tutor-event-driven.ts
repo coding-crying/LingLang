@@ -59,6 +59,7 @@ import { resolveAnalysisEndpoint } from './llm/analysis-endpoint.js';
 import { resolveVoice } from './config/voices.js';
 import { readPersona } from './lib/persona.js';
 import { dbTools } from './tools/db-tools.js';
+import { contentTools } from './tools/content-tools.js';
 import { ContextManager } from './lib/context.js';
 import { audioPayloadRegistry, setAudioTranscript, GemmaAudioSTT } from './stt/gemma-audio-stt.js';
 import { getLanguageConfig, nativeLanguageName, LANGUAGES, resolveLanguageConfig, resolveSessionLanguage, isRealtimeOnlyLanguage, REALTIME_MODE_NAMES } from './config/languages.js';
@@ -447,7 +448,15 @@ function resolveGoogleBilling(ctx: JobContext): { googleApiKey?: string; billGoo
   } catch {
     // Malformed metadata — no per-user key/billing info available.
   }
-  return { billGoogleUsage: false };
+  // No metadata means this wasn't dispatched via the dashboard's
+  // /api/token endpoint — the only other thing that lands here is the
+  // anonymous demo worker (DEMO_SESSION_TIME_LIMIT_MS set), which LiveKit
+  // auto-dispatches with no metadata at all, while still forcing gemini
+  // mode against the shared production key. Without this, demo sessions'
+  // Gemini usage was silently never recorded anywhere (see
+  // resolveDemoBilling below for why it's billed against a global bucket
+  // instead of this per-user one).
+  return { billGoogleUsage: !!process.env.DEMO_SESSION_TIME_LIMIT_MS };
 }
 
 export default defineAgent({
@@ -500,6 +509,26 @@ export default defineAgent({
     // Same signal the wrap-up/hard-stop timers below key off: this worker
     // is running the anonymous landing-page demo, not a real account.
     const isDemoSession = !!process.env.DEMO_SESSION_TIME_LIMIT_MS;
+
+    // Demo sessions bypass the dashboard's /api/token endpoint entirely
+    // (marketing site mints its own LiveKit token), so the per-user
+    // budget/Turnstile/rate-limit checks that guard real dispatches never
+    // run for them — Turnstile + per-IP/global rate limits live in the
+    // marketing site's Netlify function as the first line of defense, but
+    // per the ROADMAP's own "not done" item, there was no provider-side
+    // spend cap as a backstop. Each demo visitor is also a disposable
+    // one-off users row, so the per-user shared-key budget
+    // (lib/google-budget.ts) doesn't actually cap anything in aggregate —
+    // this checks a single global bucket instead (lib/demo-budget.ts).
+    if (isDemoSession) {
+      const { getDemoBudgetStatus } = await import('./lib/demo-budget.js');
+      const demoBudget = await getDemoBudgetStatus();
+      if (demoBudget.overBudget) {
+        console.warn(`[Tutor-ED] Global demo budget exhausted (${demoBudget.spentMicros}/${demoBudget.limitMicros} micros) — declining session`);
+        await ctx.room.disconnect();
+        return;
+      }
+    }
 
     // A demo visitor arrives having chosen nothing — the landing page's
     // only control is "Start talking". The tutor asks what they want to
@@ -1046,7 +1075,12 @@ export default defineAgent({
     // media_chunks deprecation fixed by the upgrade itself.
     const agent = new voice.Agent({
       instructions: await buildDynamicInstructions(),
-      tools: [...dbTools, ...onboardingTools, ...demoTools],
+      // contentTools let the tutor collect a source's provenance in
+      // conversation ('how far did you get with it?') instead of the
+      // learner filling a form -- see tools/content-tools.ts. Excluded
+      // from demo sessions: an anonymous visitor has no library, so the
+      // tools would only ever return empty.
+      tools: [...dbTools, ...onboardingTools, ...demoTools, ...(isDemoSession ? [] : contentTools)],
     });
 
     // === CREATE SERVICES (LOCAL, CLOUD, OR GEMINI) ===
@@ -1314,13 +1348,27 @@ export default defineAgent({
       if (isGemini && lastPromptContext) {
         const note = buildCoachNote(lastPromptContext, lastCoachNote);
         if (note) {
-          const realtimeSession = (agent as any)._activity?.realtimeSession;
+          // 2026-08-04: this read `_activity`, which has NEVER existed on
+          // the SDK's Agent — the field is `_agentActivity` in both
+          // @livekit/agents 1.2.3 and 1.5.0 (see agent.js's
+          // getActivityOrThrow). Optional chaining made it fail silently,
+          // so on every Gemini session the whole adaptive loop — planner
+          // nudge, frontier words, error treatment, grammar hints, mix
+          // line, wrapup — was computed, logged, and dropped. Live logs
+          // showed 9 instructions.refresh and 0 coach.note, ever. Since
+          // this is the ONLY channel that reaches a realtime session
+          // mid-call (the system prompt is frozen at connect), the tutor
+          // was effectively running on its opening prompt all session.
+          // The failure is now traced instead of swallowed.
+          const realtimeSession = (agent as any)._agentActivity?.realtimeSession;
           if (realtimeSession) {
             lastCoachNote = note;
             const ctx = realtimeSession.chatCtx;
             ctx.addMessage({ role: 'user', content: note });
             await realtimeSession.updateChatCtx(ctx);
             trace('coach.note', note);
+          } else {
+            trace('coach.note.undeliverable', 'no realtimeSession on agent._agentActivity');
           }
         }
       }
@@ -2464,7 +2512,20 @@ export default defineAgent({
         // for why a live read is unsafe across an in-flight interruption.
         // Lets the frontend replace/finalize the matching streamed bubble
         // instead of appending a duplicate (see Task 4a).
-        emitEvent('agent.reply', { text: item.textContent, source: item.source || 'unknown', turnSeq: currentExchangeTurnSeq });
+        //
+        // 2026-08-08: that reasoning only holds where a token stream exists.
+        // A realtime (Gemini) session never emits llm.token — the audio and
+        // text come off the realtime API instead — so the isStart branch
+        // that advances currentExchangeTurnSeq never runs and every reply
+        // went out stamped turnSeq 0. Confirmed live: user.transcript
+        // carried 1/2/3 while all four agent.reply events carried 0, which
+        // collapses every agent bubble onto the frontend's `agent-0` lookup
+        // key and makes replies overwrite each other or duplicate. There is
+        // no in-flight stream to race here (ConversationItemAdded fires once
+        // per completed reply), so reading the counter live is both safe and
+        // correct on this path.
+        const replyTurnSeq = isGemini ? totalUserTurns : currentExchangeTurnSeq;
+        emitEvent('agent.reply', { text: item.textContent, source: item.source || 'unknown', turnSeq: replyTurnSeq });
         history.addAssistantTurn(item.textContent);
 
         // Comprehensible-input controller: measure how much of the reply
@@ -2650,23 +2711,72 @@ export default defineAgent({
     // We trigger the LLM by sending a system-style user message that
     // the LLM reads as "the user has just connected." Plain "..." was
     // too vague and the LLM defaulted to a generic "Olá, tudo bem?"
+    const openingInput = isDemoSession
+      // A demo visitor has no history to pick up from and has chosen
+      // nothing — the opening turn's whole job is to find out what
+      // they want to learn so the real conversation can start.
+      ? '[system: a brand-new visitor just connected, having chosen nothing — run your opening line now: say hello, ask what language they want to speak, and name the options. Keep it under 10 seconds, then stop and listen.]'
+      : '[system: the user has just connected — greet them and pick up where you left off]';
+
     console.log('[Tutor-ED] Sending initial greeting (LLM-generated)...');
     trace('session.generateReply.opening');
-    try {
-      await session.generateReply({
-        userInput: isDemoSession
-          // A demo visitor has no history to pick up from and has chosen
-          // nothing — the opening turn's whole job is to find out what
-          // they want to learn so the real conversation can start.
-          ? '[system: a brand-new visitor just connected, having chosen nothing — run your opening line now: say hello, ask what language they want to speak, and name the options. Keep it under 10 seconds, then stop and listen.]'
-          : '[system: the user has just connected — greet them and pick up where you left off]',
+
+    // 2026-08-08: gemini-3.1-* models refuse generateReply outright — the
+    // plugin computes `mutableSession = !model.includes('3.1')` and throws
+    // from generateReply when it's false (true in BOTH plugin 1.2.3 and
+    // 1.5.0, so this is a property of the model, not a version drift).
+    //
+    // That throw canNOT be caught here: it happens inside the SDK's
+    // `AgentActivity.realtimeReply` Task, which swallows it, so
+    // `await session.generateReply(...)` resolves normally and a try/catch
+    // around it never runs. An earlier attempt to handle this in a catch
+    // block was therefore dead code. Worse, the refused call still creates
+    // an orphan speech handle that produces no audio, which is visible
+    // downstream as a stray/duplicated transcript bubble.
+    //
+    // So branch on the capability up front instead of trying to recover
+    // after the fact. `midSessionChatCtxUpdate` is the same flag the plugin
+    // derives from the model id, and it is already surfaced on the LLM
+    // service (see the services.llm.capabilities trace above).
+    const canGenerateReply =
+      (llmService as any)?.capabilities?.midSessionChatCtxUpdate !== false;
+
+    // Only generateReply is blocked, not the Live API underneath it. Handing
+    // the model a user turn with turnComplete:true still produces a normal
+    // reply, and the plugin's isNewGeneration() treats the resulting
+    // modelTurn as a fresh generation, so the audio routes through the usual
+    // path. Verified directly against gemini-3.1-flash-live-preview: 170KB
+    // of audio plus a real greeting came back.
+    const seedOpeningTurn = (): boolean => {
+      const realtimeSession = (agent as any)._agentActivity?.realtimeSession;
+      const sendClientEvent = realtimeSession?.sendClientEvent?.bind(realtimeSession);
+      if (!sendClientEvent) {
+        trace('session.opening.failed', 'no realtimeSession available to seed the opening');
+        return false;
+      }
+      sendClientEvent({
+        type: 'content',
+        value: {
+          turns: [{ parts: [{ text: openingInput }], role: 'user' }],
+          turnComplete: true,
+        },
       });
-    } catch (err: any) {
-      console.warn('[Tutor-ED] generateReply failed:', err?.message);
-      // session.say() isn't supported on the RealtimeModel (Gemini) path —
-      // only fall back to it for the STT/TTS pipeline modes, where a silent
-      // demo session is otherwise unrecoverable.
-      if (!isGemini) session.say(langConfig.prompts.greeting);
+      trace('session.opening.seeded', 'model refuses generateReply — seeded a user turn instead');
+      return true;
+    };
+
+    if (isGemini && !canGenerateReply) {
+      seedOpeningTurn();
+    } else {
+      try {
+        await session.generateReply({ userInput: openingInput });
+      } catch (err: any) {
+        console.warn('[Tutor-ED] generateReply failed:', err?.message);
+        // STT/TTS pipeline modes can just speak the canned greeting; a
+        // realtime session falls back to seeding.
+        if (isGemini) seedOpeningTurn();
+        else session.say(langConfig.prompts.greeting);
+      }
     }
 
     // === DEMO MODE: graceful session wrap-up before the hard token expiry ===
@@ -2775,13 +2885,22 @@ export default defineAgent({
     // comment on why this is an estimate (duration * a configurable
     // per-second rate), not real billing reconciliation. Only for sessions
     // riding the shared key (billGoogleUsage); BYO-key users are unlimited.
+    // Demo sessions bill against the global demo bucket (lib/demo-budget.ts)
+    // instead of their own one-off user row — see the pre-session gate
+    // above for why a per-user budget doesn't cap anything for them.
     if (billGoogleUsage && geminiSessionStartedAt) {
       ctx.addShutdownCallback(async () => {
         try {
           const seconds = (Date.now() - geminiSessionStartedAt) / 1000;
           const ratePerSecond = parseInt(process.env.GOOGLE_REALTIME_MICROS_PER_SECOND || '350', 10);
-          const { recordGoogleUsage } = await import('./lib/google-budget.js');
-          await recordGoogleUsage(userId, Math.round(seconds * ratePerSecond));
+          const micros = Math.round(seconds * ratePerSecond);
+          if (isDemoSession) {
+            const { recordDemoUsage } = await import('./lib/demo-budget.js');
+            await recordDemoUsage(micros);
+          } else {
+            const { recordGoogleUsage } = await import('./lib/google-budget.js');
+            await recordGoogleUsage(userId, micros);
+          }
         } catch (err) {
           console.warn('[Tutor-ED] Google usage accrual failed in shutdown:', String(err).slice(0, 120));
         }

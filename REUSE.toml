@@ -42,3 +42,11 @@ SPDX-License-Identifier = "Apache-2.0"
 path = ["agents/resources/*.ogg", "agents/resources/NOTICE"]
 SPDX-FileCopyrightText = "2024 LiveKit, Inc."
 SPDX-License-Identifier = "Apache-2.0"
+
+# LingLang tutor application: original work built on top of the LiveKit SDK
+# above, not part of the upstream agents-js package. Dual-licensed under
+# AGPL-3.0-or-later — see agents/LICENSE and NOTICE for details.
+[[annotations]]
+path = ["agents/src/**", "agents/scripts/**", "agents/drizzle/**", "agents/*.ts", "agents/LICENSE"]
+SPDX-FileCopyrightText = "2026 the LingLang contributors"
+SPDX-License-Identifier = "AGPL-3.0-or-later"

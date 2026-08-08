@@ -1,0 +1,18 @@
+# LingLang agent + dashboard — cloud mode only (no GPU, no local speech stack).
+# Builds the whole pnpm workspace since the agent app depends on sibling
+# packages in this monorepo (plugins/*), then runs from agents/ via the same
+# pnpm scripts documented in the README quickstart.
+
+FROM node:22-slim
+
+RUN corepack enable
+
+WORKDIR /app
+COPY . .
+
+RUN pnpm install --frozen-lockfile
+RUN pnpm --filter agents dashboard:build
+
+WORKDIR /app/agents
+
+CMD ["pnpm", "dashboard"]

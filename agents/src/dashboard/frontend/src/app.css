@@ -907,3 +907,153 @@ pre,
   font-size: 0.85rem;
   margin-top: 0.75rem;
 }
+
+/* ── Debug tab (admin-only trace view) ─────────────────────────────────
+   2026-08-04: AgentFlow was written against a stylesheet that no longer
+   exists (it lived in the pre-tab VoiceRoom UI). These rules cover both
+   the new DebugTab chrome (.dbg-*) and the AgentFlow classes that lost
+   their definitions (.panel, .flow-scroll, .log-count, .empty-state),
+   scoped under .debug-tab so nothing else in the app is affected. */
+
+.debug-tab {
+  overflow-y: auto;
+  padding-bottom: 5rem;
+  font-size: 0.82rem;
+}
+
+.debug-tab .dbg-sub-note {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  margin: -0.5rem 0 0;
+}
+
+.debug-tab .dbg-panel,
+.debug-tab .panel {
+  border: 1px solid var(--ll-border);
+  border-radius: 12px;
+  background: var(--ll-surface);
+  overflow: hidden;
+}
+
+.debug-tab .dbg-panel-header,
+.debug-tab .panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid var(--ll-border);
+}
+
+.debug-tab .dbg-panel-header h2,
+.debug-tab .panel-header h2 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.debug-tab .dbg-btn,
+.debug-tab .btn-text {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.78rem;
+  padding: 0.15rem 0.4rem;
+}
+
+.debug-tab .dbg-btn:hover,
+.debug-tab .btn-text:hover { color: var(--text); }
+
+.debug-tab .dbg-body { padding: 0.75rem; display: flex; flex-direction: column; gap: 0.9rem; }
+
+.debug-tab .dbg-kv {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.35rem 0.75rem;
+}
+
+.debug-tab .dbg-kv > div { display: flex; gap: 0.4rem; align-items: baseline; }
+.debug-tab .dbg-k { color: var(--text-faint); min-width: 4.5rem; }
+
+.debug-tab .dbg-section { display: flex; flex-direction: column; gap: 0.4rem; }
+
+.debug-tab .dbg-section-title {
+  font-weight: 600;
+  color: var(--text-dim);
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.debug-tab .dbg-meta { color: var(--text-faint); font-weight: 400; text-transform: none; letter-spacing: 0; }
+
+.debug-tab .dbg-quote {
+  border-left: 2px solid var(--ll-accent);
+  padding: 0.3rem 0 0.3rem 0.6rem;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.debug-tab .dbg-raw { border: 1px solid var(--border-soft); border-radius: 8px; overflow: hidden; }
+
+.debug-tab .dbg-raw-toggle {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: center;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0.4rem 0.55rem;
+  font-size: 0.76rem;
+  text-align: left;
+}
+
+.debug-tab .dbg-raw-toggle:hover { color: var(--text); }
+
+.debug-tab .dbg-pre,
+.debug-tab pre {
+  margin: 0;
+  padding: 0.6rem;
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 22rem;
+  overflow: auto;
+}
+
+.debug-tab .dbg-sub { border-top: 1px solid var(--border-soft); padding-top: 0.5rem; display: flex; flex-direction: column; gap: 0.35rem; }
+.debug-tab .dbg-sub-role { font-weight: 600; font-size: 0.76rem; }
+
+.debug-tab .dbg-trace { max-height: 18rem; overflow: auto; display: flex; flex-direction: column; gap: 0.15rem; }
+
+.debug-tab .dbg-trace-row {
+  display: flex;
+  gap: 0.5rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.7rem;
+  line-height: 1.5;
+}
+
+.debug-tab .dbg-trace-ev { color: var(--teal); flex-shrink: 0; }
+.debug-tab .dbg-trace-detail { color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.debug-tab .dbg-empty,
+.debug-tab .empty-state { color: var(--text-faint); font-size: 0.78rem; padding: 0.4rem 0; }
+
+.debug-tab .log-count {
+  color: var(--text-faint);
+  font-weight: 400;
+  font-size: 0.72rem;
+  margin-left: 0.35rem;
+}
+
+.debug-tab .flow-scroll { max-height: 32rem; overflow: auto; padding: 0.6rem; display: flex; flex-direction: column; gap: 0.6rem; }

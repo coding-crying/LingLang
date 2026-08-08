@@ -636,9 +636,14 @@ export async function analyzeUtteranceWithGemini(
   targetIso: string = 'ru',
   nativeIso: string = 'en',
 ): Promise<UtteranceAnalysisResult> {
-  const apiKey = process.env.GOOGLE_API_KEY;
+  // Matches services/factory.ts's gemini-mode key resolution — a cloud-mode
+  // install only sets GEMINI_API_KEY (the documented REQUIRED var), and
+  // this used to check GOOGLE_API_KEY alone, so the Processor silently fell
+  // back to a local LLM that doesn't exist in cloud mode while the
+  // Conversation leg kept working fine.
+  const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    console.warn('[Supervisor] No GOOGLE_API_KEY, skipping Gemini analysis');
+    console.warn('[Supervisor] No GOOGLE_API_KEY/GEMINI_API_KEY, skipping Gemini analysis');
     return { analysis: null };
   }
 
@@ -1557,7 +1562,7 @@ export async function runProcessor(
 
   // 1) Analyze utterance
   let analysisResult: UtteranceAnalysisResult | null = null;
-  if (options.useGemini !== false && process.env.GOOGLE_API_KEY) {
+  if (options.useGemini !== false && (process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY)) {
     analysisResult = await analyzeUtteranceWithGemini(utterance, context, targetLanguage, options.recentHistory, nativeLanguage, targetIso, nativeIso);
   }
 

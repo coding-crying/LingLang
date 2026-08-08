@@ -16,7 +16,17 @@
 
 const DICTIONARY_LOADERS: Record<string, () => Promise<{ aff: unknown; dic: unknown }>> = {
   ru: () => import('dictionary-ru' as string) as any,
-  pt: () => import('dictionary-pt' as string) as any,
+  // 2026-08-04: NOT pt. dictionary-pt's affix file is ~6x larger/more
+  // complex than any other installed dictionary (979KB vs 3-167KB), and
+  // nspell's add() has some algorithmic blowup on it specifically —
+  // confirmed in isolation: ru/es/en build their spellers in 0.1-2.3s,
+  // pt didn't finish even after 20s of pegging a full core. Since this
+  // build is synchronous and blocks the whole event loop, every Portuguese
+  // session hit this on its first gate check and wedged until the job
+  // watchdog SIGKILLed it. Fail-open (same as the other ungated languages
+  // below) until nspell/dictionary-pt's perf is actually fixed — see this
+  // file's own doc comment on what fail-open costs (loses the
+  // hallucinated-word protection this gate exists for).
   es: () => import('dictionary-es' as string) as any,
   en: () => import('dictionary-en' as string) as any,
 };
