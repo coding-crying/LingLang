@@ -17,6 +17,7 @@ import { Button, Card, Chip, Description, FieldError, Input, Label, ListBox, Mod
 import { LANGUAGE_NAMES } from '../hooks/useOnboarding';
 import { apiFetch } from '../lib/api';
 import { useAppState } from '../state/AppState';
+import ContentProfileSheet from '../components/ContentProfileSheet';
 
 interface ContentSource {
   id: string;
@@ -29,6 +30,13 @@ interface ContentSource {
   progress: number;
   isActive: boolean;
   started: boolean;
+  // Provenance (see lib/content-profile.ts). A source nobody has described
+  // yet can be ingested but not placed -- we don't know whether the learner
+  // has already worked through it, so we can't say where to start them.
+  intent: 'study' | 'known' | 'aspire' | null;
+  profileStatus: 'needed' | 'complete' | 'skipped';
+  needsProfile: boolean;
+  pendingQuestionCount: number;
 }
 
 const KIND_GLYPH: Record<string, string> = {
@@ -79,6 +87,7 @@ export default function LibraryTab() {
   const [ref, setRef] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [profileSourceId, setProfileSourceId] = useState<string | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -129,6 +138,15 @@ export default function LibraryTab() {
     }
   }, [load, bumpContentVersion]);
 
+  // A tile that hasn't been described yet opens the questions instead of
+  // selecting. Selecting it would run placeUserInSource against an empty
+  // vocabulary and drop the learner at part 1 of a book they may have half
+  // finished -- the exact wrong answer this feature exists to prevent.
+  const openTile = useCallback((s: ContentSource) => {
+    if (s.needsProfile) setProfileSourceId(s.id);
+    else selectSource(s.id);
+  }, [selectSource]);
+
   const resetForm = useCallback(() => {
     setTitle('');
     setRef('');
@@ -136,17 +154,19 @@ export default function LibraryTab() {
   }, []);
 
   const submitAdd = useCallback(async () => {
-    if (!title.trim() || !ref.trim()) {
-      setFormError('Title and content are both required.');
+    if (!ref.trim()) {
+      setFormError('Paste a link or some text first.');
       return;
     }
     setSubmitting(true);
     setFormError(null);
     try {
+      // Title is optional now -- the server derives one from the reference
+      // when it's blank, so adding a video is a paste and a tap.
       const res = await apiFetch('/api/content-sources', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind, language, title: title.trim(), ref: ref.trim() }),
+        body: JSON.stringify({ kind, language, title: title.trim() || undefined, ref: ref.trim() }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -195,6 +215,7 @@ export default function LibraryTab() {
             const isPending = PENDING_STATUSES.has(s.status);
             const isFailed = s.status === 'failed';
             const isClickable = s.status === 'ready' && !isSelecting;
+            const needsInfo = isClickable && s.needsProfile;
             return (
               <Card
                 key={s.id}
@@ -204,19 +225,31 @@ export default function LibraryTab() {
                 role="button"
                 tabIndex={isClickable ? 0 : -1}
                 aria-pressed={s.isActive}
-                aria-label={isPending ? `${s.title} (processing)` : isFailed ? `${s.title} (failed)` : `Select ${s.title}`}
+                aria-label={
+                  isPending ? `${s.title} (processing)`
+                    : isFailed ? `${s.title} (failed)`
+                      : needsInfo ? `${s.title} — needs a few details before it can be used`
+                        : `Select ${s.title}`
+                }
                 aria-disabled={!isClickable}
-                onClick={() => isClickable && selectSource(s.id)}
+                onClick={() => isClickable && openTile(s)}
                 onKeyDown={(e) => {
                   if (isClickable && (e.key === 'Enter' || e.key === ' ')) {
                     e.preventDefault();
-                    selectSource(s.id);
+                    openTile(s);
                   }
                 }}
               >
                 <div
                   className="flex items-center justify-center rounded-md text-3xl"
-                  style={{ aspectRatio: '1 / 1', background: coverFor(s.id), opacity: isSelecting || isPending ? 0.6 : 1 }}
+                  style={{
+                    aspectRatio: '1 / 1',
+                    background: coverFor(s.id),
+                    opacity: isSelecting || isPending ? 0.6 : needsInfo ? 0.45 : 1,
+                    // Desaturated rather than merely dimmed: "unfinished
+                    // setup" should read differently from "still processing".
+                    filter: needsInfo ? 'grayscale(0.85)' : undefined,
+                  }}
                 >
                   {KIND_GLYPH[s.kind] ?? '📄'}
                 </div>
@@ -235,6 +268,15 @@ export default function LibraryTab() {
                 {isFailed && (
                   <Chip color="danger" size="sm">
                     <Chip.Label>Failed</Chip.Label>
+                  </Chip>
+                )}
+                {needsInfo && (
+                  <Chip size="sm" color="warning">
+                    <Chip.Label>
+                      {s.pendingQuestionCount > 0
+                        ? `${s.pendingQuestionCount} quick question${s.pendingQuestionCount === 1 ? '' : 's'}`
+                        : 'Needs details'}
+                    </Chip.Label>
                   </Chip>
                 )}
                 {s.isActive && (
@@ -317,9 +359,9 @@ export default function LibraryTab() {
                 </Select.Popover>
               </Select>
 
-              <TextField className="w-full" value={title} onChange={setTitle} isRequired>
-                <Label>Title</Label>
-                <Input placeholder="What should this be called in your library?" />
+              <TextField className="w-full" value={title} onChange={setTitle}>
+                <Label>Title (optional)</Label>
+                <Input placeholder="Leave blank and we'll work one out" />
               </TextField>
 
               {kind === 'text' ? (
@@ -349,6 +391,19 @@ export default function LibraryTab() {
           </Modal.Dialog>
         </Modal.Container>
       </Modal.Backdrop>
+
+      <ContentProfileSheet
+        sourceId={profileSourceId}
+        isOpen={profileSourceId !== null}
+        onClose={() => setProfileSourceId(null)}
+        onCompleted={() => {
+          // Reconciliation may have seeded vocabulary and moved the
+          // learner's active chunk, so refresh both the grid and anything
+          // else reading content state.
+          load();
+          bumpContentVersion();
+        }}
+      />
     </div>
   );
 }

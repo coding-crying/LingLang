@@ -59,6 +59,7 @@ import { resolveAnalysisEndpoint } from './llm/analysis-endpoint.js';
 import { resolveVoice } from './config/voices.js';
 import { readPersona } from './lib/persona.js';
 import { dbTools } from './tools/db-tools.js';
+import { contentTools } from './tools/content-tools.js';
 import { ContextManager } from './lib/context.js';
 import { audioPayloadRegistry, setAudioTranscript, GemmaAudioSTT } from './stt/gemma-audio-stt.js';
 import { getLanguageConfig, nativeLanguageName, LANGUAGES, resolveLanguageConfig, resolveSessionLanguage, isRealtimeOnlyLanguage, REALTIME_MODE_NAMES } from './config/languages.js';
@@ -1074,7 +1075,12 @@ export default defineAgent({
     // media_chunks deprecation fixed by the upgrade itself.
     const agent = new voice.Agent({
       instructions: await buildDynamicInstructions(),
-      tools: [...dbTools, ...onboardingTools, ...demoTools],
+      // contentTools let the tutor collect a source's provenance in
+      // conversation ('how far did you get with it?') instead of the
+      // learner filling a form -- see tools/content-tools.ts. Excluded
+      // from demo sessions: an anonymous visitor has no library, so the
+      // tools would only ever return empty.
+      tools: [...dbTools, ...onboardingTools, ...demoTools, ...(isDemoSession ? [] : contentTools)],
     });
 
     // === CREATE SERVICES (LOCAL, CLOUD, OR GEMINI) ===
