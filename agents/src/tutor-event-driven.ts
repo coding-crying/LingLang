@@ -2692,23 +2692,51 @@ export default defineAgent({
     // We trigger the LLM by sending a system-style user message that
     // the LLM reads as "the user has just connected." Plain "..." was
     // too vague and the LLM defaulted to a generic "Olá, tudo bem?"
+    const openingInput = isDemoSession
+      // A demo visitor has no history to pick up from and has chosen
+      // nothing — the opening turn's whole job is to find out what
+      // they want to learn so the real conversation can start.
+      ? '[system: a brand-new visitor just connected, having chosen nothing — run your opening line now: say hello, ask what language they want to speak, and name the options. Keep it under 10 seconds, then stop and listen.]'
+      : '[system: the user has just connected — greet them and pick up where you left off]';
+
     console.log('[Tutor-ED] Sending initial greeting (LLM-generated)...');
     trace('session.generateReply.opening');
     try {
-      await session.generateReply({
-        userInput: isDemoSession
-          // A demo visitor has no history to pick up from and has chosen
-          // nothing — the opening turn's whole job is to find out what
-          // they want to learn so the real conversation can start.
-          ? '[system: a brand-new visitor just connected, having chosen nothing — run your opening line now: say hello, ask what language they want to speak, and name the options. Keep it under 10 seconds, then stop and listen.]'
-          : '[system: the user has just connected — greet them and pick up where you left off]',
-      });
+      await session.generateReply({ userInput: openingInput });
     } catch (err: any) {
       console.warn('[Tutor-ED] generateReply failed:', err?.message);
-      // session.say() isn't supported on the RealtimeModel (Gemini) path —
-      // only fall back to it for the STT/TTS pipeline modes, where a silent
-      // demo session is otherwise unrecoverable.
-      if (!isGemini) session.say(langConfig.prompts.greeting);
+      // 2026-08-08: gemini-3.1-* models refuse generateReply outright — the
+      // plugin computes `mutableSession = !model.includes('3.1')` and throws
+      // from generateReply when it's false (true in BOTH plugin 1.2.3 and
+      // 1.5.0, so this is a property of the model, not a version drift).
+      // Since session.say() is also unavailable on the RealtimeModel path,
+      // the agent simply never spoke: the room connected, the visitor heard
+      // silence, and the homepage "Start talking" button looked like it hung
+      // forever.
+      //
+      // Only generateReply is blocked, not the underlying Live API — handing
+      // the model a user turn with turnComplete:true still produces a normal
+      // reply, which then flows through the usual audio path. Verified
+      // directly against gemini-3.1-flash-live-preview before shipping:
+      // 170KB of audio plus a real greeting came back. Keeping the model was
+      // a deliberate call, so this seeds the turn instead of downgrading it.
+      const realtimeSession = (agent as any)._agentActivity?.realtimeSession;
+      const sendClientEvent = realtimeSession?.sendClientEvent?.bind(realtimeSession);
+      if (isGemini && sendClientEvent) {
+        sendClientEvent({
+          type: 'content',
+          value: {
+            turns: [{ parts: [{ text: openingInput }], role: 'user' }],
+            turnComplete: true,
+          },
+        });
+        trace('session.opening.seeded', 'generateReply refused — seeded a user turn instead');
+      } else if (!isGemini) {
+        // STT/TTS pipeline modes can just speak the canned greeting.
+        session.say(langConfig.prompts.greeting);
+      } else {
+        trace('session.opening.failed', 'no realtimeSession available to seed the opening');
+      }
     }
 
     // === DEMO MODE: graceful session wrap-up before the hard token expiry ===
