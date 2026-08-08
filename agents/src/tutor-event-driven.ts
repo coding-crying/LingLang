@@ -2506,7 +2506,20 @@ export default defineAgent({
         // for why a live read is unsafe across an in-flight interruption.
         // Lets the frontend replace/finalize the matching streamed bubble
         // instead of appending a duplicate (see Task 4a).
-        emitEvent('agent.reply', { text: item.textContent, source: item.source || 'unknown', turnSeq: currentExchangeTurnSeq });
+        //
+        // 2026-08-08: that reasoning only holds where a token stream exists.
+        // A realtime (Gemini) session never emits llm.token — the audio and
+        // text come off the realtime API instead — so the isStart branch
+        // that advances currentExchangeTurnSeq never runs and every reply
+        // went out stamped turnSeq 0. Confirmed live: user.transcript
+        // carried 1/2/3 while all four agent.reply events carried 0, which
+        // collapses every agent bubble onto the frontend's `agent-0` lookup
+        // key and makes replies overwrite each other or duplicate. There is
+        // no in-flight stream to race here (ConversationItemAdded fires once
+        // per completed reply), so reading the counter live is both safe and
+        // correct on this path.
+        const replyTurnSeq = isGemini ? totalUserTurns : currentExchangeTurnSeq;
+        emitEvent('agent.reply', { text: item.textContent, source: item.source || 'unknown', turnSeq: replyTurnSeq });
         history.addAssistantTurn(item.textContent);
 
         // Comprehensible-input controller: measure how much of the reply
