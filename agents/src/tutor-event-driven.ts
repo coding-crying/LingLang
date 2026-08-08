@@ -2701,41 +2701,62 @@ export default defineAgent({
 
     console.log('[Tutor-ED] Sending initial greeting (LLM-generated)...');
     trace('session.generateReply.opening');
-    try {
-      await session.generateReply({ userInput: openingInput });
-    } catch (err: any) {
-      console.warn('[Tutor-ED] generateReply failed:', err?.message);
-      // 2026-08-08: gemini-3.1-* models refuse generateReply outright — the
-      // plugin computes `mutableSession = !model.includes('3.1')` and throws
-      // from generateReply when it's false (true in BOTH plugin 1.2.3 and
-      // 1.5.0, so this is a property of the model, not a version drift).
-      // Since session.say() is also unavailable on the RealtimeModel path,
-      // the agent simply never spoke: the room connected, the visitor heard
-      // silence, and the homepage "Start talking" button looked like it hung
-      // forever.
-      //
-      // Only generateReply is blocked, not the underlying Live API — handing
-      // the model a user turn with turnComplete:true still produces a normal
-      // reply, which then flows through the usual audio path. Verified
-      // directly against gemini-3.1-flash-live-preview before shipping:
-      // 170KB of audio plus a real greeting came back. Keeping the model was
-      // a deliberate call, so this seeds the turn instead of downgrading it.
+
+    // 2026-08-08: gemini-3.1-* models refuse generateReply outright — the
+    // plugin computes `mutableSession = !model.includes('3.1')` and throws
+    // from generateReply when it's false (true in BOTH plugin 1.2.3 and
+    // 1.5.0, so this is a property of the model, not a version drift).
+    //
+    // That throw canNOT be caught here: it happens inside the SDK's
+    // `AgentActivity.realtimeReply` Task, which swallows it, so
+    // `await session.generateReply(...)` resolves normally and a try/catch
+    // around it never runs. An earlier attempt to handle this in a catch
+    // block was therefore dead code. Worse, the refused call still creates
+    // an orphan speech handle that produces no audio, which is visible
+    // downstream as a stray/duplicated transcript bubble.
+    //
+    // So branch on the capability up front instead of trying to recover
+    // after the fact. `midSessionChatCtxUpdate` is the same flag the plugin
+    // derives from the model id, and it is already surfaced on the LLM
+    // service (see the services.llm.capabilities trace above).
+    const canGenerateReply =
+      (llmService as any)?.capabilities?.midSessionChatCtxUpdate !== false;
+
+    // Only generateReply is blocked, not the Live API underneath it. Handing
+    // the model a user turn with turnComplete:true still produces a normal
+    // reply, and the plugin's isNewGeneration() treats the resulting
+    // modelTurn as a fresh generation, so the audio routes through the usual
+    // path. Verified directly against gemini-3.1-flash-live-preview: 170KB
+    // of audio plus a real greeting came back.
+    const seedOpeningTurn = (): boolean => {
       const realtimeSession = (agent as any)._agentActivity?.realtimeSession;
       const sendClientEvent = realtimeSession?.sendClientEvent?.bind(realtimeSession);
-      if (isGemini && sendClientEvent) {
-        sendClientEvent({
-          type: 'content',
-          value: {
-            turns: [{ parts: [{ text: openingInput }], role: 'user' }],
-            turnComplete: true,
-          },
-        });
-        trace('session.opening.seeded', 'generateReply refused — seeded a user turn instead');
-      } else if (!isGemini) {
-        // STT/TTS pipeline modes can just speak the canned greeting.
-        session.say(langConfig.prompts.greeting);
-      } else {
+      if (!sendClientEvent) {
         trace('session.opening.failed', 'no realtimeSession available to seed the opening');
+        return false;
+      }
+      sendClientEvent({
+        type: 'content',
+        value: {
+          turns: [{ parts: [{ text: openingInput }], role: 'user' }],
+          turnComplete: true,
+        },
+      });
+      trace('session.opening.seeded', 'model refuses generateReply — seeded a user turn instead');
+      return true;
+    };
+
+    if (isGemini && !canGenerateReply) {
+      seedOpeningTurn();
+    } else {
+      try {
+        await session.generateReply({ userInput: openingInput });
+      } catch (err: any) {
+        console.warn('[Tutor-ED] generateReply failed:', err?.message);
+        // STT/TTS pipeline modes can just speak the canned greeting; a
+        // realtime session falls back to seeding.
+        if (isGemini) seedOpeningTurn();
+        else session.say(langConfig.prompts.greeting);
       }
     }
 
