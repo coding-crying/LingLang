@@ -36,7 +36,7 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { userVocabulary } from '../db/schema.js';
-import { DEFAULT_FSRS_PARAMS, type FSRSState } from './fsrs.js';
+import { DEFAULT_FSRS_PARAMS, nextInterval, retrievability, type FSRSState } from './fsrs.js';
 
 /** How hard the learner actually worked the material. */
 export type StudyIntensity = 'drilled' | 'studied' | 'skimmed';
@@ -100,7 +100,7 @@ const RETENTION_FLOOR = 0.35;
  */
 export function predictedRetention(elapsedDays: number, stability: number): number {
   if (stability <= 0) return 0;
-  return 1 / (1 + DEFAULT_FSRS_PARAMS.w13 * (elapsedDays / stability));
+  return retrievability(elapsedDays, stability);
 }
 
 export interface SeededCard {
@@ -135,12 +135,9 @@ export function seedCardFromPriorStudy(
   const elapsedDays = elapsedMs / 86_400_000;
   const retention = predictedRetention(elapsedDays, stability);
 
-  // The interval that pass would have earned, from the same formula
-  // nextInterval() uses: S * (1/requestRetention - 1) / w13.
-  const scheduledDays = Math.max(
-    1,
-    Math.round((stability * (1 / DEFAULT_FSRS_PARAMS.requestRetention - 1)) / DEFAULT_FSRS_PARAMS.w13),
-  );
+  // The interval that pass would have earned — delegated to the scheduler
+  // rather than reproduced here, so the two can never drift apart again.
+  const scheduledDays = Math.max(1, Math.round(nextInterval(stability, DEFAULT_FSRS_PARAMS)));
 
   if (retention >= RETENTION_FLOOR) {
     // Still plausibly known. Due date is measured from when they actually

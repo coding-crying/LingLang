@@ -113,7 +113,7 @@ export function fsrsReview(card: FSRSCard, grade: FSRSGrade, params: FSRSParams 
   }
 
   const elapsedDays = card.elapsedDays || 0;
-  const retrievability = Math.pow(1 + (elapsedDays / (card.stability || 0.01)) * params.w13, -1);
+  const r = retrievability(elapsedDays, card.stability || 0.01, params);
 
   let newDifficulty = constrainDifficulty(
     card.difficulty - params.w5 * (grade - 3)
@@ -158,7 +158,7 @@ export function fsrsReview(card: FSRSCard, grade: FSRSGrade, params: FSRSParams 
       1 + Math.exp(params.w11) *
       (11 - newDifficulty) *
       Math.pow(card.stability, -params.w12) *
-      (Math.exp((1 - retrievability) * params.w13) - 1) *
+      (Math.exp((1 - r) * params.w13) - 1) *
       hardPenalty * easyBonus
     );
   }
@@ -209,8 +209,41 @@ function initNewCard(grade: FSRSGrade, now: Date, params: FSRSParams): FSRSResul
   };
 }
 
-function nextInterval(stability: number, params: FSRSParams): number {
-  const interval = stability * (1 / params.requestRetention - 1) / params.w13;
+// ── Forgetting curve ─────────────────────────────────────────────────────
+//
+// R(t) = (1 + FACTOR * t/S) ^ DECAY, the FSRS-4.5/5 power law.
+//
+// These two constants are not tunable weights — they are chosen together so
+// that R(S) = 0.9 exactly, which is what makes stability *mean* "the interval
+// at which retention has fallen to 90%". Changing one without the other
+// silently redefines what every stability value in the database represents.
+//
+// This replaced an earlier curve, R(t) = (1 + w13*t/S)^-1, which was
+// self-consistent with its own inverse but put R(S) at 0.499 — treating S as
+// the 50%-retention horizon. That made every scheduled interval ~9x shorter
+// than the stability it was derived from (2.3 days for a 21-day card), so due
+// backlogs refilled faster than conversation could drain them and the
+// frontier latched into 'consolidate'. See fsrs.test.ts for the property
+// that pins this down.
+const FSRS_DECAY = -0.5;
+const FSRS_FACTOR = 19 / 81;
+
+/** Predicted recall probability `elapsedDays` after the last review. */
+export function retrievability(
+  elapsedDays: number,
+  stability: number,
+  _params: FSRSParams = DEFAULT_FSRS_PARAMS,
+): number {
+  return Math.pow(1 + FSRS_FACTOR * (elapsedDays / (stability || 0.01)), FSRS_DECAY);
+}
+
+/**
+ * The interval that lands a card exactly on `requestRetention` — the exact
+ * inverse of `retrievability` above. The two must always be changed together.
+ */
+export function nextInterval(stability: number, params: FSRSParams = DEFAULT_FSRS_PARAMS): number {
+  const interval =
+    (stability * (Math.pow(params.requestRetention, 1 / FSRS_DECAY) - 1)) / FSRS_FACTOR;
   return Math.min(Math.max(1, interval), params.maximumInterval);
 }
 

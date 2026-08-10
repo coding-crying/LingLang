@@ -9,6 +9,32 @@
 
 import { describe, expect, it } from 'vitest';
 import { SEED_STABILITY, predictedRetention, seedCardFromPriorStudy } from './prior-knowledge.js';
+import { DEFAULT_FSRS_PARAMS, nextInterval, retrievability } from './fsrs.js';
+
+describe('agreement with the live scheduler', () => {
+  // Seeded cards and reviewed cards get compared against each other
+  // constantly, so these two modules must use one curve, not two copies of
+  // one. They drifted silently once because nothing asserted this.
+  it('predicts retention with the scheduler’s own forgetting curve', () => {
+    for (const [elapsed, stability] of [[0, 21], [1, 21], [24, 21], [200, 8], [5, 2.5]]) {
+      expect(predictedRetention(elapsed!, stability!)).toBeCloseTo(
+        retrievability(elapsed!, stability!),
+        10,
+      );
+    }
+  });
+
+  it('schedules seeded cards with the scheduler’s own interval formula', () => {
+    for (const intensity of ['drilled', 'studied', 'skimmed'] as const) {
+      const stability = SEED_STABILITY[intensity];
+      const studiedAt = new Date('2026-08-01T00:00:00Z');
+      const card = seedCardFromPriorStudy(studiedAt, intensity, new Date('2026-08-02T00:00:00Z'));
+      expect(card.scheduledDays).toBe(
+        Math.max(1, Math.round(nextInterval(stability, DEFAULT_FSRS_PARAMS))),
+      );
+    }
+  });
+});
 
 const DAY = 86_400_000;
 const NOW = new Date('2026-08-08T12:00:00Z');
@@ -82,8 +108,14 @@ describe('seedCardFromPriorStudy', () => {
   });
 
   it('drops a skimmed pass below the floor far sooner than a drilled one', () => {
-    const skimmed = seedCardFromPriorStudy(daysAgo(30), 'skimmed', NOW);
-    const drilled = seedCardFromPriorStudy(daysAgo(30), 'drilled', NOW);
+    // Horizon is 90 days, not 30. Under the corrected forgetting curve a
+    // 30-day-old skimmed pass still predicts R=0.51, comfortably above
+    // RETENTION_FLOOR — the old curve put it at 0.077 only because it
+    // decayed ~9x too fast. The property under test (skimmed falls below
+    // the floor while drilled survives) is unchanged; only the horizon at
+    // which it holds moved, because the model moved.
+    const skimmed = seedCardFromPriorStudy(daysAgo(90), 'skimmed', NOW);
+    const drilled = seedCardFromPriorStudy(daysAgo(90), 'drilled', NOW);
     expect(skimmed.claimsKnown).toBe(false);
     expect(drilled.claimsKnown).toBe(true);
   });
