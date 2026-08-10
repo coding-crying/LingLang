@@ -13,7 +13,7 @@
  * See docs/superpowers/specs/2026-07-02-adaptive-loop-redesign-design.md §1.
  */
 
-import { eq, and, asc, desc, lte, lt, gt, sql, inArray } from 'drizzle-orm';
+import { eq, ne, or, and, asc, desc, lte, lt, gt, sql, inArray } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { userVocabulary, lexemes, reviewLogs, userContentProgress, chunkLexemes, contentChunks, contentSources } from '../db/schema.js';
 import { readPersona, type PersonaRow } from './persona.js';
@@ -24,6 +24,38 @@ const MIN_LOGS_FOR_SUCCESS_RATE = 5;
 export interface WordRef {
   lemma: string;
   translation: string;
+}
+
+/** How many due words the prompt's scaffolding line carries. */
+export const DUE_WORD_SLOTS = 5;
+
+/**
+ * Slots held for earned reviews before unverified claims may take any.
+ *
+ * Seeded claims are backdated and therefore overdue by construction, so a
+ * single due-date ordering puts hundreds of them ahead of every genuinely
+ * earned review. Reserving a floor keeps real reviews from being starved,
+ * while leaving room for claims to keep surfacing and getting verified.
+ */
+export const EARNED_SLOT_FLOOR = 3;
+
+/**
+ * Fill the due-word window from two pools, each already in due order.
+ *
+ * Three passes: earned up to the floor, then claims, then top up with any
+ * remaining earned. The final pass matters — with no claims available the
+ * window must still fill completely from earned reviews.
+ */
+export function selectDueWords(
+  earned: WordRef[],
+  claims: WordRef[],
+  slots: number = DUE_WORD_SLOTS,
+): WordRef[] {
+  const earnedTaken = Math.min(EARNED_SLOT_FLOOR, slots, earned.length);
+  const picked = earned.slice(0, earnedTaken);
+  picked.push(...claims.slice(0, slots - picked.length));
+  picked.push(...earned.slice(earnedTaken, earnedTaken + (slots - picked.length)));
+  return picked;
 }
 
 export interface LearnerView {
@@ -94,16 +126,60 @@ export async function readLearnerView(userId: string, lang: string): Promise<Lea
 async function buildLearnerView(userId: string, lang: string): Promise<LearnerView> {
   const now = new Date();
 
-  const [dueRows, dueBacklogRow, startedVocab, recentLogs, persona, demandRows] = await Promise.all([
+  // Scope every due-word fetch to the session language IN SQL. Filtering
+  // after `limit: 20` silently returns nothing for a multi-language learner
+  // whose other language happens to have the 20 soonest-due words — which is
+  // how a learner with 137 due Russian words was being shown none of them.
+  const inSessionLanguage = inArray(
+    userVocabulary.lexemeId,
+    db.select({ id: lexemes.id }).from(lexemes).where(eq(lexemes.language, lang)),
+  );
+
+  const [dueRows, dueBacklogRow, claimRows, startedVocab, recentLogs, persona, demandRows] = await Promise.all([
+    // Earned reviews: anything the learner has actually been graded on.
+    // Fetched separately from claims because a learner with hundreds of
+    // overdue seeded rows would otherwise have every one of these 20 slots
+    // taken by claims, leaving nothing to reserve earned slots from.
     db.query.userVocabulary.findMany({
-      where: and(eq(userVocabulary.userId, userId), lte(userVocabulary.due, now)),
+      where: and(
+        eq(userVocabulary.userId, userId),
+        lte(userVocabulary.due, now),
+        inSessionLanguage,
+        or(ne(userVocabulary.origin, 'seeded'), gt(userVocabulary.reps, 0)),
+      ),
       with: { lexeme: true },
       orderBy: [asc(userVocabulary.due)],
       limit: 20,
     }),
+    // The backlog is REVIEW PRESSURE, and only earned cards create it. An
+    // unreviewed seeded row is a claim about prior knowledge, not a debt the
+    // learner owes — counting claims here drove the frontier straight into
+    // 'consolidate' and stopped the curriculum dead. Language-scoped, so a
+    // Russian session isn't throttled by a Portuguese queue.
     db.select({ c: sql<number>`count(*)::int` })
       .from(userVocabulary)
-      .where(and(eq(userVocabulary.userId, userId), lte(userVocabulary.due, now))),
+      .innerJoin(lexemes, eq(lexemes.id, userVocabulary.lexemeId))
+      .where(and(
+        eq(userVocabulary.userId, userId),
+        lte(userVocabulary.due, now),
+        eq(lexemes.language, lang),
+        or(ne(userVocabulary.origin, 'seeded'), gt(userVocabulary.reps, 0)),
+      )),
+    // Unverified claims: seeded, never graded. Excluded from the backlog
+    // above but still surfaced as scaffolding, because being USED in
+    // conversation is how a claim gets confirmed or falsified.
+    db.query.userVocabulary.findMany({
+      where: and(
+        eq(userVocabulary.userId, userId),
+        lte(userVocabulary.due, now),
+        inSessionLanguage,
+        eq(userVocabulary.origin, 'seeded'),
+        eq(userVocabulary.reps, 0),
+      ),
+      with: { lexeme: true },
+      orderBy: [asc(userVocabulary.due)],
+      limit: 20,
+    }),
     db.query.userVocabulary.findMany({
       where: eq(userVocabulary.userId, userId),
       columns: { lexemeId: true },
@@ -129,10 +205,12 @@ async function buildLearnerView(userId: string, lang: string): Promise<LearnerVi
     }),
   ]);
 
-  const dueWords: WordRef[] = dueRows
-    .filter((v) => v.lexeme?.language === lang && !isPlaceholderLexeme(v.lexeme))
-    .slice(0, 5)
-    .map((v) => ({ lemma: v.lexeme!.lemma, translation: v.lexeme!.translation }));
+  const toWordRefs = (rows: typeof dueRows): WordRef[] =>
+    rows
+      .filter((v) => v.lexeme?.language === lang && !isPlaceholderLexeme(v.lexeme))
+      .map((v) => ({ lemma: v.lexeme!.lemma, translation: v.lexeme!.translation }));
+
+  const dueWords: WordRef[] = selectDueWords(toWordRefs(dueRows), toWordRefs(claimRows));
 
   const dueLexemeIds = new Set(dueRows.map((v) => v.lexemeId));
   const demandWords: WordRef[] = demandRows

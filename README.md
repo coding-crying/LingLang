@@ -56,6 +56,21 @@ pnpm dev:tutor-ed                  # the tutor agent worker
 
 Open <http://localhost:3001>, make an account, and press the mic.
 
+### Or run the whole stack in Docker
+
+`docker-compose.yml` also has `linglang-dashboard` and `linglang-tutor`
+services built from `Dockerfile.agent`, plus a one-shot `linglang-migrate`
+service that runs `drizzle-kit push` before either starts. Fill in
+`agents/.env.local` as above, then:
+
+```bash
+docker compose up -d --build
+```
+
+This is a bigger, less-transparent box than the two-terminal `pnpm` flow
+above — prefer that one while developing, and this one for handing the
+whole thing to a machine you don't want to babysit.
+
 `.env.example` documents every variable, but only these are required:
 `DATABASE_URL`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`,
 `GEMINI_API_KEY`, `API_KEY_ENCRYPTION_SECRET`, and `DASHBOARD_PASSWORD_SALT`.
@@ -125,16 +140,23 @@ implementation detail, the language is the point.
 
 Stated plainly, because finding these yourself at 1am is worse:
 
-* **The quickstart above is derived from reading the source, not from a
-  from-scratch install on a clean machine.** The required variables are certain.
-  Whether that's the *complete* set is not yet verified. If you hit a gap, an
-  issue would genuinely help.
-* **No Dockerfile yet.** You run the agent and dashboard as node processes;
-  `docker-compose.yml` covers Postgres only.
+* **The quickstart above hasn't run end-to-end on a clean machine with real
+  credentials.** Every `process.env.*` read in `agents/src` was cross-checked
+  against `.env.example`, which caught one real bug: the Processor's
+  Gemini-mode check only recognized `GOOGLE_API_KEY`, not the documented
+  `GEMINI_API_KEY`, so it silently fell back to a local LLM that doesn't
+  exist in cloud mode (fixed). What's *not* verified is an actual boot with
+  live LiveKit/Gemini credentials — do that before trusting this fully. If
+  you hit a gap, an issue would genuinely help.
+* **The Docker path is newer and less battle-tested than the two-terminal
+  `pnpm` flow.** `Dockerfile.agent` builds the whole pnpm workspace, so the
+  image is large and slow to build for now — see the `node_modules`
+  duplication note below.
 * **No reconnect on dropout.** If the audio connection dies mid-session you
   reconnect by hand.
-* **`node_modules` is large** (~3 GB), mostly duplicated ONNX runtime copies
-  pulled in by speech plugins you won't use in cloud mode.
+* **`node_modules` is large** (~2 GB), dominated by the ONNX runtime native
+  binaries (~500 MB) pulled in by speech plugins you won't use in cloud
+  mode.
 
 ---
 
@@ -161,4 +183,11 @@ quickstart on a machine that isn't mine. See `CONTRIBUTING.md`.
 
 ## Licence
 
-See `LICENSE`.
+This project is dual-licensed:
+
+- The underlying LiveKit agents SDK (everything outside `agents/`) is
+  **Apache-2.0** — see `LICENSE` and `NOTICE`.
+- The LingLang tutor application itself (`agents/`) is **AGPL-3.0-or-later**
+  — see `agents/LICENSE`. This means if you run a modified version of the
+  tutor as a network service for others, you must make your modified source
+  available to them. Running it yourself, self-hosted, is unaffected.

@@ -20,7 +20,7 @@ import { AccessToken, AgentDispatchClient, RoomServiceClient } from 'livekit-ser
 import { JobStatus } from '@livekit/protocol';
 import { watchEvents, type AgentEvent } from '../lib/trace.js';
 import { db } from '../db/index.js';
-import { users, lexemes, userVocabulary, activeGoals, units, userPersona, userLanguageLevels, reviewLogs, sessionSummaries, contentSources, contentChunks, userContentProgress } from '../db/schema.js';
+import { users, lexemes, userVocabulary, activeGoals, units, userPersona, userLanguageLevels, reviewLogs, sessionSummaries, contentSources, contentChunks, userContentProgress, userSourceProfiles } from '../db/schema.js';
 import { eq, desc, sql, gte, lte, and, or, isNull, inArray } from 'drizzle-orm';
 import { execFileSync } from 'child_process';
 import { authenticateByUsername, createUser, claimUser, hashPassword } from '../lib/user-auth.js';
@@ -28,6 +28,16 @@ import { writePersona } from '../lib/persona.js';
 import { placeUserInSource, listSourceChunks, activateChunk } from '../lib/curriculum.js';
 import { readLearnerView } from '../lib/learner-view.js';
 import { ingestSource, type ContentKind } from '../lib/ingest.js';
+import {
+  evaluateProfile,
+  inferSource,
+  questionsFor,
+  resolveLastStudiedAt,
+  type ContentIntent,
+  type ProfileAnswers,
+} from '../lib/content-profile.js';
+import { applyProfileAnswers, onSourceReady } from '../lib/content-reconcile.js';
+import type { StudyIntensity } from '../lib/prior-knowledge.js';
 import { getGoogleKeyPlan, setGoogleApiKey, clearGoogleApiKey } from '../lib/google-budget.js';
 import { LANGUAGES } from '../config/languages.js';
 import { computeStreak, bucketVocabHistory } from './stats.js';
@@ -782,6 +792,14 @@ app.get('/api/content-sources', requireAuth, async (req, res) => {
       : [];
     const progressByChunk = new Map(progressRows.map((p) => [p.chunkId, p]));
 
+    // Provenance is per (user, source): the same shared source is at a
+    // different point for every learner. A source with no profile row, or
+    // one still 'needed', is what the library greys out.
+    const profileRows = await db.query.userSourceProfiles.findMany({
+      where: and(eq(userSourceProfiles.userId, userId), inArray(userSourceProfiles.sourceId, sourceIds)),
+    });
+    const profileBySource = new Map(profileRows.map((p) => [p.sourceId, p]));
+
     const result = sources.map((s) => {
       const chunkIds = chunkIdsBySource.get(s.id) ?? [];
       let done = 0;
@@ -794,6 +812,11 @@ app.get('/api/content-sources', requireAuth, async (req, res) => {
         if (p.status === 'done') done++;
         if (p.status === 'active') isActive = true;
       }
+      const profile = profileBySource.get(s.id);
+      const evaluation = profile
+        ? evaluateProfile(s.kind as ContentKind, (profile.answers ?? {}) as ProfileAnswers)
+        : null;
+
       return {
         id: s.id,
         language: s.language,
@@ -805,6 +828,14 @@ app.get('/api/content-sources', requireAuth, async (req, res) => {
         progress: chunkIds.length > 0 ? done / chunkIds.length : 0,
         isActive,
         started,
+        intent: profile?.intent ?? null,
+        profileStatus: profile?.status ?? 'needed',
+        // The frontend's one flag for "grey this tile out and prompt": no
+        // profile row at all, or one with required questions outstanding.
+        // A 'skipped' profile is NOT pending — the learner declined, and
+        // re-nagging them is how a gentle prompt becomes an annoying one.
+        needsProfile: !profile || profile.status === 'needed',
+        pendingQuestionCount: evaluation ? evaluation.missing.length : questionsFor(s.kind as ContentKind, null).length,
       };
     });
 
@@ -824,36 +855,162 @@ const INGEST_KINDS: ContentKind[] = ['text', 'textbook', 'audio', 'youtube', 'mo
 app.post('/api/content-sources', requireAuth, async (req, res) => {
   try {
     const userId = req.user!.id;
-    const { kind, language, title, ref } = req.body ?? {};
+    const { language, title, ref } = req.body ?? {};
+    let { kind } = req.body ?? {};
 
-    if (!INGEST_KINDS.includes(kind)) {
-      return res.status(400).json({ error: `kind must be one of: ${INGEST_KINDS.join(', ')}` });
-    }
     if (!LANGUAGES[language]) {
       return res.status(400).json({ error: `Unknown language "${language}"` });
     }
-    if (!title?.trim() || !ref?.trim()) {
-      return res.status(400).json({ error: 'title and ref are required' });
+    if (!ref?.trim()) {
+      return res.status(400).json({ error: 'ref is required' });
     }
 
+    // `kind` is now optional: the simple "just paste it" path sends only a
+    // ref and lets inference decide (rules first, model only for bare
+    // titles -- see lib/content-profile.ts). An explicit kind from the
+    // advanced form still wins, and is still validated.
+    let inferredTitle: string | undefined;
+    if (kind === undefined || kind === null || kind === '') {
+      const inferred = await inferSource(ref.trim(), title);
+      kind = inferred.kind;
+      inferredTitle = inferred.title;
+    } else if (!INGEST_KINDS.includes(kind)) {
+      return res.status(400).json({ error: `kind must be one of: ${INGEST_KINDS.join(', ')}` });
+    }
+
+    const finalTitle = (title?.trim() || inferredTitle || ref.trim()).slice(0, 200);
     const sourceId = `src-${crypto.randomUUID().slice(0, 8)}`;
+
+    // The profile row is created UP FRONT, unanswered. That's what puts the
+    // source in the library greyed out with questions outstanding, rather
+    // than blocking the upload behind a questionnaire -- see the module
+    // comment in lib/content-profile.ts for why that ordering matters.
+    // Answers may also arrive in this same request (the upload form asks
+    // inline if the learner wants to bother); reconciliation then happens
+    // as soon as ingestion finishes.
+    const answers = (req.body?.answers ?? {}) as ProfileAnswers;
+    if (req.body?.intent) answers.intent = req.body.intent as ContentIntent;
+    const evaluation = evaluateProfile(kind as ContentKind, answers);
+
+    await db.insert(userSourceProfiles).values({
+      userId,
+      sourceId,
+      intent: (answers.intent as ContentIntent) ?? 'study',
+      status: evaluation.status,
+      answers,
+      lastStudiedAt: resolveLastStudiedAt(answers.last_studied),
+      intensity: (answers.intensity as StudyIntensity) ?? null,
+      profiledAt: evaluation.status === 'complete' ? new Date() : null,
+    }).onConflictDoNothing();
 
     // Fire-and-forget: ingestSource manages its own status transitions
     // (inserts as 'ingesting', flips to 'ready'/'failed' on completion) and
     // already logs + records ingestError on failure, so nothing further to
-    // await or handle here.
+    // await or handle here. onSourceReady runs afterwards to apply any
+    // profile that completed while ingestion was still going.
     void ingestSource({
       sourceId,
       ownerId: userId,
       language,
       kind: kind as ContentKind,
-      title: title.trim(),
+      title: finalTitle,
       ref: ref.trim(),
-    }).catch((err) => {
-      console.error(`[Ingest] Background ingestion failed for ${sourceId}:`, err);
-    });
+    }).then(
+      () => onSourceReady(sourceId),
+      (err) => {
+        console.error(`[Ingest] Background ingestion failed for ${sourceId}:`, err);
+      },
+    );
 
-    res.status(202).json({ id: sourceId, status: 'ingesting' });
+    res.status(202).json({
+      id: sourceId,
+      status: 'ingesting',
+      kind,
+      title: finalTitle,
+      profileStatus: evaluation.status,
+      needsProfile: evaluation.status !== 'complete',
+    });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// What is this thing? Powers the dirt-simple add box: the learner pastes a
+// URL, a filename or a title, and the form fills itself in. Separate from
+// the POST above so the UI can show (and let them correct) the guess
+// BEFORE committing to an ingest that may take minutes.
+app.post('/api/content-sources/infer', requireAuth, async (req, res) => {
+  try {
+    const { ref } = req.body ?? {};
+    if (!ref?.trim()) return res.status(400).json({ error: 'ref is required' });
+    res.json(await inferSource(ref.trim()));
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// The profile for one source: current answers plus the questions still
+// outstanding, in asking order. Both the library sheet and the voice agent
+// read this -- one question list, so the typed and spoken flows can't drift.
+app.get('/api/content-sources/:sourceId/profile', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user!.id;
+    const { sourceId } = req.params as { sourceId: string };
+    const source = await db.query.contentSources.findFirst({ where: eq(contentSources.id, sourceId) });
+    if (!source) return res.status(404).json({ error: 'Not found' });
+    if (source.ownerId && source.ownerId !== userId) return res.status(403).json({ error: 'Forbidden' });
+
+    const profile = await db.query.userSourceProfiles.findFirst({
+      where: and(eq(userSourceProfiles.userId, userId), eq(userSourceProfiles.sourceId, sourceId)),
+    });
+    const answers = (profile?.answers ?? {}) as ProfileAnswers;
+    const evaluation = evaluateProfile(source.kind as ContentKind, answers);
+    const countRows = await db.select({ count: sql<number>`count(*)::int` })
+      .from(contentChunks)
+      .where(eq(contentChunks.sourceId, sourceId));
+    const chunkCount = countRows[0]?.count ?? 0;
+
+    res.json({
+      sourceId,
+      title: source.title,
+      kind: source.kind,
+      chunkCount,
+      intent: profile?.intent ?? null,
+      status: profile?.status ?? 'needed',
+      answers,
+      reconciledAt: profile?.reconciledAt ?? null,
+      questions: questionsFor(source.kind as ContentKind, (answers.intent as ContentIntent) ?? null),
+      missing: evaluation.missing,
+      next: evaluation.next,
+    });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// Answer some or all of the questions. Partial answers are the normal case
+// -- the voice flow lands one or two per turn -- so this merges rather than
+// replaces, and only reconciles once nothing required is outstanding.
+app.put('/api/content-sources/:sourceId/profile', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user!.id;
+    const { sourceId } = req.params as { sourceId: string };
+    const source = await db.query.contentSources.findFirst({ where: eq(contentSources.id, sourceId) });
+    if (!source) return res.status(404).json({ error: 'Not found' });
+    if (source.ownerId && source.ownerId !== userId) return res.status(403).json({ error: 'Forbidden' });
+
+    const incoming = (req.body?.answers ?? {}) as ProfileAnswers;
+    if (req.body?.intent) incoming.intent = req.body.intent as ContentIntent;
+
+    // Shared with the voice tools (tools/content-tools.ts) so the spoken
+    // and typed flows converge on identical state. `skip` is the explicit
+    // "don't ask me": reconcile on conservative defaults rather than
+    // leaving the source inert forever.
+    const result = await applyProfileAnswers(userId, sourceId, incoming, { skip: req.body?.skip === true });
+
+    // result.reconcileStarted is false when ingestion is still running --
+    // onSourceReady picks the profile up when chunks exist.
+    res.json(result);
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }

@@ -1,4 +1,4 @@
-import { pgTable, text, integer, real, boolean, timestamp, uuid, index, uniqueIndex, vector, primaryKey } from 'drizzle-orm/pg-core';
+import { pgTable, text, integer, real, boolean, timestamp, uuid, index, uniqueIndex, vector, primaryKey, jsonb } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { relations } from 'drizzle-orm';
 
@@ -104,6 +104,20 @@ export const users = pgTable('users', {
   googleUsagePeriodStart: timestamp('google_usage_period_start', { withTimezone: true }).notNull().defaultNow(),
 });
 
+// 2026-08-03: anonymous public-demo traffic has no auth and no per-user
+// budget of its own — every visitor is a throwaway users row, so the
+// per-user google-budget table above resets to a fresh allowance for each
+// one and caps nothing in aggregate. Covers demo.ts's ElevenLabs fallback
+// and the live anonymous demo worker's forced Gemini-realtime usage
+// against the shared production key. Single global row, same lazy-reset
+// shape as google-budget above — see lib/demo-budget.ts.
+export const demoBudget = pgTable('demo_budget', {
+  id: text('id').primaryKey().default('global'),
+  spentMicros: integer('spent_micros').notNull().default(0),
+  limitMicros: integer('limit_micros').notNull().default(500000), // $0.50/period
+  periodStart: timestamp('period_start', { withTimezone: true }).notNull().defaultNow(),
+});
+
 // 2026-06-25: per-language proficiency replaces the global field for
 // tutor-level lookups. The global `users.proficiencyLevel` is kept as
 // a fallback only. Source of truth is this table.
@@ -173,6 +187,14 @@ export const userVocabulary = pgTable('user_vocabulary', {
   receptiveExposures: integer('receptive_exposures').notNull().default(0),
   lastExposure: timestamp('last_exposure', { withTimezone: true }),
   comprehensionSignal: real('comprehension_signal').notNull().default(0), // rolling -1..+1
+
+  // 'conversation' — earned here, in speech we actually observed.
+  // 'seeded' — asserted by a content profile ("I did Pimsleur 1-25") and
+  // never yet confirmed. A claim, not an observation: it counts toward
+  // chunk coverage (that's the point — it's why placement works for
+  // learners with outside history) but consumers that infer *ability*
+  // rather than *scheduling* should discount it. See lib/prior-knowledge.ts.
+  origin: text('origin').notNull().default('conversation'),
 
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
@@ -478,6 +500,47 @@ export const userContentProgress = pgTable('user_content_progress', {
 export const userContentProgressRelations = relations(userContentProgress, ({ one }) => ({
   user: one(users, { fields: [userContentProgress.userId], references: [users.id] }),
   chunk: one(contentChunks, { fields: [userContentProgress.chunkId], references: [contentChunks.id] }),
+}));
+
+// What a source MEANS to one learner — the channel through which knowledge
+// acquired outside this app reaches the placement math. See
+// docs/superpowers/specs/2026-08-08-content-provenance-design.md.
+//
+// Per (user, source), not columns on content_sources: the same shared
+// source sits at a different point for every learner, and re-answering
+// later ("I've come back after 3 months") must not touch anyone else.
+export const userSourceProfiles = pgTable('user_source_profiles', {
+  userId: text('user_id').notNull().references(() => users.id),
+  sourceId: text('source_id').notNull().references(() => contentSources.id),
+  // 'study' — working through it (seed what's behind them, queue the rest)
+  // 'known' — already finished it (seed all of it, queue nothing)
+  // 'aspire' — want to get here but haven't (seed NOTHING; it's a target)
+  intent: text('intent').notNull().default('study'),
+  // 'needed' | 'complete' | 'skipped' — 'needed' is what greys the tile out.
+  status: text('status').notNull().default('needed'),
+  // Answers keyed by question id; lib/content-profile.ts owns the specs.
+  // Anything the reconciler reads is promoted to a column below.
+  answers: jsonb('answers').notNull().default({}),
+  // Chunks with ord <= this are treated as already-studied.
+  knownThroughOrd: integer('known_through_ord'),
+  // When they last worked on it — backdates seeded cards so a 25-day-old
+  // lesson surfaces as overdue while last week's does not.
+  lastStudiedAt: timestamp('last_studied_at', { withTimezone: true }),
+  // 'drilled' | 'studied' | 'skimmed' — sets seed stability.
+  intensity: text('intensity'),
+  profiledAt: timestamp('profiled_at', { withTimezone: true }),
+  // Set by reconcileSourceProgress; cleared on any profile change so a
+  // re-answer re-reconciles.
+  reconciledAt: timestamp('reconciled_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.userId, t.sourceId] }),
+  pendingIdx: index('user_source_profiles_pending_idx').on(t.userId, t.status),
+}));
+
+export const userSourceProfilesRelations = relations(userSourceProfiles, ({ one }) => ({
+  user: one(users, { fields: [userSourceProfiles.userId], references: [users.id] }),
+  source: one(contentSources, { fields: [userSourceProfiles.sourceId], references: [contentSources.id] }),
 }));
 
 // ── Discourse memory & grammar analytics ────────────────────────────────────

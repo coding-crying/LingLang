@@ -59,6 +59,7 @@ import { resolveAnalysisEndpoint } from './llm/analysis-endpoint.js';
 import { resolveVoice } from './config/voices.js';
 import { readPersona } from './lib/persona.js';
 import { dbTools } from './tools/db-tools.js';
+import { contentTools } from './tools/content-tools.js';
 import { ContextManager } from './lib/context.js';
 import { audioPayloadRegistry, setAudioTranscript, GemmaAudioSTT } from './stt/gemma-audio-stt.js';
 import { getLanguageConfig, nativeLanguageName, LANGUAGES, resolveLanguageConfig, resolveSessionLanguage, isRealtimeOnlyLanguage, REALTIME_MODE_NAMES } from './config/languages.js';
@@ -447,7 +448,15 @@ function resolveGoogleBilling(ctx: JobContext): { googleApiKey?: string; billGoo
   } catch {
     // Malformed metadata — no per-user key/billing info available.
   }
-  return { billGoogleUsage: false };
+  // No metadata means this wasn't dispatched via the dashboard's
+  // /api/token endpoint — the only other thing that lands here is the
+  // anonymous demo worker (DEMO_SESSION_TIME_LIMIT_MS set), which LiveKit
+  // auto-dispatches with no metadata at all, while still forcing gemini
+  // mode against the shared production key. Without this, demo sessions'
+  // Gemini usage was silently never recorded anywhere (see
+  // resolveDemoBilling below for why it's billed against a global bucket
+  // instead of this per-user one).
+  return { billGoogleUsage: !!process.env.DEMO_SESSION_TIME_LIMIT_MS };
 }
 
 export default defineAgent({
@@ -500,6 +509,26 @@ export default defineAgent({
     // Same signal the wrap-up/hard-stop timers below key off: this worker
     // is running the anonymous landing-page demo, not a real account.
     const isDemoSession = !!process.env.DEMO_SESSION_TIME_LIMIT_MS;
+
+    // Demo sessions bypass the dashboard's /api/token endpoint entirely
+    // (marketing site mints its own LiveKit token), so the per-user
+    // budget/Turnstile/rate-limit checks that guard real dispatches never
+    // run for them — Turnstile + per-IP/global rate limits live in the
+    // marketing site's Netlify function as the first line of defense, but
+    // per the ROADMAP's own "not done" item, there was no provider-side
+    // spend cap as a backstop. Each demo visitor is also a disposable
+    // one-off users row, so the per-user shared-key budget
+    // (lib/google-budget.ts) doesn't actually cap anything in aggregate —
+    // this checks a single global bucket instead (lib/demo-budget.ts).
+    if (isDemoSession) {
+      const { getDemoBudgetStatus } = await import('./lib/demo-budget.js');
+      const demoBudget = await getDemoBudgetStatus();
+      if (demoBudget.overBudget) {
+        console.warn(`[Tutor-ED] Global demo budget exhausted (${demoBudget.spentMicros}/${demoBudget.limitMicros} micros) — declining session`);
+        await ctx.room.disconnect();
+        return;
+      }
+    }
 
     // A demo visitor arrives having chosen nothing — the landing page's
     // only control is "Start talking". The tutor asks what they want to
@@ -1046,7 +1075,12 @@ export default defineAgent({
     // media_chunks deprecation fixed by the upgrade itself.
     const agent = new voice.Agent({
       instructions: await buildDynamicInstructions(),
-      tools: [...dbTools, ...onboardingTools, ...demoTools],
+      // contentTools let the tutor collect a source's provenance in
+      // conversation ('how far did you get with it?') instead of the
+      // learner filling a form -- see tools/content-tools.ts. Excluded
+      // from demo sessions: an anonymous visitor has no library, so the
+      // tools would only ever return empty.
+      tools: [...dbTools, ...onboardingTools, ...demoTools, ...(isDemoSession ? [] : contentTools)],
     });
 
     // === CREATE SERVICES (LOCAL, CLOUD, OR GEMINI) ===
@@ -2850,13 +2884,22 @@ export default defineAgent({
     // comment on why this is an estimate (duration * a configurable
     // per-second rate), not real billing reconciliation. Only for sessions
     // riding the shared key (billGoogleUsage); BYO-key users are unlimited.
+    // Demo sessions bill against the global demo bucket (lib/demo-budget.ts)
+    // instead of their own one-off user row — see the pre-session gate
+    // above for why a per-user budget doesn't cap anything for them.
     if (billGoogleUsage && geminiSessionStartedAt) {
       ctx.addShutdownCallback(async () => {
         try {
           const seconds = (Date.now() - geminiSessionStartedAt) / 1000;
           const ratePerSecond = parseInt(process.env.GOOGLE_REALTIME_MICROS_PER_SECOND || '350', 10);
-          const { recordGoogleUsage } = await import('./lib/google-budget.js');
-          await recordGoogleUsage(userId, Math.round(seconds * ratePerSecond));
+          const micros = Math.round(seconds * ratePerSecond);
+          if (isDemoSession) {
+            const { recordDemoUsage } = await import('./lib/demo-budget.js');
+            await recordDemoUsage(micros);
+          } else {
+            const { recordGoogleUsage } = await import('./lib/google-budget.js');
+            await recordGoogleUsage(userId, micros);
+          }
         } catch (err) {
           console.warn('[Tutor-ED] Google usage accrual failed in shutdown:', String(err).slice(0, 120));
         }
