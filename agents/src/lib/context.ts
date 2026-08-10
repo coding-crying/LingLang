@@ -1,6 +1,6 @@
 import { db } from '../db/index.js';
 import { userVocabulary, units, lexemes, users, activeGoals, userNotes, sessionSummaries } from '../db/schema.js';
-import { eq, and, asc, desc, lte, isNull, sql, isNotNull } from 'drizzle-orm';
+import { eq, and, asc, desc, lte, isNull, sql, isNotNull, inArray } from 'drizzle-orm';
 import { isPlaceholderLexeme } from './learner-view.js';
 
 export class ContextManager {
@@ -23,23 +23,41 @@ export class ContextManager {
     const now = new Date();
 
     // FSRS: only show items that are actually due AND in the target language.
+    //
+    // 2026-08-04: the language filter used to run in JS AFTER this query's
+    // own `limit: 20` — so ORDER BY due ASC LIMIT 20 picked the 20
+    // globally-earliest-due rows across EVERY language the user ever
+    // touched, before target-language filtering ever saw them. A user with
+    // old native-language substitution-tracking rows (English filler
+    // words like "well"/"I"/"that", months overdue from a stale session)
+    // had those 20 slots entirely consumed by rows that then got filtered
+    // out — reviews.length came back 0 even with real target-language
+    // vocabulary sitting due and unseen. Confirmed live: 55 due Portuguese
+    // words invisible behind 20 due English ones. Pushing the language
+    // filter into the query itself (via subquery, since userVocabulary
+    // doesn't carry language) fixes the LIMIT to only ever spend its 20
+    // slots on rows that could actually surface.
     console.log(`[Context] Querying due reviews...`);
     const allDue = await db.query.userVocabulary.findMany({
       where: and(
         eq(userVocabulary.userId, userId),
-        lte(userVocabulary.due, now)
+        lte(userVocabulary.due, now),
+        inArray(
+          userVocabulary.lexemeId,
+          db.select({ id: lexemes.id }).from(lexemes).where(eq(lexemes.language, targetLang)),
+        ),
       ),
       with: { lexeme: true },
       orderBy: [asc(userVocabulary.due)],
       limit: 20,
     });
-    // Filter to target-language lexemes only (native-language entries are substitution tracking, not learning targets).
-    // Also drop native-substitution placeholder lexemes (lemma === its own
-    // nativeLemma link) — the same contamination learner-view.ts already
-    // filters for the conversation prompt; getInitialContext feeds the
+    // Placeholder lexemes (native-substitution rows tagged with the target
+    // language itself — lemma === its own nativeLemma link) still need
+    // dropping in JS; the same contamination learner-view.ts already
+    // filters for the conversation prompt. getInitialContext feeds the
     // planner and had no such filter, so contaminated placeholders could
     // still surface there even after the conversation-side fix.
-    const dueReviews = allDue.filter((v: any) => v.lexeme?.language === targetLang && !isPlaceholderLexeme(v.lexeme)).slice(0, 5);
+    const dueReviews = allDue.filter((v: any) => !isPlaceholderLexeme(v.lexeme)).slice(0, 5);
     console.log(`[Context] Found ${dueReviews.length} target-language reviews (filtered from ${allDue.length} total)`);
 
     const reviewList = dueReviews.map((p: any) => `${p.lexeme.lemma} (${p.lexeme.translation})`).join(', ');
