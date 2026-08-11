@@ -65,14 +65,30 @@ function AppShellInner({ onLogout }: { onLogout: () => void }) {
   }
 
   if (onboarding.needsOnboarding) {
+    // The gate takes over the whole screen, so the Sheet has to be mounted
+    // here too — otherwise "Change language" would open a sheet that only
+    // exists in the tabbed layout below, i.e. nothing would happen.
     return (
-      <OnboardingGate
-        userId={onboarding.userId}
-        targetLanguage={onboarding.targetLang}
-        languageName={onboarding.languageName!}
-        onComplete={onboarding.markComplete}
-        onSkipToVoice={onboarding.markComplete}
-      />
+      <>
+        <OnboardingGate
+          userId={onboarding.userId}
+          targetLanguage={onboarding.targetLang}
+          languageName={onboarding.languageName!}
+          onComplete={onboarding.markComplete}
+          onSkipToVoice={onboarding.markComplete}
+          onChangeLanguage={() => openSheet({ kind: 'language' })}
+        />
+        <Sheet>
+          {activeSheet?.kind === 'language' && (
+            <LanguageSheet
+              userId={onboarding.userId}
+              currentLang={onboarding.targetLang}
+              onSwitched={onboarding.refresh}
+              onClose={closeSheet}
+            />
+          )}
+        </Sheet>
+      </>
     );
   }
 

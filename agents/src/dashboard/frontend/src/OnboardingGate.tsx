@@ -13,6 +13,13 @@
  *   1. Pick a level → POST /api/users/:id/onboarding/:lang → done
  *   2. "Talk to the tutor instead" → skip the question, connect to voice
  *      room (the agent runs the onboarding conversation itself)
+ *
+ * The gate replaces the whole app while it's up — no tab bar, no sheet — so
+ * `onChangeLanguage` is the only way out for someone looking at the wrong
+ * language here. Without it, a user whose target language was set but never
+ * onboarded (the old `NOT NULL DEFAULT 'ru'` produced exactly that: Russian,
+ * no onboarding row) was pinned to that language with no reachable
+ * switcher, which reads as "the language menu doesn't work".
  */
 
 import { useState } from 'react';
@@ -35,6 +42,7 @@ interface Props {
   languageName: string;     // Display name: 'Russian', 'Portuguese'
   onComplete: () => void;   // Called when onboarding is done (either path)
   onSkipToVoice: () => void; // Called when user wants to talk to tutor instead
+  onChangeLanguage: () => void; // Opens the language sheet — see the note above
 }
 
 export default function OnboardingGate({
@@ -43,6 +51,7 @@ export default function OnboardingGate({
   languageName,
   onComplete,
   onSkipToVoice,
+  onChangeLanguage,
 }: Props) {
   const [selfRatedLevel, setSelfRatedLevel] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -79,6 +88,9 @@ export default function OnboardingGate({
           <Typography.Paragraph style={{ color: 'var(--muted)' }}>
             How would you rate your current {languageName}?
           </Typography.Paragraph>
+          <Button variant="ghost" size="sm" onPress={onChangeLanguage}>
+            Not learning {languageName}? Change language
+          </Button>
         </div>
 
         <form onSubmit={submit} className="onboarding-form">

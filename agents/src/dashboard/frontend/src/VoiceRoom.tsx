@@ -704,6 +704,10 @@ export default function VoiceRoom({ onLogout }: { onLogout: () => void }) {
             // User wants to talk to the tutor — agent will run onboarding voice flow
             setNeedsOnboarding(false);
           }}
+          // This legacy screen has no sheet layer; AppShell is where the
+          // language switcher lives. Send them to Profile rather than
+          // rendering a button that would do nothing.
+          onChangeLanguage={() => { window.location.href = '/dashboard'; }}
         />
       ) : (
 

@@ -23,6 +23,7 @@
  * that to useOnboarding().refresh()).
  */
 
+import type { Key } from 'react';
 import { useEffect, useState } from 'react';
 import { Label, ListBox, Spinner, Typography } from '@heroui/react';
 import { LANGUAGE_NAMES } from '../hooks/useOnboarding';
@@ -99,9 +100,19 @@ export default function LanguageSheet({ userId, currentLang, onSwitched, onClose
           aria-label="Languages"
           className="w-full"
           disabledKeys={pending ? [pending] : undefined}
-          selectedKeys={[currentLang]}
+          selectedKeys={currentLang ? [currentLang] : []}
           selectionMode="single"
-          onAction={(key) => switchTo(String(key))}
+          // onSelectionChange, NOT onAction: this is a controlled
+          // single-selection ListBox, and React Aria only fires onAction for
+          // action-style lists. Clicking a language therefore moved the
+          // focus ring and nothing else — no PATCH, no switch — which is
+          // exactly the "the language menu doesn't work" report. The
+          // selection is controlled by `currentLang`, so the highlight only
+          // moves once the server confirms and the refresh lands.
+          onSelectionChange={(keys) => {
+            const next = Array.from(keys as Iterable<Key>)[0];
+            if (next !== undefined) void switchTo(String(next));
+          }}
         >
           {languages.map(({ code, name }) => (
             <ListBox.Item key={code} id={code} textValue={name}>
