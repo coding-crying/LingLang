@@ -257,21 +257,6 @@ export class ServiceFactory {
         modalities: [Modality.AUDIO],
         inputAudioTranscription: { model: 'latest' },
         outputAudioTranscription: { model: 'latest' },
-        // Push-to-talk is an inverse mute: the mic is closed until the user
-        // holds the button, and that gesture — nothing else — defines a turn.
-        // Gemini's own end-of-speech detection was ALSO committing the turn,
-        // so every press produced two generations: Gemini's, then ours from
-        // commitUserTurn() when the transcript landed. The second interrupted
-        // the first mid-word, which is why the tutor kept cutting itself off
-        // and restarting the same sentence ("*Muy caliente*, very" →
-        // "*Muy caliente*, huh? Very hot...", live 2026-08-10).
-        //
-        // Disabling automatic activity detection puts turn-taking entirely on
-        // explicit activityStart/activityEnd signals, which the plugin derives
-        // from the audio we forward and our commit. Hands-free mode therefore
-        // can't lean on Gemini to close a turn any more and uses the local
-        // Silero VAD instead — see turnDetection in tutor-event-driven.ts.
-        realtimeInputConfig: { automaticActivityDetection: { disabled: true } },
       });
     }
 

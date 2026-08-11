@@ -1267,21 +1267,7 @@ export default defineAgent({
       // agent_activity.js's own capability check expects when
       // llm.capabilities.turnDetection is true (confirmed true in our
       // services.llm.capabilities trace).
-      // 'realtime_llm' delegated end-of-turn to Gemini. Gemini's automatic
-      // activity detection is now off (see factory.ts — it was double-
-      // committing every push-to-talk turn), so there is nothing on that
-      // side to close a turn any more. PTT closes its own turn explicitly
-      // on release; hands-free needs a detector, so give the session the
-      // Silero VAD we already prewarm and let it decide end-of-speech.
-      sessionConfig.vad = ctx.proc.userData.vad as silero.VAD;
-      // 'manual' to start: VoiceControl publishes its real mode on connect
-      // (and on every switch), and its default is push-to-talk. Starting
-      // 'vad' instead would let the local detector commit a turn during the
-      // gap before that message arrives — the spurious extra turn this whole
-      // change exists to remove. Hands-free flips to 'vad' the moment the
-      // mode message says so. NOTE: pttMode itself is declared much further
-      // down, so it cannot be read here (temporal dead zone).
-      sessionConfig.turnDetection = 'manual';
+      sessionConfig.turnDetection = 'realtime_llm';
     }
 
     const session = new voice.AgentSession(sessionConfig);
@@ -2451,10 +2437,7 @@ export default defineAgent({
           const manual = msg.mode === 'ptt';
           pttMode = manual ? 'ptt' : 'handsFree';
           if (!manual) pttHeld = false;
-          // 'vad' rather than null for hands-free: null restores the
-          // session default, which for a realtime model means "let the model
-          // decide" — and Gemini's detector is deliberately disabled now.
-          session.updateOptions({ turnHandling: { turnDetection: manual ? 'manual' : (isGemini ? 'vad' : null) } });
+          session.updateOptions({ turnHandling: { turnDetection: manual ? 'manual' : null } });
           trace('ptt.mode', `${msg.mode} → turnDetection=${manual ? 'manual' : 'auto'}`);
         } else if (msg.type === 'hold') {
           pttHeld = true;
