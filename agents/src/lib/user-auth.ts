@@ -73,7 +73,7 @@ export async function createUser(opts: CreateUserOpts): Promise<void> {
     username: opts.username,
     passwordHash,
     email: opts.email || null,
-    targetLanguage: opts.targetLanguage || 'ru',
+    targetLanguage: opts.targetLanguage || null,
     nativeLanguage: opts.nativeLanguage || 'en',
     proficiencyLevel: opts.proficiencyLevel || 'beginner',
   });

@@ -34,8 +34,8 @@ export interface OnboardingResult {
   checked: boolean;
   needsOnboarding: boolean;
   userId: string;
-  targetLang: string;
-  languageName: string;
+  targetLang: string | null;
+  languageName: string | null;
   /** Mark onboarding as complete client-side (both the "submitted the
    *  form" and "skipped to talk to the tutor instead" paths call this —
    *  identical to VoiceRoom's onComplete/onSkipToVoice, which did the same
@@ -53,7 +53,7 @@ export function useOnboarding(): OnboardingResult {
   const [checked, setChecked] = useState(false);
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [userId, setUserId] = useState('');
-  const [targetLang, setTargetLang] = useState('ru');
+  const [targetLang, setTargetLang] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -61,10 +61,11 @@ export function useOnboarding(): OnboardingResult {
       if (!meRes.ok) { setChecked(true); return; }
       const { user } = await meRes.json();
       const uid = user?.id ?? '';
-      const lang = user?.targetLanguage ?? 'ru';
+      const lang = typeof user?.targetLanguage === 'string' ? user.targetLanguage : null;
       setUserId(uid);
       setTargetLang(lang);
-      if (uid) {
+      setNeedsOnboarding(!lang);
+      if (uid && lang) {
         const obRes = await apiFetch(`/api/users/${uid}/onboarding/${lang}`);
         if (obRes.ok) {
           const ob = await obRes.json();
@@ -86,7 +87,7 @@ export function useOnboarding(): OnboardingResult {
     needsOnboarding,
     userId,
     targetLang,
-    languageName: LANGUAGE_NAMES[targetLang] ?? targetLang,
+    languageName: targetLang ? (LANGUAGE_NAMES[targetLang] ?? targetLang) : null,
     markComplete,
     refresh: load,
   };

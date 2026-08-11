@@ -117,7 +117,8 @@ export async function getDueReviewsQuery(
 }>> {
   // Get user's target language to filter out native-language substitution entries
   const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
-  const targetLang = user?.targetLanguage || 'ru';
+  const targetLang = user?.targetLanguage;
+  if (!targetLang) return [];
 
   const now = new Date();
   const allDue = await db.query.userVocabulary.findMany({
@@ -185,19 +186,22 @@ export async function getVocabularyOverviewQuery(
       state: v.state,
     }));
 
-  // Next unit's unstarted words
+  // Next unit's unstarted words. An unset language means onboarding is
+  // incomplete; keep the overview useful without inventing Russian progress.
   const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
-  const targetLang = user?.targetLanguage || 'ru';
+  const targetLang = user?.targetLanguage;
 
   const startedIds = new Set(allVocab.map(v => v.lexemeId));
 
-  const currentUnit = await db.query.units.findFirst({
-    where: eq(units.language, targetLang),
-    orderBy: [asc(units.order)],
-  });
+  const currentUnit = targetLang
+    ? await db.query.units.findFirst({
+        where: eq(units.language, targetLang),
+        orderBy: [asc(units.order)],
+      })
+    : undefined;
 
   let nextUnitWords: Array<{ lemma: string; translation: string }> = [];
-  if (currentUnit) {
+  if (targetLang && currentUnit) {
     const unitWords = await db.query.lexemes.findMany({
       where: and(eq(lexemes.unitId, currentUnit.id), eq(lexemes.language, targetLang)),
       limit: 8,

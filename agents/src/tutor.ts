@@ -38,7 +38,7 @@ export default defineAgent({
       console.log(`[Tutor] Creating new user: ${userId}`);
       await db.insert(users).values({
         id: userId,
-        targetLanguage: process.env.DEFAULT_TARGET_LANGUAGE || 'ru',
+        targetLanguage: process.env.DEFAULT_TARGET_LANGUAGE || null,
         nativeLanguage: process.env.DEFAULT_NATIVE_LANGUAGE || 'en',
         proficiencyLevel: 'beginner',
       });
@@ -52,8 +52,13 @@ export default defineAgent({
       throw new Error(`Failed to create user ${userId}`);
     }
 
-    // Get language configuration
+    // A direct worker session can create a placeholder row, but it must not
+    // invent a target language. Dashboard/demo flows choose it explicitly.
     const targetLang = user.targetLanguage;
+    if (!targetLang) {
+      console.warn(`[Tutor] No target language selected for ${userId}; waiting for onboarding`);
+      return;
+    }
     const langConfig = getLanguageConfig(targetLang);
 
     console.log(`[Tutor] Language: ${langConfig.name} (${langConfig.nativeName})`);

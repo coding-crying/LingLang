@@ -67,7 +67,9 @@ export const users = pgTable('users', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 
   // Language preferences
-  targetLanguage: text('target_language').notNull().default('ru'),
+  // Null means the learner must choose a target language during onboarding.
+  // Existing rows retain their explicit language values; see migration 0018.
+  targetLanguage: text('target_language'),
   nativeLanguage: text('native_language').notNull().default('en'),
   // 2026-06-25: proficiencyLevel kept as a fallback default but the
   // tutor now reads from userLanguageLevels for per-language resolution.
