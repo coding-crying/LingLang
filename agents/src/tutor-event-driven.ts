@@ -62,7 +62,7 @@ import { dbTools } from './tools/db-tools.js';
 import { contentTools } from './tools/content-tools.js';
 import { ContextManager } from './lib/context.js';
 import { audioPayloadRegistry, setAudioTranscript, GemmaAudioSTT } from './stt/gemma-audio-stt.js';
-import { getLanguageConfig, nativeLanguageName, LANGUAGES, resolveLanguageConfig, resolveSessionLanguage, isRealtimeOnlyLanguage, REALTIME_MODE_NAMES } from './config/languages.js';
+import { getLanguageConfig, nativeLanguageName, LANGUAGES, resolveLanguageConfig, resolveSessionLanguage, isRealtimeOnlyLanguage, REALTIME_MODE_NAMES, SESSION_FALLBACK_LANGUAGE } from './config/languages.js';
 import { buildInstructions, buildCoachNote, buildOnboardingInstructions, PLATFORM_KNOWLEDGE } from './config/prompts/base.js';
 import type { PromptContext } from './config/prompts/base.js';
 import { computeTargetShare, buildMixLine, measureTargetShare, targetShareForLevel, MAX_THROTTLE_NOTCHES, findForeignScriptChar } from './lib/language-mix.js';
@@ -547,7 +547,7 @@ export default defineAgent({
       console.log(`[Tutor-ED] Creating new user: ${userId}`);
       await db.insert(users).values({
         id: userId,
-        targetLanguage: process.env.DEFAULT_TARGET_LANGUAGE || 'ru',
+        targetLanguage: process.env.DEFAULT_TARGET_LANGUAGE || null,
         nativeLanguage: process.env.DEFAULT_NATIVE_LANGUAGE || 'en',
         proficiencyLevel: 'beginner',
       });
@@ -561,7 +561,21 @@ export default defineAgent({
     // === LANGUAGE CONFIG ===
     // Mutable: the processor can detect a language change request and
     // update this mid-session, then refresh instructions.
-    let targetLang = user.targetLanguage;
+    // targetLanguage is nullable now: a real account must choose one before a
+    // session can teach anything, so bail rather than silently picking one for
+    // them (that fallback is exactly how everyone ended up in Russian).
+    if (!user.targetLanguage && !isDemoSession) {
+      console.warn(`[Tutor-ED] No target language selected for ${userId} — ending session; the app must onboard them first.`);
+      await ctx.room.disconnect();
+      return;
+    }
+    // A demo visitor deliberately arrives having chosen nothing (see
+    // languageUndecided above): the placeholder only holds until
+    // set_target_language commits their answer on the first turn. Typed
+    // `string` rather than inferred, because applyTargetLanguage reassigns
+    // this from inside a closure — inference would keep it `string | null`
+    // and every downstream call site would have to re-narrow it.
+    let targetLang: string = user.targetLanguage ?? SESSION_FALLBACK_LANGUAGE;
 
     // Demo → account handover. The demo runs in gemini and will teach any
     // language the realtime model knows; the app then defaults to `local`,

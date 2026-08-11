@@ -40,7 +40,9 @@ export async function analyzeTurn({ userId, userUtterance, context }: TurnInput)
   // Same single source of truth as everywhere else. The local map this
   // replaces defaulted to 'Russian', so any language it didn't list — Greek
   // included — was silently analysed as Russian.
-  const targetLangName = nativeLanguageName(user?.targetLanguage || 'ru');
+  const targetLangName = user?.targetLanguage
+    ? nativeLanguageName(user.targetLanguage)
+    : 'the learner’s selected target language';
   const nativeLangName = nativeLanguageName(user?.nativeLanguage || 'en');
 
   // 1. Call Step 3.5 Flash via OpenRouter for Analysis
@@ -83,9 +85,12 @@ export async function analyzeTurn({ userId, userUtterance, context }: TurnInput)
 
   // Per-lemma language routing: don't trust analysis.language (utterance-level)
   // for native substitution checks. Prefer the per-lexeme `item.language` field
-  // the new prompt emits. Fall back to user's targetLanguage for the lexeme
-  // lookup since we need to know which language's lexeme table to search.
-  const targetLang = user?.targetLanguage || 'ru';
+  // the new prompt emits. A missing target language means onboarding is
+  // incomplete, so do not write or route target-language vocabulary.
+  const targetLang = user?.targetLanguage;
+  if (!targetLang) {
+    return { analysis, skipped: 'target_language_not_selected' };
+  }
   const nativeLang = user?.nativeLanguage || 'en';
 
   if (analysis.lexemes) {

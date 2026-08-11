@@ -15,6 +15,7 @@
  */
 
 import type { ReactElement } from 'react';
+import { Button, Typography } from '@heroui/react';
 import { AppStateProvider, useAppState } from '../state/AppState';
 import { useOnboarding } from '../hooks/useOnboarding';
 import TabBar from './TabBar';
@@ -37,12 +38,38 @@ function AppShellInner({ onLogout }: { onLogout: () => void }) {
     return <div className="loading-wrap">Loading…</div>;
   }
 
+  if (!onboarding.targetLang) {
+    return (
+      <div className="onboarding-wrap">
+        <div className="onboarding-card">
+          <Typography.Heading level={2}>Choose a language</Typography.Heading>
+          <Typography.Paragraph style={{ color: 'var(--muted)' }}>
+            Pick the language you want to learn to get started.
+          </Typography.Paragraph>
+          <Button variant="primary" onPress={() => openSheet({ kind: 'language' })}>
+            Choose language
+          </Button>
+        </div>
+        <Sheet>
+          {activeSheet?.kind === 'language' && (
+            <LanguageSheet
+              userId={onboarding.userId}
+              currentLang={onboarding.targetLang}
+              onSwitched={onboarding.refresh}
+              onClose={closeSheet}
+            />
+          )}
+        </Sheet>
+      </div>
+    );
+  }
+
   if (onboarding.needsOnboarding) {
     return (
       <OnboardingGate
         userId={onboarding.userId}
         targetLanguage={onboarding.targetLang}
-        languageName={onboarding.languageName}
+        languageName={onboarding.languageName!}
         onComplete={onboarding.markComplete}
         onSkipToVoice={onboarding.markComplete}
       />

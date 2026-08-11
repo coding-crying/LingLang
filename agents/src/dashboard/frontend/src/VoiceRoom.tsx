@@ -629,7 +629,7 @@ export default function VoiceRoom({ onLogout }: { onLogout: () => void }) {
   const [onboardingChecked, setOnboardingChecked] = useState(false);
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [userId, setUserId] = useState('');
-  const [targetLang, setTargetLang] = useState('ru');
+  const [targetLang, setTargetLang] = useState<string | null>(null);
 
   // Check onboarding on mount
   useEffect(() => {
@@ -639,10 +639,11 @@ export default function VoiceRoom({ onLogout }: { onLogout: () => void }) {
         if (!meRes.ok) { setOnboardingChecked(true); return; }
         const { user } = await meRes.json();
         const uid = user?.id ?? '';
-        const lang = user?.targetLanguage ?? 'ru';
+        const lang = typeof user?.targetLanguage === 'string' ? user.targetLanguage : null;
         setUserId(uid);
         setTargetLang(lang);
-        if (uid) {
+        setNeedsOnboarding(!lang);
+        if (uid && lang) {
           const obRes = await apiFetch(`/api/users/${uid}/onboarding/${lang}`);
           if (obRes.ok) {
             const ob = await obRes.json();
@@ -693,7 +694,7 @@ export default function VoiceRoom({ onLogout }: { onLogout: () => void }) {
       {/* Onboarding gate — shown before the voice room if not yet complete */}
       {!onboardingChecked ? (
         <div className="loading-wrap">Loading…</div>
-      ) : needsOnboarding ? (
+      ) : needsOnboarding && targetLang ? (
         <OnboardingGate
           userId={userId}
           targetLanguage={targetLang}

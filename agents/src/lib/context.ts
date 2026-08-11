@@ -17,7 +17,10 @@ export class ContextManager {
       return "No user profile found.";
     }
 
-    const targetLang = user.targetLanguage || 'ru';
+    const targetLang = user.targetLanguage;
+    if (!targetLang) {
+      return 'No target language selected. The learner must choose one before starting a lesson.';
+    }
     console.log(`[Context] Target language: ${targetLang}`);
 
     const now = new Date();
@@ -113,7 +116,8 @@ New Vocabulary to Introduce (by frequency): ${newWords || "None"}
     // Legacy path (text-tutor script only) — still tag goals with the
     // language so it can't create unscoped rows.
     const goalUser = await db.query.users.findFirst({ where: eq(users.id, userId) });
-    const goalLang = goalUser?.targetLanguage || 'ru';
+    const goalLang = goalUser?.targetLanguage;
+    if (!goalLang) return null;
 
     // 1. Check for ACTIVE Goal
     const currentGoal = await db.query.activeGoals.findFirst({
@@ -179,7 +183,8 @@ New Vocabulary to Introduce (by frequency): ${newWords || "None"}
 
     // Priority B: New Vocabulary (from current unit)
     const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
-    const targetLang = user?.targetLanguage || 'ru';
+    const targetLang = user?.targetLanguage;
+    if (!targetLang) return null;
 
     const startedLexemes = await db.query.userVocabulary.findMany({
         where: eq(userVocabulary.userId, userId),
@@ -233,7 +238,8 @@ New Vocabulary to Introduce (by frequency): ${newWords || "None"}
     // prompt (confirmed live 2026-07-02). Legacy rows with a null
     // language_code simply drop out of view.
     const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
-    const targetLang = user?.targetLanguage || 'ru';
+    const targetLang = user?.targetLanguage;
+    if (!targetLang) return null;
     const scoped = and(
       eq(activeGoals.userId, userId),
       eq(activeGoals.status, 'active'),

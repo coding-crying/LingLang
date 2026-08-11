@@ -35,7 +35,7 @@ interface LanguageOption {
 
 interface LanguageSheetProps {
   userId: string;
-  currentLang: string;
+  currentLang: string | null;
   onSwitched: () => void;
   onClose: () => void;
 }
@@ -66,7 +66,19 @@ export default function LanguageSheet({ userId, currentLang, onSwitched, onClose
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ targetLanguage: code }),
       });
-      if (!res.ok) throw new Error((await res.json()).error || 'Switch failed');
+      if (!res.ok) {
+        let message = `Switch failed (${res.status})`;
+        try {
+          const body = await res.json() as { error?: string };
+          if (body.error) message = body.error;
+        } catch { /* preserve the HTTP failure when the body is not JSON */ }
+        throw new Error(message);
+      }
+      const updated = await res.json() as { targetLanguage?: string | null };
+      if (updated.targetLanguage !== code) {
+        throw new Error('Language change was not confirmed by the server');
+      }
+      setPending(null);
       onSwitched();
       onClose();
     } catch (e) {

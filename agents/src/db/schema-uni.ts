@@ -30,7 +30,8 @@ export function makeUsersTable(t: TableFn) {
   return t('users', {
     id: t.text('id').primaryKey(), // UUID on cloud, random string on edge
     nativeLanguage: t.text('native_language').notNull().default('en'),
-    targetLanguage: t.text('target_language').notNull(),
+    // Null until the learner explicitly chooses a target language.
+    targetLanguage: t.text('target_language'),
     proficiencyLevel: t.text('proficiency_level').notNull().default('A1'),
     createdAt: t.integer('created_at').notNull(), // unix epoch
     updatedAt: t.integer('updated_at').notNull(),

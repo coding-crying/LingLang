@@ -40,6 +40,7 @@ import { applyProfileAnswers, onSourceReady } from '../lib/content-reconcile.js'
 import type { StudyIntensity } from '../lib/prior-knowledge.js';
 import { getGoogleKeyPlan, setGoogleApiKey, clearGoogleApiKey } from '../lib/google-budget.js';
 import { LANGUAGES } from '../config/languages.js';
+import { isSupportedTargetLanguage } from '../lib/language-selection.js';
 import { computeStreak, bucketVocabHistory } from './stats.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -252,6 +253,9 @@ app.post('/api/register', requireAuth, async (req, res) => {
       return res.status(403).json({ error: 'Only admin can register new users' });
     }
     const { username, password, targetLanguage, nativeLanguage } = req.body ?? {};
+    if (targetLanguage !== undefined && !isSupportedTargetLanguage(targetLanguage)) {
+      return res.status(400).json({ error: 'Unsupported target language' });
+    }
     if (!username || !password) {
       return res.status(400).json({ error: 'username and password required' });
     }
@@ -273,11 +277,11 @@ app.post('/api/register', requireAuth, async (req, res) => {
       id,
       username: String(username),
       password: String(password),
-      targetLanguage: targetLanguage || 'ru',
+      targetLanguage: targetLanguage || null,
       nativeLanguage: nativeLanguage || 'en',
     });
 
-    console.log(`[Auth] Admin ${req.user.id} created user ${id} (${username}) target=${targetLanguage || 'ru'}`);
+    console.log(`[Auth] Admin ${req.user.id} created user ${id} (${username}) target=${targetLanguage || 'unset'}`);
     res.json({ success: true, user: { id, username } });
   } catch (error) {
     res.status(500).json({ error: String(error) });
@@ -301,6 +305,9 @@ app.post('/api/signup', async (req, res) => {
     }
 
     const { username, email, password, targetLanguage, nativeLanguage } = req.body ?? {};
+    if (targetLanguage !== undefined && !isSupportedTargetLanguage(targetLanguage)) {
+      return res.status(400).json({ error: 'Unsupported target language' });
+    }
     if (!username || !email || !password) {
       return res.status(400).json({ error: 'username, email, and password are required' });
     }
@@ -333,7 +340,7 @@ app.post('/api/signup', async (req, res) => {
       username: String(username),
       email: String(email),
       password: String(password),
-      targetLanguage: targetLanguage || 'ru',
+      targetLanguage: targetLanguage || null,
       nativeLanguage: nativeLanguage || 'en',
     });
 
@@ -483,7 +490,7 @@ app.get('/api/me', requireAuth, async (req, res) => {
         id: req.user!.id,
         username: userRow?.username ?? req.user!.id,
         email: userRow?.email ?? null,
-        targetLanguage: userRow?.targetLanguage ?? 'ru',
+        targetLanguage: userRow?.targetLanguage ?? null,
         nativeLanguage: userRow?.nativeLanguage ?? 'en',
         proficiencyLevel: userRow?.proficiencyLevel ?? 'beginner',
         createdAt: userRow?.createdAt ?? null,
@@ -1805,6 +1812,10 @@ app.patch('/api/users/:userId', requireAuth, async (req, res) => {
     }
     const { targetLanguage, nativeLanguage, proficiencyLevel } = req.body;
 
+    if (targetLanguage !== undefined && !isSupportedTargetLanguage(targetLanguage)) {
+      return res.status(400).json({ error: 'Unsupported target language' });
+    }
+
     const updates: Record<string, string> = {};
     if (targetLanguage) updates.targetLanguage = targetLanguage;
     if (nativeLanguage) updates.nativeLanguage = nativeLanguage;
@@ -1823,7 +1834,7 @@ app.patch('/api/users/:userId', requireAuth, async (req, res) => {
       // Create user
       await db.insert(users).values({
         id: userId,
-        targetLanguage: targetLanguage || 'ru',
+        targetLanguage: targetLanguage || null,
         nativeLanguage: nativeLanguage || 'en',
         proficiencyLevel: proficiencyLevel || 'beginner',
       });

@@ -921,8 +921,9 @@ export async function updateSRSFromAnalysis(
     where: eq(users.id, userId)
   });
 
-  const targetLang = user?.targetLanguage || analysis.language || 'ru';
+  const targetLang = user?.targetLanguage || analysis.language;
   const nativeLang = user?.nativeLanguage || 'en';
+  if (!targetLang) return { updates, tracking };
 
   for (let idx = 0; idx < analysis.lexemes.length; idx++) {
     const item = analysis.lexemes[idx]!;
