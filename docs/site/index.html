@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>First-time setup · LingLang</title>
+<meta name="description" content="Getting started with LingLang: hosted access, Google and BYO providers, self-hosting preview status, backups and troubleshooting.">
+<link rel="canonical" href="https://linglang.app/docs/">
+<style>
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#17191c;color:#eee}
+*{box-sizing:border-box}body{margin:0;line-height:1.7}header,main,footer{max-width:860px;margin:auto;padding:24px}
+header{display:flex;justify-content:space-between;gap:16px;border-bottom:1px solid #42454b}
+a{color:#ffa67e;text-underline-offset:3px}a:hover{color:#ffd0b8}a:focus-visible{outline:3px solid #ffa67e;outline-offset:4px}
+h1{font-size:clamp(2rem,6vw,3.2rem);line-height:1.15}h2{margin-top:2.5rem;color:#ffac89;line-height:1.3}h3{margin-top:1.8rem}
+p,li{overflow-wrap:anywhere}li{margin:.5rem 0}code{background:#2b2e34;padding:2px 5px;border-radius:4px;font-size:.9em}pre{overflow:auto;background:#2b2e34;padding:16px}
+footer{border-top:1px solid #42454b;color:#bbb;font-size:.9rem}.skip{position:absolute;left:-9999px}.skip:focus{left:16px;top:16px;background:#17191c;padding:12px}
+</style></head><body><a class="skip" href="#content">Skip to content</a>
+<header><a href="/">LingLang</a><nav aria-label="Documentation"><a href="https://dashboard.linglang.app">Dashboard</a> · <a href="https://github.com/coding-crying/LingLang/blob/main/docs/first-time-setup.md">GitHub guide</a></nav></header>
+<main id="content"><h1>First-time setup</h1>
+<p>LingLang is a voice-first language tutor. This guide separates using the hosted dashboard from the <strong>experimental all-in-one self-hosted build</strong>. They are not yet interchangeable.</p>
+<h2>Use the hosted dashboard</h2>
+<ol>
+<li>Open <a href="https://dashboard.linglang.app">the dashboard</a> and sign in with an account provided by the operator. If you do not have an account, ask the operator to create one; do not assume there is public self-registration.</li>
+<li>Choose your native and target languages. Complete the available onboarding questions honestly—being a beginner is fine.</li>
+<li>Open <strong>Profile</strong> to configure your providers, if the deployment permits changes.</li>
+<li>Open <strong>Voice</strong>, allow microphone access, and start a conversation. Use headphones if the tutor hears its own audio. If your browser blocks sound, use the displayed playback control or interact with the page and retry.</li>
+</ol>
+<h3>Bring your own Google key</h3>
+<p>Use the Google API key settings in Profile, and enable the Gemini realtime option when available. A key alone does not necessarily select realtime mode. Your Google account must have access to the configured model; billing, quota and regional restrictions can still reject a valid key.</p>
+<p>Set spending limits with your provider. Never paste an API key into a conversation, issue, screenshot or public repository. Do not share a provider key between people unless you intend to pay for their usage.</p>
+<h3>Bring separate LLM, STT and TTS services</h3>
+<p>In Profile's provider settings, configure each service's endpoint, model and credentials:</p>
+<ul>
+<li><strong>LLM:</strong> generates the tutor's responses.</li>
+<li><strong>STT:</strong> transcribes your speech.</li>
+<li><strong>TTS:</strong> produces the tutor's spoken audio; select a supported voice too.</li>
+</ul>
+<p>Disable Gemini realtime when you intend to use the separate-service path. The experimental Pipecat cascade uses OpenAI-compatible services; not every API that calls itself compatible implements the required speech or streaming endpoints. Test your actual providers before relying on them.</p>
+<p>Provider requests originate from the server. An endpoint at <code>localhost</code> therefore means the server—or the container—not your laptop. Use an address reachable from the running service. Keep authentication enabled on externally reachable endpoints.</p>
+<p>If Profile says providers are managed by the deployment, that is intentional: the operator controls these settings. Contact the operator instead of trying to bypass the restriction.</p>
+<h2>Self-hosting: current release status</h2>
+<p><strong>The all-in-one Pipecat edition is a developer preview, not a supported first-time installation yet. There is no published, versioned all-in-one image to pull.</strong> Do not substitute an invented Docker Hub or GHCR image name.</p>
+<p>A local Linux image containing the dashboard, Node backend, Python/Pipecat and optional PostgreSQL/pgvector has passed fresh-start and restart checks. The dashboard and Pipecat HTTP endpoints responded successfully; generated secrets and the PostgreSQL cluster survived restart.</p>
+<p>Those checks do <strong>not</strong> establish a complete learner experience. Remaining release gates include:</p>
+<ul>
+<li>Safe first-administrator provisioning for an empty database.</li>
+<li>Complete auxiliary database schema installation.</li>
+<li>Browser microphone/speaker tests through the actual container network.</li>
+<li>Transcript processing through the learning and progress pipeline.</li>
+<li>External-database and deployment-policy installation tests.</li>
+<li>A reviewed source release and versioned registry image.</li>
+</ul>
+<p>The preview currently reaches a login page without provisioning its first account. <strong>Stop there rather than inserting guessed accounts or using default passwords.</strong> A successful health check is not a finished installation.</p>
+<p>The existing repository also contains a separate legacy LiveKit deployment. Its requirements and Compose file are not the all-in-one Pipecat instructions. Do not mix the two configurations.</p>
+<h2>Preview operator configuration reference</h2>
+<p>These settings describe the in-development all-in-one implementation; they are not a promise that the preview packaging is already available on the default GitHub branch.</p>
+<h3>User-managed providers</h3>
+<p><code>LINGLANG_PROVIDER_POLICY=user</code> permits each learner to configure their own supported providers through Profile. This is the default policy.</p>
+<h3>Deployment-managed providers</h3>
+<p><code>LINGLANG_PROVIDER_POLICY=deployment</code> locks provider edits in the UI and enforces that restriction on the backend.</p>
+<p>For Google realtime, configure <code>SERVICE_MODE=gemini</code> and the server's <code>GEMINI_API_KEY</code>. For the separate-service path, use <code>SERVICE_MODE=cloud</code> with:</p>
+<ul>
+<li><code>LINGLANG_LLM_URL</code>, <code>LINGLANG_LLM_MODEL</code>, <code>LINGLANG_LLM_API_KEY</code></li>
+<li><code>LINGLANG_STT_URL</code>, <code>LINGLANG_STT_MODEL</code>, <code>LINGLANG_STT_API_KEY</code></li>
+<li><code>LINGLANG_TTS_URL</code>, <code>LINGLANG_TTS_MODEL</code>, <code>LINGLANG_TTS_API_KEY</code></li>
+<li><code>LINGLANG_TTS_VOICE</code></li>
+</ul>
+<p>Put credentials in private runtime configuration, not in a committed Compose file. Do not assume that changing the policy migrates or deletes previously stored user settings.</p>
+<h3>Database and persistent storage</h3>
+<p>The preview uses an embedded database when <code>DATABASE_URL</code> is empty. A nonempty value selects an external PostgreSQL database that must already have the product and voice schemas. It does not automatically migrate an existing external database.</p>
+<p>Persist <code>/data</code>. It contains the embedded database, application data and generated encryption/service secrets. Back up the database <strong>and</strong> the secrets together. A filesystem copy of a running PostgreSQL data directory is not a reliable backup; use a consistent database backup or stop the container before copying the complete volume. Test restoration into a separate volume.</p>
+<p>Do not delete the volume to troubleshoot startup. Do not rotate the encryption secret casually: stored provider credentials depend on it. The preview rejects configured secrets that conflict with its persisted values.</p>
+<h3>Networking and microphone access</h3>
+<p>The preview's HTTP mapping is loopback-only by default. Remote browser microphone access requires HTTPS (localhost is the usual development exception).</p>
+<p>Publishing the dashboard's TCP port is <strong>not enough</strong> to prove WebRTC media works. ICE/UDP reachability, NAT and possibly TURN must be configured and tested. Do not expose the private Pipecat runner or database port as a workaround.</p>
+<h2>Troubleshooting</h2>
+<ul>
+<li><strong>Login page works, but I cannot create an account:</strong> hosted users need an operator-provisioned account; preview self-hosting still lacks first-user setup.</li>
+<li><strong>Microphone unavailable:</strong> check HTTPS, browser permissions, device selection and whether another application is using the device.</li>
+<li><strong>Tutor is silent:</strong> check speaker playback, provider credentials/quota and the media network path. HTTP health checks do not test audio.</li>
+<li><strong>Provider controls are unavailable:</strong> check whether deployment-managed policy is enabled.</li>
+<li><strong>Local provider cannot be reached:</strong> check connectivity from inside the server/container, not only from your browser.</li>
+<li><strong>Preview starts but logs <code>model_alignment_jobs</code> missing:</strong> this is a known incomplete-schema gate, not proof of successful installation.</li>
+<li><strong>Transcript exists but progress does not update:</strong> the Pipecat learning-processing path is still a release gate; transcript acceptance alone does not mean mastery was updated.</li>
+</ul>
+<p>When reporting a problem, include the version/commit, provider mode, browser, expected behavior and redacted logs. Remove keys, cookies, connection strings, learner transcripts and other personal data.</p>
+<p><a href="https://github.com/coding-crying/LingLang">Project source and issues</a> · <a href="https://linglang.app">Website</a></p></main><footer>Developer-preview limitations are listed explicitly. A working login page is not proof of a complete voice installation.</footer></body></html>

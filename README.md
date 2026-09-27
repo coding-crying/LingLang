@@ -13,6 +13,16 @@ scheduling state is real, persisted, and drives what gets said to you.
 
 ---
 
+## Start here
+
+Read the [first-time setup guide](docs/first-time-setup.md) for hosted access,
+Google-key and separate-provider configuration, persistence, and troubleshooting.
+The **all-in-one Pipecat edition is still a developer preview**: first-user setup,
+complete schema installation, browser media and learning integration remain
+release gates. No versioned all-in-one registry image is published yet.
+
+The setup below describes the existing **LiveKit deployment**, not that preview.
+
 ## What you need
 
 Self-hosting is supported in **cloud mode**: your machine runs the agent and the
