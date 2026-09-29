@@ -290,6 +290,149 @@ function testOverlappingTurnKeepsStableTurnSeq() {
 }
 
 // ============================================================================
+// Test 5: realtime (Gemini Live) itemId keying
+//
+// Realtime sessions have no llm.token stream and no VAD EOU, so the backend
+// stamps every assistant item with a live totalUserTurns and every user
+// utterance with the generation id. Pre-fix, that collapsed the two-item
+// greeting onto `agent-0` and merged barge-in utterances into one bubble.
+// Now itemId is the key when present; turnSeq remains the fallback.
+// ============================================================================
+
+function testRealtimeItemIdKeying() {
+  // --- Part A: pre-fix shape — two greeting items, both turnSeq 0 ---
+  const preFix = replay([
+    { type: 'agent.reply', ts: 1000, data: { text: 'Olá! Praticamos um pouco de português.', turnSeq: 0 } },
+    { type: 'agent.reply', ts: 1010, data: { text: 'Lembras-te de como dizer que te sentes um pouco mal?', turnSeq: 0 } },
+  ]);
+  const preAgent = preFix.turns.filter((t) => t.kind === 'agent') as AgentTurn[];
+  assert(
+    preAgent.length === 1,
+    `[pre-fix shape demonstrates the collision] expected both greeting items to collapse onto one bubble, got ${preAgent.length}`,
+  );
+
+  // --- Part B: fixed shape — itemId keys each item separately ---
+  const fixed = replay([
+    { type: 'agent.reply', ts: 1000, data: { text: 'Olá! Praticamos um pouco de português.', turnSeq: 0, itemId: 'resp-a' } },
+    { type: 'agent.reply', ts: 1010, data: { text: 'Lembras-te de como dizer que te sentes um pouco mal?', turnSeq: 0, itemId: 'resp-b' } },
+    { type: 'user.transcript', ts: 2000, data: { text: 'No, I thought it was', isFinal: true, turnSeq: 1, itemId: 'gen-1', latencySec: 0.8 } },
+    { type: 'user.transcript', ts: 2100, data: { text: 'Wait, wait, wait. Slow down.', isFinal: true, turnSeq: 2, itemId: 'gen-2', latencySec: 0.4 } },
+    { type: 'processor.analysis', ts: 3000, data: { turnSeq: 1, itemId: 'gen-1', lexemes: [], srsUpdates: [] } },
+  ]);
+
+  const agentTurns = fixed.turns.filter((t) => t.kind === 'agent') as AgentTurn[];
+  const userTurns = fixed.turns.filter((t) => t.kind === 'user') as UserTurn[];
+
+  assert(agentTurns.length === 2, `[itemId] expected 2 distinct agent bubbles, got ${agentTurns.length}`);
+  assert(
+    agentTurns[0]?.text.startsWith('Olá!') && agentTurns[1]?.text.startsWith('Lembras-te'),
+    '[itemId] both greeting items should survive as separate bubbles in arrival order',
+  );
+  assert(userTurns.length === 2, `[itemId] expected 2 segmented user bubbles, got ${userTurns.length}`);
+  assert(userTurns[0]?.id === 'user-item-gen-1', `[itemId] expected user-item-gen-1, got ${userTurns[0]?.id}`);
+  assert(userTurns[1]?.id === 'user-item-gen-2', `[itemId] expected user-item-gen-2, got ${userTurns[1]?.id}`);
+  assert(
+    userTurns[0]?.hasAnalysis === true && userTurns[1]?.hasAnalysis === false,
+    '[itemId] processor.analysis should attach to gen-1 only',
+  );
+  assert(
+    fixed.pendingUserQueue.length === 1 && fixed.pendingUserQueue[0] === 'user-item-gen-2',
+    `[itemId] gen-2 should still await analysis, queue=${JSON.stringify(fixed.pendingUserQueue)}`,
+  );
+}
+
+// ============================================================================
+// Test 6: live partial transcripts (realtime) — 2026-09-09
+//
+// The plugin streams partial input transcription while the learner speaks.
+// These used to be dropped server-side, so words only appeared after the
+// turn closed. Now they upsert a dimmed interim bubble that the final
+// transcript replaces in place.
+// ============================================================================
+
+function testLivePartialTranscript() {
+  const state = replay([
+    { type: 'user.transcript.partial', ts: 1000, data: { text: 'Estou', itemId: 'gen-1' } },
+    { type: 'user.transcript.partial', ts: 1200, data: { text: 'Estou um pouco', itemId: 'gen-1' } },
+    { type: 'user.transcript', ts: 1500, data: { text: 'Estou um pouco mal', turnSeq: 1, itemId: 'gen-1' } },
+    { type: 'processor.analysis', ts: 2000, data: { turnSeq: 1, itemId: 'gen-1', lexemes: [], srsUpdates: [] } },
+  ]);
+  const users = state.turns.filter((t) => t.kind === 'user') as UserTurn[];
+
+  assert(users.length === 1, `[partial] expected ONE bubble through the whole span, got ${users.length}`);
+  assert(users[0]?.id === 'user-item-gen-1', `[partial] id: ${users[0]?.id}`);
+  assert(users[0]?.interim === false, '[partial] bubble must be finalized');
+  assert(users[0]?.text === 'Estou um pouco mal', `[partial] final text: "${users[0]?.text}"`);
+  assert(users[0]?.hasAnalysis === true, '[partial] analysis should attach to the finalized bubble');
+  assert(state.pendingUserQueue.length === 0, `[partial] queue should be drained, got ${JSON.stringify(state.pendingUserQueue)}`);
+
+  // A late partial must never overwrite a finalized turn.
+  const after = applyStreamEvent(state, {
+    type: 'user.transcript.partial',
+    ts: 2500,
+    data: { text: 'Estou um pouco mal e', itemId: 'gen-1' },
+  });
+  const afterUsers = after.turns.filter((t) => t.kind === 'user') as UserTurn[];
+  assert(afterUsers[0]?.text === 'Estou um pouco mal', '[partial] late partial ignored after final');
+
+  // Partial-only (no final yet) must not queue for analysis.
+  const onlyPartial = replay([
+    { type: 'user.transcript.partial', ts: 1, data: { text: 'oi', itemId: 'gen-9' } },
+  ]);
+  assert(onlyPartial.pendingUserQueue.length === 0, '[partial] partial alone must not queue for analysis');
+
+  // Barge-in: a second span in the same generation carries a suffixed id, so
+  // it must create its own bubble rather than being dropped as a duplicate.
+  const barge = replay([
+    { type: 'user.transcript.partial', ts: 1, data: { text: 'No, I thought', itemId: 'gen-7' } },
+    { type: 'user.transcript', ts: 2, data: { text: 'No, I thought it was', turnSeq: 1, itemId: 'gen-7' } },
+    { type: 'user.transcript', ts: 3, data: { text: 'Wait, wait, slow down.', turnSeq: 2, itemId: 'gen-7#1' } },
+  ]);
+  const bargeUsers = barge.turns.filter((t) => t.kind === 'user') as UserTurn[];
+  assert(bargeUsers.length === 2, `[partial] barge-in should yield 2 bubbles, got ${bargeUsers.length}`);
+  assert(bargeUsers[1]?.id === 'user-item-gen-7#1', `[partial] barge-in id: ${bargeUsers[1]?.id}`);
+
+  // Legacy realtime workers sometimes suffixed the partial id but not the
+  // final id. The final must still replace the interim bubble in place.
+  const mismatchedIds = replay([
+    { type: 'user.transcript.partial', ts: 1, data: { text: 'Я хочу', itemId: 'gen-legacy#1' } },
+    { type: 'user.transcript', ts: 2, data: { text: 'Я хочу кофе', turnSeq: 1, itemId: 'gen-legacy' } },
+  ]);
+  const mismatchedUsers = mismatchedIds.turns.filter((t) => t.kind === 'user') as UserTurn[];
+  assert(mismatchedUsers.length === 1, '[partial] suffixed partial id must not create a second bubble');
+  assert(mismatchedUsers[0]?.text === 'Я хочу кофе' && mismatchedUsers[0]?.interim === false, '[partial] suffixed partial must finalize in place');
+}
+
+function testAgentToolResultDeduplication() {
+  const state = replay([
+    { type: 'agent.reply', ts: 1000, data: {
+      turnSeq: 9,
+      itemId: 'tool-item',
+      text: 'get_semantic_neighbors Результат: умница (0.165), отлично (0.252).\n\nДа, "молодец" тоже можно.',
+    } },
+    { type: 'agent.reply', ts: 1100, data: {
+      turnSeq: 9,
+      itemId: 'spoken-item',
+      text: 'Да, "молодец" тоже можно.',
+    } },
+  ]);
+  const agents = state.turns.filter((t) => t.kind === 'agent') as AgentTurn[];
+  assert(agents.length === 1, `[tool result] expected one visible bubble, got ${agents.length}`);
+  assert(agents[0]?.text === 'Да, "молодец" тоже можно.', '[tool result] internal result should be stripped');
+}
+
+function testSessionBoundary() {
+  const state = replay([
+    { type: 'user.transcript', ts: 1, data: { text: 'old', turnSeq: 1 } },
+    { type: 'agent.reply', ts: 2, data: { text: 'old reply', turnSeq: 1 } },
+    { type: 'session.start', ts: 3, data: {} },
+    { type: 'user.transcript', ts: 4, data: { text: 'new', turnSeq: 1 } },
+  ]);
+  assert(state.turns.length === 1, `[session] expected old transcript to be cleared, got ${state.turns.length} turns`);
+  assert(state.turns[0]?.kind === 'user' && state.turns[0]?.text === 'new', '[session] expected new session turn');
+}
+
+// ============================================================================
 // Run
 // ============================================================================
 
@@ -297,6 +440,10 @@ testNoDuplicateAgentReply();
 testDelayedProcessorAnalysisOrdering();
 testFallbackFifoMatchingWithoutTurnSeq();
 testOverlappingTurnKeepsStableTurnSeq();
+testRealtimeItemIdKeying();
+testLivePartialTranscript();
+testAgentToolResultDeduplication();
+testSessionBoundary();
 
 console.log(`\n${passes} passed, ${failures} failed`);
 if (failures > 0) {

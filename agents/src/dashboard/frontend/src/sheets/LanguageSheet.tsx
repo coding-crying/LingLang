@@ -25,7 +25,7 @@
 
 import type { Key } from 'react';
 import { useEffect, useState } from 'react';
-import { Label, ListBox, Spinner, Typography } from '@heroui/react';
+import { Button, Label, ListBox, Spinner, Typography } from '@heroui/react';
 import { LANGUAGE_NAMES } from '../hooks/useOnboarding';
 import { apiFetch } from '../lib/api';
 
@@ -46,16 +46,27 @@ export default function LanguageSheet({ userId, currentLang, onSwitched, onClose
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const [loadAttempt, setLoadAttempt] = useState(0);
   useEffect(() => {
+    let cancelled = false;
+    setLanguages(null);
+    setError(null);
     (async () => {
       try {
         const res = await apiFetch('/api/languages/voices');
-        if (!res.ok) return;
+        if (!res.ok) throw new Error(`Could not load languages (${res.status}).`);
         const data: { code: string; name: string }[] = await res.json();
-        setLanguages(data.map((l) => ({ code: l.code, name: LANGUAGE_NAMES[l.code] ?? l.name })));
-      } catch { /* leave null — falls back to empty list */ }
+        if (!data.length) throw new Error('No languages are available right now.');
+        if (!cancelled) setLanguages(data.map((l) => ({ code: l.code, name: LANGUAGE_NAMES[l.code] ?? l.name })));
+      } catch {
+        if (!cancelled) {
+          setLanguages([]);
+          setError('Could not load languages. Check your connection and try again.');
+        }
+      }
     })();
-  }, []);
+    return () => { cancelled = true; };
+  }, [loadAttempt]);
 
   const switchTo = async (code: string) => {
     if (code === currentLang || pending) return;
@@ -122,6 +133,7 @@ export default function LanguageSheet({ userId, currentLang, onSwitched, onClose
           ))}
         </ListBox>
       )}
+      {error && languages?.length === 0 && <Button onPress={() => setLoadAttempt(n => n + 1)}>Try again</Button>}
       {error && <Typography color="muted" type="body-xs" className="text-danger">{error}</Typography>}
     </div>
   );

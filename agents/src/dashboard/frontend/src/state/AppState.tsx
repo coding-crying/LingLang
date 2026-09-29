@@ -46,6 +46,7 @@ export type SheetState =
 
 const THEME_STORAGE_KEY = 'linglang-theme';
 const SERVICE_MODE_STORAGE_KEY = 'linglang-service-mode';
+const DEBUG_ENABLED_STORAGE_KEY = 'linglang-debug-enabled';
 
 /**
  * Cloud is the default for anyone who has never picked a mode. Local needs a
@@ -101,6 +102,8 @@ interface AppStateValue {
   activeTab: Tab;
   activeSheet: SheetState | null;
   serviceMode: ServiceMode;
+  /** Debug is an opt-in local setting; AppShell also requires admin identity. */
+  debugEnabled: boolean;
   /** null = health check hasn't resolved yet (don't grey anything out
    *  based on a guess). Polled every LOCAL_HEALTH_POLL_MS via
    *  GET /api/local-health — see server.ts for what "Local" resolves to. */
@@ -121,6 +124,7 @@ interface AppStateValue {
   openSheet: (sheet: SheetState) => void;
   closeSheet: () => void;
   setServiceMode: (mode: ServiceMode) => void;
+  setDebugEnabled: (enabled: boolean) => void;
   bumpContentVersion: () => void;
 }
 
@@ -140,6 +144,9 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const [serviceMode, setServiceModeState] = useState<ServiceMode>(() =>
     resolveInitialServiceMode(typeof localStorage === 'undefined' ? null : localStorage),
   );
+  const [debugEnabled, setDebugEnabledState] = useState<boolean>(() =>
+    typeof localStorage !== 'undefined' && localStorage.getItem(DEBUG_ENABLED_STORAGE_KEY) === 'true',
+  );
   const [localOnline, setLocalOnline] = useState<boolean | null>(null);
   const [localAutoSwitched, setLocalAutoSwitched] = useState(false);
   const [contentVersion, setContentVersion] = useState(0);
@@ -156,6 +163,10 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     localStorage.setItem(SERVICE_MODE_STORAGE_KEY, serviceMode);
   }, [serviceMode]);
+
+  useEffect(() => {
+    localStorage.setItem(DEBUG_ENABLED_STORAGE_KEY, String(debugEnabled));
+  }, [debugEnabled]);
 
   // Poll local-stack health so the Profile tab can grey out "Local" and so
   // an in-progress "local" selection gets bounced to "cloud" the moment the
@@ -199,6 +210,10 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     setLocalAutoSwitched(false);
     setServiceModeState(mode);
   }, []);
+  const setDebugEnabled = useCallback((enabled: boolean) => {
+    setDebugEnabledState(enabled);
+    if (!enabled) setActiveTab((tab) => (tab === 'debug' ? 'voice' : tab));
+  }, []);
   const bumpContentVersion = useCallback(() => setContentVersion((v) => v + 1), []);
 
   const value = useMemo<AppStateValue>(
@@ -207,6 +222,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       activeTab,
       activeSheet,
       serviceMode,
+      debugEnabled,
       localOnline,
       localAutoSwitched,
       contentVersion,
@@ -216,9 +232,10 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       openSheet,
       closeSheet,
       setServiceMode,
+      setDebugEnabled,
       bumpContentVersion,
     }),
-    [theme, activeTab, activeSheet, serviceMode, localOnline, localAutoSwitched, contentVersion, setTab, toggleTheme, setTheme, openSheet, closeSheet, setServiceMode, bumpContentVersion],
+    [theme, activeTab, activeSheet, serviceMode, debugEnabled, localOnline, localAutoSwitched, contentVersion, setTab, toggleTheme, setTheme, openSheet, closeSheet, setServiceMode, setDebugEnabled, bumpContentVersion],
   );
 
   return <AppStateContext.Provider value={value}>{children}</AppStateContext.Provider>;

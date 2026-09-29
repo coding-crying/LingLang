@@ -22,7 +22,7 @@
  * in the frontend chat.
  */
 
-const QWEN3_ASR_URL = process.env.QWEN3_ASR_URL || 'http://localhost:8001/v1/audio/transcriptions';
+const QWEN3_ASR_URL = process.env.QWEN3_ASR_URL || 'http://localhost:8002/v1/audio/transcriptions';
 
 function dataUriToBuffer(dataUri: string): Buffer {
   const commaIdx = dataUri.indexOf(',');

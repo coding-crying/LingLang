@@ -622,8 +622,12 @@ export default function VoiceRoom({ onLogout }: { onLogout: () => void }) {
   const [token, setToken] = useState('');
   const [url, setUrl] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<TutorMode>('local');
+  const [mode, setMode] = useState<TutorMode>('cloud');
   const [connecting, setConnecting] = useState<TutorMode | null>(null);
+  // 2026-09-02: local mode is operator-GPU-bound; the server tells us via
+  // /api/me capabilities whether this deployment allows it. Default false
+  // so the picker never flashes a button that 400s.
+  const [allowLocalMode, setAllowLocalMode] = useState(false);
 
   // Onboarding state
   const [onboardingChecked, setOnboardingChecked] = useState(false);
@@ -637,7 +641,9 @@ export default function VoiceRoom({ onLogout }: { onLogout: () => void }) {
       try {
         const meRes = await apiFetch('/api/me');
         if (!meRes.ok) { setOnboardingChecked(true); return; }
-        const { user } = await meRes.json();
+        const me = await meRes.json();
+        const user = me?.user;
+        setAllowLocalMode(me?.capabilities?.allowLocalMode === true);
         const uid = user?.id ?? '';
         const lang = typeof user?.targetLanguage === 'string' ? user.targetLanguage : null;
         setUserId(uid);
@@ -719,19 +725,21 @@ export default function VoiceRoom({ onLogout }: { onLogout: () => void }) {
               <div className="connect-icon">🎙️</div>
               <p>Start a voice session with your LingLang tutor</p>
               <div className="mode-picker">
-                <button
-                  className="btn-primary btn-lg"
-                  onClick={() => connect('local')}
-                  disabled={connecting !== null}
-                  title="Locally hosted tutor — runs on our own GPU"
-                >
-                  {connecting === 'local' ? 'Connecting…' : '🖥️ Local'}
-                </button>
+                {allowLocalMode && (
+                  <button
+                    className="btn-primary btn-lg"
+                    onClick={() => connect('local')}
+                    disabled={connecting !== null}
+                    title="Tutor on this machine's GPU — self-hosters only (ALLOW_LOCAL_MODE=true)"
+                  >
+                    {connecting === 'local' ? 'Connecting…' : '🖥️ Local'}
+                  </button>
+                )}
                 <button
                   className="btn-primary btn-lg"
                   onClick={() => connect('cloud')}
                   disabled={connecting !== null}
-                  title="Cloud tutor (Gemini Live) — use when the local machine is busy"
+                  title="Cloud tutor (Gemini Live) — bring your own key in Profile for unlimited use"
                 >
                   {connecting === 'cloud' ? 'Connecting…' : '☁️ Cloud'}
                 </button>

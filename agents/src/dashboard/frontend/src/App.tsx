@@ -1,5 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
 import { Button, FieldError, Input, Label, TextField, Typography } from '@heroui/react';
+import { useCallback, useEffect, useState } from 'react';
+// ─── Inline import to avoid circular deps ───
+import AppShell from './components/AppShell';
 import { apiFetch } from './lib/api';
 
 /**
@@ -64,7 +66,12 @@ function useAuth() {
       ? await apiFetch('/api/demo/claim', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ demoUserId: claimId, username, email, password }),
+          body: JSON.stringify({
+            demoUserId: claimId,
+            username,
+            email,
+            password,
+          }),
         })
       : await apiFetch('/api/signup', {
           method: 'POST',
@@ -107,16 +114,23 @@ function LoginScreen({
     const formData = new FormData(e.currentTarget);
     const username = String(formData.get('username') || '').trim();
     const password = String(formData.get('password') || '');
-    const error = await onLogin(username, password);
-    setSubmitting(false);
-    if (error) setErr(error);
+    try {
+      const error = await onLogin(username, password);
+      if (error) setErr(error);
+    } catch {
+      setErr('Could not connect. Check your connection and try again.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
     <div className="login-wrap">
       <div className="login-card">
         <Typography.Heading level={1}>LingLang</Typography.Heading>
-        <Typography.Paragraph style={{ color: "var(--muted)" }}>Sign in to continue</Typography.Paragraph>
+        <Typography.Paragraph style={{ color: 'var(--muted)' }}>
+          Learn a language by talking — no flashcards, no quizzes.
+        </Typography.Paragraph>
 
         <form onSubmit={submit} className="flex flex-col gap-4 mt-4">
           <TextField isRequired name="username" autoFocus>
@@ -170,20 +184,32 @@ function SignupScreen({
       return;
     }
     setSubmitting(true);
-    const error = await onSignup(username, email, password);
-    setSubmitting(false);
-    if (error) setErr(error);
+    try {
+      const error = await onSignup(username, email, password);
+      if (error) setErr(error);
+    } catch {
+      setErr('Could not connect. Check your connection and try again.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
     <div className="login-wrap">
       <div className="login-card">
         <Typography.Heading level={1}>LingLang</Typography.Heading>
-        <Typography.Paragraph style={{ color: "var(--muted)" }}>
+        <Typography.Paragraph style={{ color: 'var(--muted)' }}>
           {claiming
             ? 'Create your account to keep the conversation and vocabulary from your demo.'
-            : 'Create your account'}
+            : 'Learn a language by having real conversations — no flashcards, no quizzes.'}
         </Typography.Paragraph>
+        {!claiming && (
+          <ul className="auth-how">
+            <li>Talk to a tutor that adapts to you. Mistakes are welcome.</li>
+            <li>It notices the words that come easily and the ones you hesitate on.</li>
+            <li>Your vocabulary and progress build themselves as you talk.</li>
+          </ul>
+        )}
 
         <form onSubmit={submit} className="flex flex-col gap-4 mt-4">
           <TextField isRequired name="username" autoFocus>
@@ -256,12 +282,13 @@ export default function App() {
     return screen === 'login' ? (
       <LoginScreen onLogin={login} onSwitchToSignup={() => setScreen('signup')} />
     ) : (
-      <SignupScreen onSignup={signup} onSwitchToLogin={() => setScreen('login')} claiming={claiming} />
+      <SignupScreen
+        onSignup={signup}
+        onSwitchToLogin={() => setScreen('login')}
+        claiming={claiming}
+      />
     );
   }
 
   return <AppShell onLogout={logout} />;
 }
-
-// ─── Inline import to avoid circular deps ───
-import AppShell from './components/AppShell';

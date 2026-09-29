@@ -21,22 +21,25 @@
  * indicator), plus the TopBar pills (language/curriculum/streak) and the
  * goal chip.
  */
-
-import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  LiveKitRoom,
-  RoomAudioRenderer,
-  ConnectionStateToast,
-} from '@livekit/components-react';
+import { Avatar, Button, Chip, Popover, ScrollShadow } from '@heroui/react';
+import { ConnectionStateToast, LiveKitRoom, RoomAudioRenderer } from '@livekit/components-react';
 import '@livekit/components-styles';
-import { Avatar, Button, Chip, ScrollShadow } from '@heroui/react';
+import { AudioLines, Info, Mic } from 'lucide-react';
+import { type ReactElement, useEffect, useMemo, useRef, useState } from 'react';
 import TopBar from '../components/TopBar';
+import { PipecatVoice } from '../components/PipecatVoice';
 import VoiceControl, { type VoiceControlMode } from '../components/VoiceControl';
-import { useAppState, type ServiceMode } from '../state/AppState';
-import { useConversationStream, type ConversationTurn, type UserTurn, type AgentTurn } from '../hooks/useConversationStream';
-import { getChipClass, isNeutralChip, resolveWordId } from '../lib/wordChips';
+import {
+  type AgentTurn,
+  type ConversationTurn,
+  type UserTurn,
+  useConversationStream,
+} from '../hooks/useConversationStream';
 import { LANGUAGE_NAMES } from '../hooks/useOnboarding';
 import { apiFetch } from '../lib/api';
+import { requestMicrophone } from '../lib/microphone';
+import { getChipClass, isNeutralChip, resolveWordId } from '../lib/wordChips';
+import { type ServiceMode, useAppState } from '../state/AppState';
 
 interface VoiceTabProps {
   userId: string;
@@ -70,7 +73,9 @@ interface UserSummary {
 // 2026-06-25: server picks the room based on the authenticated user, so we
 // don't send roomName from the client any more. The response includes the
 // room name for logging/debugging.
-async function fetchToken(mode: ServiceMode): Promise<{ token: string; url: string; roomName: string }> {
+async function fetchToken(
+  mode: ServiceMode,
+): Promise<{ token: string; url: string; roomName: string; eventSessionId: string }> {
   const res = await apiFetch('/api/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -117,8 +122,14 @@ function LanguagePill({ lang, onClick }: { lang: string; onClick: () => void }) 
 
 function CurriculumPill({ title, onClick }: { title: string; onClick: () => void }) {
   return (
-    <Button variant="secondary" size="sm" className="rounded-full" onPress={onClick}>
-      {title || 'Curriculum'}
+    <Button
+      variant="secondary"
+      size="sm"
+      className="voice-curriculum-pill"
+      onPress={onClick}
+      aria-label={title || 'Curriculum'}
+    >
+      <span>{title || 'Curriculum'}</span>
     </Button>
   );
 }
@@ -126,17 +137,120 @@ function CurriculumPill({ title, onClick }: { title: string; onClick: () => void
 function StreakChip({ streak }: { streak: number | null }) {
   return (
     <Chip variant="soft" color="warning" title="Day streak">
-      🔥 {streak === null ? '—' : streak}
+      {streak === null || streak === 0 ? 'no streak yet' : `${streak}-day streak`}
     </Chip>
   );
 }
 
 function GoalChip({ text, wordsDue }: { text: string; wordsDue: number | null }) {
+  // "435 words due" read like a debt; reframe as an invitation (and handle
+  // the 0 case so it doesn't say "0 words due").
+  const count = wordsDue ?? 0;
+  const dueLabel =
+    count === 0
+      ? 'nothing to review — chat to learn new words'
+      : `${count} word${count === 1 ? '' : 's'} ready to review`;
   return (
-    <div className="mb-2.5 flex justify-center">
+    <div className="voice-goal mb-2.5 flex justify-center">
       <Chip variant="soft" color="success">
-        Goal: {text} · {wordsDue === null ? '0' : wordsDue} words due
+        Goal: {text} · {dueLabel}
       </Chip>
+    </div>
+  );
+}
+
+/**
+ * In-session mobile bar (2026-09-26).
+ *
+ * The user's complaint was that during a live conversation the transcript
+ * "gets little space due banners/footer": on a 360x640 phone the eyebrow +
+ * title, the pills row and the goal chip cost ~113px above the transcript
+ * (measured: scripts/probe-voice-mobile.mjs). Shrinking their fonts (the
+ * previous attempt) kept every band and its padding, so nothing was
+ * actually reclaimed.
+ *
+ * So while connected on a phone those three bands are removed from the
+ * layout entirely and replaced by this single 44px row, which keeps the
+ * same CONTEXT reachable:
+ *   - language pill → the language sheet (unchanged control),
+ *   - curriculum → the curriculum sheet (unchanged control),
+ *   - an info button → a popover with the streak, the active goal and the
+ *     review count that the hidden pills/chip used to show.
+ *
+ * Every control here is >=44px tall. Hidden on desktop (the wide layout has
+ * room for the full chrome) and pre-connect (the pills row is still there).
+ */
+function SessionBar({
+  lang,
+  unitTitle,
+  streak,
+  goalText,
+  wordsDue,
+  onLanguage,
+  onCurriculum,
+}: {
+  lang: string;
+  unitTitle: string;
+  streak: number | null;
+  goalText: string;
+  wordsDue: number | null;
+  onLanguage: () => void;
+  onCurriculum: () => void;
+}) {
+  const language = LANGUAGE_NAMES[lang] ?? lang;
+  const due = wordsDue ?? 0;
+  const dueLabel =
+    due === 0 ? 'Nothing to review yet' : `${due} word${due === 1 ? '' : 's'} ready to review`;
+  const streakLabel =
+    streak === null || streak === 0 ? 'No streak yet — talk today to start one' : `${streak}-day streak`;
+
+  return (
+    <div className="voice-session-bar">
+      <Button
+        variant="secondary"
+        size="sm"
+        className="voice-session-language rounded-full"
+        onPress={onLanguage}
+        aria-label={`Change language, currently ${language}`}
+      >
+        <span className="voice-pill-dot" />
+        <span className="mono">{lang.toUpperCase()}</span>
+      </Button>
+      <Button
+        variant="secondary"
+        size="sm"
+        className="voice-session-curriculum"
+        onPress={onCurriculum}
+        aria-label={`Curriculum: ${unitTitle || 'Curriculum'}`}
+      >
+        <span>{unitTitle || 'Curriculum'}</span>
+      </Button>
+      <Popover>
+        <Popover.Trigger>
+          <Button variant="ghost" size="sm" className="voice-session-info" aria-label="Session details">
+            <Info size={18} aria-hidden="true" />
+          </Button>
+        </Popover.Trigger>
+        <Popover.Content className="voice-session-context" placement="bottom end">
+          <Popover.Dialog>
+            <Popover.Heading>Session details</Popover.Heading>
+            <dl className="voice-session-context-list">
+              <div>
+                <dt>Goal</dt>
+                <dd>{goalText}</dd>
+              </div>
+              <div>
+                <dt>Streak</dt>
+                <dd>{streakLabel}</dd>
+              </div>
+              <div>
+                <dt>Review</dt>
+                <dd>{dueLabel}</dd>
+              </div>
+            </dl>
+          </Popover.Dialog>
+        </Popover.Content>
+      </Popover>
     </div>
   );
 }
@@ -184,7 +298,7 @@ function barHeights(seed: string, count: number): number[] {
   const out: number[] = [];
   for (let i = 0; i < count; i++) {
     h = (h * 1103515245 + 12345) >>> 0;
-    out.push(0.25 + (h % 1000) / 1000 * 0.75); // 0.25..1.0
+    out.push(0.25 + ((h % 1000) / 1000) * 0.75); // 0.25..1.0
   }
   return out;
 }
@@ -216,6 +330,41 @@ function formatHeldMs(ms: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+function formatUserTextWithChips(
+  turn: UserTurn,
+  onWordTap: (wordId: string) => void,
+): ReactElement {
+  if (turn.lexemes.length === 0) return <span>{turn.text}</span>;
+
+  const source = turn.text;
+  const lower = source.toLocaleLowerCase();
+  const parts: ReactElement[] = [];
+  let cursor = 0;
+
+  for (const [i, lex] of turn.lexemes.entries()) {
+    const form = lex.form?.trim();
+    if (!form) continue;
+    const start = lower.indexOf(form.toLocaleLowerCase(), cursor);
+    if (start < 0) continue;
+    if (start > cursor) parts.push(<span key={`text-${i}`}>{source.slice(cursor, start)}</span>);
+    const chipClass = getChipClass(lex, turn.srsUpdates);
+    const neutral = isNeutralChip(chipClass);
+    parts.push(
+      <span
+        key={`word-${i}`}
+        className={`voice-word ${chipClass}${neutral ? '' : ' voice-word-tappable'}`}
+        onClick={neutral ? undefined : () => onWordTap(resolveWordId(lex, turn.srsUpdates))}
+      >
+        {source.slice(start, start + form.length)}
+      </span>,
+    );
+    cursor = start + form.length;
+  }
+
+  if (cursor < source.length) parts.push(<span key="text-tail">{source.slice(cursor)}</span>);
+  return <>{parts.length > 0 ? parts : <span>{source}</span>}</>;
+}
+
 function UserBubble({
   turn,
   onWordTap,
@@ -236,7 +385,28 @@ function UserBubble({
   const ticking = useElapsed(turn.ts, !turn.hasAnalysis);
   const elapsed = heldMs !== undefined ? formatHeldMs(heldMs) : ticking;
 
-  if (!turn.hasAnalysis) {
+  if (turn.interim) {
+    // Live partial (realtime/Gemini only): show the words as they land
+    // instead of a waveform, so the learner sees themselves being
+    // transcribed in real time. Replaced in place by the final bubble.
+    return (
+      <div className="voice-bubble-row voice-bubble-row-user">
+        <div className="voice-bubble voice-bubble-user voice-bubble-interim">
+          <span>{turn.text}</span>
+          <span className="voice-interim-caret" aria-hidden="true" />
+        </div>
+        <div className="voice-bubble-caption">listening…</div>
+      </div>
+    );
+  }
+
+  // 2026-09-09: the waveform used to stand in for the words until
+  // processor.analysis landed, which is seconds later — so the learner's own
+  // sentence was hidden exactly when they wanted to re-read it. Show the text
+  // as soon as we have it; the waveform is now only for a turn that genuinely
+  // has no text yet, and the colored word chips still light up when the
+  // analysis arrives.
+  if (!turn.hasAnalysis && !turn.text) {
     // Pending: audio-waveform bubble with shimmer + duration + caption.
     // Same list position/id as the eventual text bubble below — this is
     // what makes the later swap a morph-in-place, not a new bubble.
@@ -259,27 +429,13 @@ function UserBubble({
     );
   }
 
-  // Resolved: same position, now rendered as a tappable colored-word bubble.
+  // Resolved: keep the original transcript stable and decorate matching
+  // target-language words in place. Analysis is allowed to add color, never
+  // to replace the sentence with a lossy lexeme-only list.
   return (
     <div className="voice-bubble-row voice-bubble-row-user">
       <div className="voice-bubble voice-bubble-user">
-        {turn.lexemes.length > 0 ? (
-          turn.lexemes.map((lex, i) => {
-            const chipClass = getChipClass(lex, turn.srsUpdates);
-            const neutral = isNeutralChip(chipClass);
-            return (
-              <span
-                key={i}
-                className={`voice-word ${chipClass}${neutral ? '' : ' voice-word-tappable'}`}
-                onClick={neutral ? undefined : () => onWordTap(resolveWordId(lex, turn.srsUpdates))}
-              >
-                {lex.form}{' '}
-              </span>
-            );
-          })
-        ) : (
-          <span>{turn.text}</span>
-        )}
+        {formatUserTextWithChips(turn, onWordTap)}
       </div>
     </div>
   );
@@ -305,14 +461,50 @@ function Transcript({
   // component reads).
   const showTyping = last?.kind === 'user';
 
+  // Stick-to-bottom: scroll whenever content height changes, not just when
+  // a turn is added — streaming text and late webfont/layout reflow grow
+  // the transcript without changing turns.length, which left the view
+  // stranded mid-scroll (last message half-hidden under the fade mask).
+  // Skipped when the user has scrolled up to reread.
+  const pinnedToBottom = useRef(true);
   useEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      pinnedToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, []);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const stick = () => {
+      if (pinnedToBottom.current) el.scrollTop = el.scrollHeight;
+    };
+    stick();
+    const ro = new ResizeObserver(stick);
+    ro.observe(el);
+    // Also observe content growth: the transcript's first child grows as
+    // bubbles reflow; observing the container alone misses height changes
+    // driven by content when the container itself is clipped to flex space.
+    if (el.firstElementChild) ro.observe(el.firstElementChild);
+    return () => ro.disconnect();
   }, [turns.length, showTyping]);
 
   return (
     <ScrollShadow className="voice-transcript" ref={scrollRef}>
       {turns.length === 0 && !showTyping && (
-        <div className="voice-transcript-empty">Connect and start talking — your conversation appears here.</div>
+        <div className="voice-transcript-empty">
+          <span className="conversation-empty-mark">
+            <AudioLines size={36} aria-hidden="true" />
+          </span>
+          <h2>
+            A little conversation.
+            <br />A little more confidence.
+          </h2>
+          <p>Your next conversation starts here.</p>
+        </div>
       )}
       {turns.map((turn) =>
         turn.kind === 'agent' ? (
@@ -322,7 +514,9 @@ function Transcript({
             key={turn.id}
             turn={turn}
             onWordTap={onWordTap}
-            heldMs={pttHoldForTurnId && pttHoldForTurnId.id === turn.id ? pttHoldForTurnId.ms : undefined}
+            heldMs={
+              pttHoldForTurnId && pttHoldForTurnId.id === turn.id ? pttHoldForTurnId.ms : undefined
+            }
           />
         ),
       )}
@@ -331,9 +525,34 @@ function Transcript({
   );
 }
 
-export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
+export default function VoiceTab(props: VoiceTabProps) {
+  const [transport, setTransport] = useState<'loading' | 'livekit' | 'smallwebrtc' | 'error'>('loading');
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch('/api/voice/config').then(async response => {
+      // Older LiveKit deployments do not expose transport discovery.
+      if (response.status === 404) { if (!cancelled) setTransport('livekit'); return; }
+      if (!response.ok) throw new Error('Voice configuration unavailable');
+      const config = await response.json();
+      if (!['livekit', 'smallwebrtc'].includes(config.transport)) throw new Error('Unknown transport');
+      if (!cancelled) setTransport(config.transport);
+    }).catch(() => { if (!cancelled) setTransport('error'); });
+    return () => { cancelled = true; };
+  }, []);
+  if (transport === 'loading') return <p role="status" className="p-4">Loading voice settings…</p>;
+  if (transport === 'error') return <p role="alert" className="p-4">Voice settings unavailable. Reload to retry.</p>;
+  if (transport === 'smallwebrtc') return <PipecatVoice key={`${props.userId}:${props.targetLang}`} language={props.targetLang} />;
+  return <LiveKitVoiceTab {...props} />;
+}
+
+function LiveKitVoiceTab({ userId, targetLang }: VoiceTabProps) {
   const { openSheet, serviceMode, activeTab, contentVersion } = useAppState();
-  const { turns, clear: clearConversation } = useConversationStream();
+  const [eventSessionId, setEventSessionId] = useState<string | null>(null);
+  const {
+    turns,
+    clear: clearConversation,
+    status: streamStatus,
+  } = useConversationStream(eventSessionId);
 
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
@@ -425,7 +644,9 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
             return;
           }
         }
-      } catch { /* fall through to the curriculum-unit fallback below */ }
+      } catch {
+        /* fall through to the curriculum-unit fallback below */
+      }
 
       try {
         const res = await apiFetch(`/api/curriculum?language=${targetLang}`);
@@ -435,7 +656,9 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
           const first = units.slice().sort((a, b) => a.order - b.order)[0];
           setUnitTitle(first.title);
         }
-      } catch { /* non-fatal */ }
+      } catch {
+        /* non-fatal */
+      }
     })();
     return () => {
       cancelled = true;
@@ -443,6 +666,8 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
   }, [targetLang, userId, activeTab, contentVersion]);
 
   // Streak chip + word-due-count — Task 3's summary endpoint.
+  // Re-fetch on tab re-entry / content bump so "ready to review" doesn't
+  // go stale after a session moves words' state.
   useEffect(() => {
     if (!userId) return;
     (async () => {
@@ -450,9 +675,11 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
         const res = await apiFetch(`/api/users/${userId}/summary`);
         if (!res.ok) return;
         setSummary(await res.json());
-      } catch { /* non-fatal */ }
+      } catch {
+        /* non-fatal */
+      }
     })();
-  }, [userId]);
+  }, [userId, activeTab, contentVersion]);
 
   // Goal chip text — existing /api/users/:userId response's goals[].
   useEffect(() => {
@@ -463,9 +690,11 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
         if (!res.ok) return;
         const data = await res.json();
         setGoals((data.goals ?? []).filter((g: ActiveGoal) => g.status === 'active'));
-      } catch { /* non-fatal */ }
+      } catch {
+        /* non-fatal */
+      }
     })();
-  }, [userId]);
+  }, [userId, activeTab, contentVersion]);
 
   // `connecting` guards against a double-tap firing this twice before the
   // button disappears — each call hits /api/token, which dispatches an
@@ -476,6 +705,16 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
     if (connecting || connected) return;
     setConnecting(true);
     setError(null);
+    // Ask for the microphone BEFORE spending a room token. Without this the
+    // room still connects when the mic is blocked, plays the tutor's greeting,
+    // and then silently ignores the learner — no error, no transcript, which
+    // reads as "the app is broken". See lib/microphone.ts for the failure modes.
+    const micProblem = await requestMicrophone();
+    if (micProblem) {
+      setError(micProblem);
+      setConnecting(false);
+      return;
+    }
     // Fresh session, fresh transcript — otherwise turns from a previous
     // connection (possibly a different target language, since switching
     // languages only takes effect on the next connect) stay on screen
@@ -483,9 +722,10 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
     // was never reset on reconnect.
     clearConversation();
     try {
-      const { token: t, url: u, roomName: rn } = await fetchToken(serviceMode);
+      const { token: t, url: u, roomName: rn, eventSessionId: sid } = await fetchToken(serviceMode);
       setToken(t);
       setUrl(u);
+      setEventSessionId(sid);
       console.log(`[VoiceTab] Connecting to room: ${rn}`);
       setConnected(true);
     } catch (e) {
@@ -497,6 +737,7 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
 
   const disconnect = (reason?: string) => {
     setConnected(false);
+    setEventSessionId(null);
     setToken('');
     setUrl('');
     if (reason) setError(reason);
@@ -507,21 +748,56 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
 
   const handleWordTap = (wordId: string) => openSheet({ kind: 'wordDetail', wordId });
 
+  // Mobile: once connected, the static bands (eyebrow+title, pills row, goal
+  // chip) are dead weight — the user should be talking, not reading chrome.
+  // 2026-09-26: CSS now removes them from the layout on phones (they were
+  // previously only shrunk, which reclaimed nothing) and shows `SessionBar`
+  // in their place. The `in-session` class is driven by `connected` state
+  // rather than unmounting, so the pills/goal chip come back with the same
+  // state on disconnect and nothing re-fetches.
   return (
-    <div className="voice-tab">
+    <div className={connected ? 'voice-tab in-session' : 'voice-tab'}>
+      <div className="conversation-heading">
+        <div>
+          <span className="page-eyebrow">JUST SPEAK</span>
+          <h1>Conversation</h1>
+        </div>
+        <span
+          className={connected ? 'conversation-connection connected' : 'conversation-connection'}
+        >
+          <span />
+          {connected ? 'Connected' : 'Ready when you are'}
+        </span>
+      </div>
       <TopBar
         left={<LanguagePill lang={targetLang} onClick={() => openSheet({ kind: 'language' })} />}
-        center={<CurriculumPill title={unitTitle} onClick={() => openSheet({ kind: 'curriculum' })} />}
+        center={
+          <CurriculumPill title={unitTitle} onClick={() => openSheet({ kind: 'curriculum' })} />
+        }
         right={<StreakChip streak={summary?.streak ?? null} />}
       />
       <GoalChip text={goalText} wordsDue={summary?.wordsDue ?? null} />
+
+      {/* Mobile in-session replacement for the three bands above — CSS shows
+          this only when connected on a phone (see app.css's in-session
+          block), so desktop and the pre-connect screen are unchanged. */}
+      <SessionBar
+        lang={targetLang}
+        unitTitle={unitTitle}
+        streak={summary?.streak ?? null}
+        goalText={goalText}
+        wordsDue={summary?.wordsDue ?? null}
+        onLanguage={() => openSheet({ kind: 'language' })}
+        onCurriculum={() => openSheet({ kind: 'curriculum' })}
+      />
 
       <Transcript turns={turns} onWordTap={handleWordTap} pttHoldForTurnId={pttHoldFor} />
 
       {!connected ? (
         <div className="voice-controls">
           <Button variant="primary" isPending={connecting} onPress={connect}>
-            {connecting ? 'Connecting…' : 'Connect'}
+            <Mic size={18} />
+            {connecting ? 'Connecting…' : 'Start talking'}
           </Button>
           {error && <div className="error-msg">{error}</div>}
         </div>
@@ -539,7 +815,19 @@ export default function VoiceTab({ userId, targetLang }: VoiceTabProps) {
         // PTT mode and gets superseded by VoiceControl's effect (which fires
         // later, once `useConnectionState` flips to `connected`) in hands-free
         // mode. See VoiceControl.tsx and task-5-report.md for the full trace.
-        <LiveKitRoom token={token} serverUrl={url} connect={true} onDisconnected={() => disconnect()}>
+        <LiveKitRoom
+          token={token}
+          serverUrl={url}
+          connect={true}
+          onDisconnected={() => disconnect()}
+        >
+          {(streamStatus === 'reconnecting' || streamStatus === 'error') && (
+            <div className="error-msg conversation-stream-status" role="status">
+              {streamStatus === 'reconnecting'
+                ? 'Conversation updates disconnected. Reconnecting…'
+                : 'Conversation updates are unavailable. Disconnect and reconnect to restore the transcript.'}
+            </div>
+          )}
           <RoomAudioRenderer />
           <ConnectionStateToast />
           <VoiceControl

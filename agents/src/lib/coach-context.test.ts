@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import { CoachContext, createCoachContextTool } from './coach-context.js';
+const a = new CoachContext(), b = new CoachContext();
+assert.equal(a.read().guidance, '');
+a.update('Use papaya', 1000);
+a.update('Use papaya', 1100);
+assert.equal(a.read(1200).version, 1);
+assert.equal(a.read(1200).ageMs, 200);
+assert.equal(b.read().guidance, '', 'coaching is session-isolated');
+let reads = 0;
+const tool = createCoachContextTool(a, () => reads++);
+assert.equal(reads, 0, 'publishing guidance must not trigger delivery/speech');
+const first = await tool.execute({}, {} as any);
+assert.equal(first.guidance, 'Use papaya');
+a.update('Use kumquat');
+assert.equal((await tool.execute({}, {} as any)).guidance, 'Use kumquat', 'tool sees newest cache, not captured old value');
+assert.equal(reads, 2);
+console.log('coach cache/tool: 8 assertions passed');

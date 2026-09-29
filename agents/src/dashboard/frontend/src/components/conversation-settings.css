@@ -1,0 +1,121 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+.conversation-settings {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+  width: 100%;
+}
+.conversation-settings .settings-card {
+  padding: 1.25rem;
+  border: 1px solid var(--border, #414141);
+  border-radius: 1rem;
+  background: var(--surface, #242424);
+  min-width: 0;
+}
+.conversation-settings h2 {
+  font-size: 1.1rem;
+  font-weight: 650;
+  margin: 0;
+}
+.conversation-settings h3 {
+  font-weight: 600;
+  margin: 1rem 0 0.5rem;
+}
+.conversation-settings p {
+  margin: 0.65rem 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.conversation-settings label {
+  display: grid;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+  margin: 0.7rem 0;
+  min-width: 0;
+}
+.conversation-settings select,
+.conversation-settings textarea {
+  background: var(--background, #191919);
+  border: 1px solid var(--border, #515151);
+  border-radius: 0.5rem;
+  padding: 0.65rem;
+  color: inherit;
+  width: 100%;
+  min-height: 44px;
+  font: inherit;
+}
+.conversation-settings textarea {
+  resize: vertical;
+}
+.conversation-settings fieldset {
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+.conversation-settings :focus-visible {
+  outline: 2px solid var(--accent, #f08d64);
+  outline-offset: 3px;
+}
+.conversation-settings :disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.conversation-settings summary {
+  cursor: pointer;
+  min-height: 44px;
+  padding: 0.5rem 0;
+}
+.conversation-settings summary h2 {
+  display: inline;
+  margin-right: 1rem;
+}
+.conversation-settings summary span,
+.conversation-settings .settings-meta {
+  color: var(--muted, #626774);
+  font-size: 0.8rem;
+}
+.conversation-settings .settings-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.6rem;
+}
+.conversation-settings .settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.7rem;
+  margin: 0.8rem 0;
+}
+.conversation-settings button {
+  min-height: 44px;
+  padding: 0.6rem 0.8rem;
+  white-space: normal;
+  text-align: left;
+}
+.conversation-settings .settings-preview {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 24rem;
+  overflow: auto;
+  padding: 1rem;
+  border: 1px solid var(--border, #414141);
+  border-radius: 0.5rem;
+  font-size: 0.8rem;
+}
+.conversation-settings .settings-trial,
+.conversation-settings article {
+  padding: 0.8rem;
+  margin: 0.6rem 0;
+  border-left: 2px solid var(--accent, #f08d64);
+  background: var(--background, #191919);
+}
+.conversation-settings .settings-transcript {
+  max-height: 32rem;
+  overflow: auto;
+}
+.conversation-settings .settings-notice {
+  padding: 0.8rem;
+  border: 1px solid var(--accent, #f08d64);
+  border-radius: 0.5rem;
+}

@@ -10,6 +10,7 @@
  * per-unit rates (GOOGLE_REALTIME_MICROS_PER_SECOND,
  * GOOGLE_GRADE_MICROS_PER_CALL) against actual Gemini pricing as needed.
  */
+import { assertProvidersEditable, providerPolicy } from './provider-policy.js';
 import { eq, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { users } from '../db/schema.js';
@@ -40,7 +41,7 @@ export async function getGoogleKeyPlan(userId: string): Promise<GoogleKeyPlan> {
   const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
   if (!user) throw new Error(`getGoogleKeyPlan: user ${userId} not found`);
 
-  if (user.googleApiKeyEncrypted) {
+  if (providerPolicy() === 'user' && user.googleApiKeyEncrypted) {
     return {
       apiKey: decryptSecret(user.googleApiKeyEncrypted),
       useShared: false,
@@ -79,9 +80,11 @@ export async function recordGoogleUsage(userId: string, micros: number): Promise
 }
 
 export async function setGoogleApiKey(userId: string, apiKey: string): Promise<void> {
+  assertProvidersEditable();
   await db.update(users).set({ googleApiKeyEncrypted: encryptSecret(apiKey) }).where(eq(users.id, userId));
 }
 
 export async function clearGoogleApiKey(userId: string): Promise<void> {
+  assertProvidersEditable();
   await db.update(users).set({ googleApiKeyEncrypted: null }).where(eq(users.id, userId));
 }

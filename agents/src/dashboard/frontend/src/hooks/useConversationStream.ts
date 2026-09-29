@@ -73,8 +73,7 @@
  * at all, so this ordering has not been observed — but it is not
  * structurally impossible, and no test in this file exercises it.
  */
-
-import { useCallback, useEffect, useReducer } from 'react';
+import { useCallback, useEffect, useReducer, useState } from 'react';
 import { apiEventSource } from '../lib/api';
 
 // ─── Types ───
@@ -84,9 +83,14 @@ export interface LexemeChip {
   form: string;
   pos: string;
   performance:
-    | 'correct' | 'correct_instant' | 'correct_struggled'
-    | 'wrong_use' | 'recall_fail' | 'native_substitution'
-    | 'correct_use' | 'scaffolded'; // legacy labels, still in old events
+    | 'correct'
+    | 'correct_instant'
+    | 'correct_struggled'
+    | 'wrong_use'
+    | 'recall_fail'
+    | 'native_substitution'
+    | 'correct_use'
+    | 'scaffolded'; // legacy labels, still in old events
   grammarRule?: { rule: string; example: string };
   pronunciation?: { stress: string; notes?: string };
 }
@@ -107,6 +111,10 @@ export interface UserTurn {
   srsUpdates: SrsUpdate[];
   hasAnalysis: boolean;
   ts: number;
+  /** True while this bubble is still being spoken — rendered dimmed/italic
+   *  and replaced in place by the finalized transcript on the same id.
+   *  Only realtime (Gemini) sessions emit partials. */
+  interim?: boolean;
 }
 
 export interface AgentTurn {
@@ -167,6 +175,48 @@ function numTurnSeq(data: any): number | null {
 }
 
 /**
+ * Stable per-message id from the backend, when the transport provides one.
+ * Realtime (S2S) sessions do: one generation can emit several user utterances
+ * and several assistant items that all share a turnSeq, so keying on turnSeq
+ * alone made them overwrite each other. The prefix keeps these ids from
+ * colliding with the turnSeq-derived ones. Cascaded (STT/LLM/TTS) sessions
+ * send null here and keep the turnSeq path untouched.
+ */
+function itemIdKey(data: any, prefix: 'user' | 'agent'): string | null {
+  const raw = data?.itemId;
+  return typeof raw === 'string' && raw.length > 0 ? `${prefix}-item-${raw}` : null;
+}
+
+function itemIdBase(id: string): string {
+  return id.replace(/#\d+$/, '');
+}
+
+function findInterimUserIndex(turns: ConversationTurn[], id: string): number {
+  const base = itemIdBase(id.replace(/^user-item-/, ''));
+  return turns.findIndex(
+    (turn) =>
+      turn.kind === 'user' &&
+      turn.interim &&
+      itemIdBase(turn.id.replace(/^user-item-/, '')) === base,
+  );
+}
+
+/**
+ * ConversationItemAdded can expose an internal tool result as an assistant
+ * item before the actual spoken answer. It is not learner-facing content and
+ * in realtime sessions it arrives with a different itemId, so itemId-keying
+ * alone would render it as a second bubble. Keep this narrow: only remove a
+ * leading `tool_name Result:` block, never rewrite normal tutor prose.
+ */
+function cleanAgentText(raw: unknown): string {
+  let text = String(raw ?? '')
+    .replace(/^thought\n/i, '')
+    .trim();
+  text = text.replace(/^[A-Za-z][A-Za-z0-9_-]*\s+(?:Результат|Result):[\s\S]*?\n\s*\n/i, '');
+  return text.trim();
+}
+
+/**
  * Pure merge function: applies one raw SSE event to the conversation state
  * and returns the new state. No DOM, no EventSource, no randomness — fully
  * unit-testable by feeding it a sequence of fake events.
@@ -175,14 +225,90 @@ export function applyStreamEvent(state: ConversationState, evt: RawStreamEvent):
   const { type, data, ts } = evt;
 
   switch (type) {
+    case 'session.start': {
+      // A worker restart is a hard transcript boundary. Do not let late
+      // events from the previous worker populate the new conversation.
+      return initialConversationState;
+    }
+
+    case 'user.transcript.partial': {
+      // In-flight learner speech (realtime only). Upsert on the stable
+      // per-generation itemId so the bubble grows as they talk; the final
+      // `user.transcript` on the same id replaces it in place.
+      const text = typeof data?.text === 'string' ? data.text.trim() : '';
+      if (!text) return state;
+      const itemId = itemIdKey(data, 'user');
+      // No stable key → skip rather than churn fallback ids: the final
+      // transcript will create the bubble anyway.
+      if (itemId === null) return state;
+
+      const idx = findTurnIndex(state.turns, itemId);
+      const interimIdx = idx >= 0 ? idx : findInterimUserIndex(state.turns, itemId);
+      if (interimIdx >= 0) {
+        const prev = state.turns[interimIdx] as UserTurn;
+        // A late partial must never overwrite a finalized turn.
+        if (!prev.interim) return state;
+        const turns = state.turns.slice();
+        turns[interimIdx] = { ...prev, text };
+        return { ...state, turns };
+      }
+
+      const turn: UserTurn = {
+        kind: 'user',
+        id: itemId,
+        turnSeq: numTurnSeq(data),
+        text,
+        lexemes: [],
+        srsUpdates: [],
+        hasAnalysis: false,
+        ts,
+        interim: true,
+      };
+      // Deliberately NOT queued for processor.analysis — the final does that.
+      return { ...state, turns: [...state.turns, turn] };
+    }
+
+    case 'user.transcript.rejected': {
+      // The backend may reject a phantom only after its partial was shown.
+      // Remove that provisional bubble, never finalized learner history.
+      const id = itemIdKey(data, 'user');
+      if (id === null) return state;
+      const turn = state.turns.find((t) => t.id === id);
+      if (turn?.kind !== 'user' || !turn.interim) return state;
+      return { ...state, turns: state.turns.filter((t) => t.id !== id) };
+    }
+
     case 'user.transcript': {
       if (!data?.text) return state;
       const turnSeq = numTurnSeq(data);
-      const id = turnSeq !== null ? `user-${turnSeq}` : `user-fallback-${state.nextFallbackId}`;
+      const itemId = itemIdKey(data, 'user');
+      const usedFallback = itemId === null && turnSeq === null;
+      const id =
+        itemId ?? (turnSeq !== null ? `user-${turnSeq}` : `user-fallback-${state.nextFallbackId}`);
 
       // Guard against duplicate creation — e.g. VAD EOU and STT FINAL both
-      // firing for the same turn with the same turnSeq.
-      if (findTurnIndex(state.turns, id) >= 0) return state;
+      // firing for the same turn with the same turnSeq. Exception: an
+      // interim bubble from `user.transcript.partial` is finalized in place.
+      const exactIdx = findTurnIndex(state.turns, id);
+      const existingIdx =
+        exactIdx >= 0 ? exactIdx : itemId !== null ? findInterimUserIndex(state.turns, id) : -1;
+      if (existingIdx >= 0) {
+        const existing = state.turns[existingIdx] as UserTurn;
+        if (existing.kind !== 'user' || !existing.interim) return state;
+        const turns = state.turns.slice();
+        turns[existingIdx] = {
+          ...existing,
+          text: data.text,
+          turnSeq,
+          interim: false,
+          hasAnalysis: false,
+        };
+        return {
+          ...state,
+          turns,
+          pendingUserQueue: [...state.pendingUserQueue, existing.id],
+        };
+      }
 
       const turn: UserTurn = {
         kind: 'user',
@@ -199,7 +325,7 @@ export function applyStreamEvent(state: ConversationState, evt: RawStreamEvent):
         ...state,
         turns: [...state.turns, turn],
         pendingUserQueue: [...state.pendingUserQueue, id],
-        nextFallbackId: turnSeq !== null ? state.nextFallbackId : state.nextFallbackId + 1,
+        nextFallbackId: usedFallback ? state.nextFallbackId + 1 : state.nextFallbackId,
       };
     }
 
@@ -208,8 +334,9 @@ export function applyStreamEvent(state: ConversationState, evt: RawStreamEvent):
       const lexemes: LexemeChip[] = data?.lexemes ?? [];
       const srsUpdates: SrsUpdate[] = data?.srsUpdates ?? [];
 
-      let targetId: string | null = null;
-      if (turnSeq !== null) {
+      let targetId: string | null = itemIdKey(data, 'user');
+      if (targetId !== null && findTurnIndex(state.turns, targetId) < 0) targetId = null;
+      if (targetId === null && turnSeq !== null) {
         const candidate = `user-${turnSeq}`;
         if (findTurnIndex(state.turns, candidate) >= 0) targetId = candidate;
       }
@@ -239,9 +366,10 @@ export function applyStreamEvent(state: ConversationState, evt: RawStreamEvent):
 
     case 'llm.token': {
       const turnSeq = numTurnSeq(data);
+      const itemId = itemIdKey(data, 'agent');
 
       if (data?.isEnd) {
-        const id = turnSeq !== null ? `agent-${turnSeq}` : state.streamingAgentId;
+        const id = itemId ?? (turnSeq !== null ? `agent-${turnSeq}` : state.streamingAgentId);
         if (!id) return { ...state, streamingAgentId: null };
         const idx = findTurnIndex(state.turns, id);
         if (idx < 0) return { ...state, streamingAgentId: null };
@@ -257,7 +385,11 @@ export function applyStreamEvent(state: ConversationState, evt: RawStreamEvent):
       }
 
       if (!data?.text) return state;
-      const id = turnSeq !== null ? `agent-${turnSeq}` : (state.streamingAgentId ?? `agent-fallback-${state.nextFallbackId}`);
+      const id =
+        itemId ??
+        (turnSeq !== null
+          ? `agent-${turnSeq}`
+          : (state.streamingAgentId ?? `agent-fallback-${state.nextFallbackId}`));
       const idx = findTurnIndex(state.turns, id);
 
       if (idx >= 0) {
@@ -273,21 +405,38 @@ export function applyStreamEvent(state: ConversationState, evt: RawStreamEvent):
         turns: [...state.turns, turn],
         streamingAgentId: id,
         lastAgentId: id,
-        nextFallbackId: turnSeq !== null ? state.nextFallbackId : state.nextFallbackId + 1,
+        nextFallbackId:
+          itemId !== null || turnSeq !== null ? state.nextFallbackId : state.nextFallbackId + 1,
       };
     }
 
     case 'agent.reply': {
       if (!data?.text) return state;
-      const text = String(data.text).replace(/^thought\n/i, '').trim();
+      const text = cleanAgentText(data.text);
       if (!text) return state;
 
       const turnSeq = numTurnSeq(data);
-      // Primary path: turnSeq-derived id, stable across isEnd. Fallback
-      // path (no turnSeq): prefer the currently-streaming turn if there is
-      // one, else the last-known agent turn (which survives isEnd) — this
-      // mirrors the turnSeq fix for events that predate turnSeq.
-      const id = turnSeq !== null ? `agent-${turnSeq}` : (state.streamingAgentId ?? state.lastAgentId);
+      const itemId = itemIdKey(data, 'agent');
+      // Primary path: itemId (realtime) or turnSeq-derived id, both stable
+      // across isEnd. Fallback path (neither): prefer the currently-streaming
+      // turn if there is one, else the last-known agent turn (which survives
+      // isEnd) — this mirrors the turnSeq fix for events that predate turnSeq.
+      const id =
+        itemId ??
+        (turnSeq !== null ? `agent-${turnSeq}` : (state.streamingAgentId ?? state.lastAgentId));
+
+      // Gemini may surface the same completed answer twice around a tool call,
+      // with different response/item ids. Same turn + same visible text is
+      // one conversational bubble, not two assistant turns.
+      if (
+        turnSeq !== null &&
+        state.turns.some(
+          (turn) =>
+            turn.kind === 'agent' && turn.turnSeq === turnSeq && cleanAgentText(turn.text) === text,
+        )
+      ) {
+        return state;
+      }
 
       if (id) {
         const idx = findTurnIndex(state.turns, id);
@@ -316,7 +465,14 @@ export function applyStreamEvent(state: ConversationState, evt: RawStreamEvent):
       // No correlation available at all (no turnSeq, no active/last stream)
       // — last-resort append, matching the old code's behavior in that case.
       const fallbackId = `agent-fallback-${state.nextFallbackId}`;
-      const turn: AgentTurn = { kind: 'agent', id: fallbackId, turnSeq: null, text, finalized: true, ts };
+      const turn: AgentTurn = {
+        kind: 'agent',
+        id: fallbackId,
+        turnSeq: null,
+        text,
+        finalized: true,
+        ts,
+      };
       return {
         ...state,
         turns: [...state.turns, turn],
@@ -332,18 +488,38 @@ export function applyStreamEvent(state: ConversationState, evt: RawStreamEvent):
 
 type ConversationAction = { kind: 'event'; evt: RawStreamEvent } | { kind: 'clear' };
 
-function conversationReducer(state: ConversationState, action: ConversationAction): ConversationState {
+function conversationReducer(
+  state: ConversationState,
+  action: ConversationAction,
+): ConversationState {
   if (action.kind === 'clear') return initialConversationState;
   return applyStreamEvent(state, action.evt);
 }
 
 // ─── Hook ───
 
-export function useConversationStream() {
+export type ConversationStreamStatus =
+  | 'idle'
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting'
+  | 'error';
+
+export function useConversationStream(sessionId: string | null = null) {
   const [state, dispatch] = useReducer(conversationReducer, initialConversationState);
+  const [status, setStatus] = useState<ConversationStreamStatus>('idle');
 
   useEffect(() => {
-    const es = apiEventSource('/api/events');
+    if (!sessionId) {
+      setStatus('idle');
+      return;
+    }
+
+    const es = apiEventSource(`/api/events?sessionId=${encodeURIComponent(sessionId)}`);
+    setStatus('connecting');
+    es.onopen = () => setStatus('connected');
+    es.onerror = () =>
+      setStatus(es.readyState === EventSource.CONNECTING ? 'reconnecting' : 'error');
     es.onmessage = (e) => {
       try {
         const evt = JSON.parse(e.data) as RawStreamEvent;
@@ -352,10 +528,13 @@ export function useConversationStream() {
         // malformed SSE payload — ignore, matches prior behavior
       }
     };
-    return () => es.close();
-  }, []);
+    return () => {
+      es.close();
+      setStatus('idle');
+    };
+  }, [sessionId]);
 
   const clear = useCallback(() => dispatch({ kind: 'clear' }), []);
 
-  return { turns: state.turns, clear };
+  return { turns: state.turns, clear, status };
 }

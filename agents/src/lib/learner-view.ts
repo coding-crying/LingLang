@@ -196,6 +196,12 @@ async function buildLearnerView(userId: string, lang: string): Promise<LearnerVi
     db.query.userVocabulary.findMany({
       where: and(
         eq(userVocabulary.userId, userId),
+        // Language filtered in SQL. Without it the 10 slots are filled by
+        // whichever language has the highest substitution counts — for a
+        // multi-language learner that is usually an older language, and the
+        // JS filter below then drops them all, leaving no demand words at
+        // all. Same shape of bug as getDueReviewsQuery had.
+        inSessionLanguage,
         lt(userVocabulary.state, 2),
         gt(userVocabulary.nativeSubstitutionCount, 0),
       ),

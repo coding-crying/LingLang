@@ -680,6 +680,15 @@ export interface IngestOptions {
   kind: ContentKind;
   title: string;
   ref: string;
+  /**
+   * Optional caller-supplied timing for sources whose text is already
+   * timestamped off-machine (e.g. an offline ASR pass over an audio lesson).
+   * When present it takes precedence over extractTimedSegments/extractText and
+   * is chunked by segmentTimedText, so chunks carry real startSec/endSec and
+   * time-range titles instead of "Untitled (part N)". Purely additive — every
+   * existing caller omits it and keeps the previous behaviour.
+   */
+  timedSegments?: TimedSegment[];
 }
 
 /**
@@ -712,11 +721,22 @@ export async function ingestSource(opts: IngestOptions): Promise<{ chunkCount: n
     // than throwing) so a parsing edge case in the timed path never blocks
     // ingestion outright.
     let rawChunks: RawChunk[] | null = null;
+
+    // Caller-supplied timing wins outright: the text is already timestamped and
+    // already in hand, so there is nothing to extract. Used by the offline ASR
+    // lesson importer; existing callers never set it.
+    if (opts.timedSegments && opts.timedSegments.length > 0) {
+      rawChunks = segmentTimedText(opts.timedSegments);
+      console.log(`[Ingest] Caller-supplied timed segments -> ${rawChunks.length} chunk(s) with time ranges.`);
+    }
+
     try {
-      const timed = await extractTimedSegments(opts.kind, opts.ref, opts.language);
-      if (timed && timed.length > 0) {
-        rawChunks = segmentTimedText(timed);
-        console.log(`[Ingest] Timed-segmented into ${rawChunks.length} chunk(s) with time ranges.`);
+      if (!rawChunks) {
+        const timed = await extractTimedSegments(opts.kind, opts.ref, opts.language);
+        if (timed && timed.length > 0) {
+          rawChunks = segmentTimedText(timed);
+          console.log(`[Ingest] Timed-segmented into ${rawChunks.length} chunk(s) with time ranges.`);
+        }
       }
     } catch (timedErr) {
       console.warn(`[Ingest] Timed extraction failed (${String(timedErr).slice(0, 150)}), falling back to flat text.`);

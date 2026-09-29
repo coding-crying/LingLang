@@ -1,94 +1,59 @@
-/**
- * TabBar — persistent bottom navigation with 3 tabs.
- *
- * DOM order is Library / Voice / Profile (per the design prototype) so
- * Voice sits visually centered. Reads/writes `activeTab` via
- * `useAppState()`. Built on HeroUI's ToggleButton — its built-in
- * `[data-selected="true"]` state handles the active/inactive accent
- * color, so no manual color logic is needed here.
- */
+/** Shared navigation for the mobile tab bar and desktop sidebar. */
 
-import type { ReactElement } from 'react';
-import { ToggleButton } from '@heroui/react';
+import { Button } from '@heroui/react';
+import {
+  AudioLines,
+  BookOpen,
+  CircleUserRound,
+  SlidersHorizontal,
+  type LucideIcon,
+} from 'lucide-react';
 import { useAppState, type Tab } from '../state/AppState';
 
 interface TabDef {
   tab: Tab;
   label: string;
-  glyph: () => ReactElement;
+  icon: LucideIcon;
 }
 
-function LibraryGlyph() {
-  return (
-    <svg width="22" height="22" viewBox="0 0 22 22" fill="none" aria-hidden="true">
-      <rect x="3" y="4" width="16" height="2.4" rx="1.2" fill="currentColor" />
-      <rect x="3" y="9.8" width="16" height="2.4" rx="1.2" fill="currentColor" />
-      <rect x="3" y="15.6" width="10" height="2.4" rx="1.2" fill="currentColor" />
-    </svg>
-  );
+const VOICE: TabDef = { tab: 'voice', label: 'Voice', icon: AudioLines };
+const LIBRARY: TabDef = { tab: 'library', label: 'Library', icon: BookOpen };
+const PROFILE: TabDef = { tab: 'profile', label: 'Profile', icon: CircleUserRound };
+const DEBUG: TabDef = { tab: 'debug', label: 'Debug', icon: SlidersHorizontal };
+
+interface TabBarProps {
+  showDebug?: boolean;
+  layout?: 'bottom' | 'sidebar';
 }
 
-function VoiceGlyph() {
-  return (
-    <svg width="22" height="22" viewBox="0 0 22 22" fill="none" aria-hidden="true">
-      <rect x="2" y="8" width="2.6" height="6" rx="1.3" fill="currentColor" />
-      <rect x="7" y="4" width="2.6" height="14" rx="1.3" fill="currentColor" />
-      <rect x="12" y="1" width="2.6" height="20" rx="1.3" fill="currentColor" />
-      <rect x="17" y="6" width="2.6" height="10" rx="1.3" fill="currentColor" />
-    </svg>
-  );
-}
+const TABS: Record<NonNullable<TabBarProps['layout']>, TabDef[]> = {
+  bottom: [LIBRARY, VOICE, PROFILE],
+  sidebar: [VOICE, LIBRARY, PROFILE],
+};
 
-function ProfileGlyph() {
-  return (
-    <svg width="22" height="22" viewBox="0 0 22 22" fill="none" aria-hidden="true">
-      <circle cx="11" cy="7" r="4" fill="currentColor" />
-      <path d="M3 20c0-4.4 3.6-7 8-7s8 2.6 8 7" fill="currentColor" />
-    </svg>
-  );
-}
-
-function DebugGlyph() {
-  return (
-    <svg width="22" height="22" viewBox="0 0 22 22" fill="none" aria-hidden="true">
-      <circle cx="11" cy="11" r="7.5" stroke="currentColor" strokeWidth="2" />
-      <circle cx="11" cy="11" r="2.4" fill="currentColor" />
-      <path d="M11 1.5v3M11 17.5v3M1.5 11h3M17.5 11h3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-const TABS: TabDef[] = [
-  { tab: 'library', label: 'Library', glyph: LibraryGlyph },
-  { tab: 'voice', label: 'Voice', glyph: VoiceGlyph },
-  { tab: 'profile', label: 'Profile', glyph: ProfileGlyph },
-];
-
-const DEBUG_TAB: TabDef = { tab: 'debug', label: 'Debug', glyph: DebugGlyph };
-
-export default function TabBar({ showDebug = false }: { showDebug?: boolean }) {
+export default function TabBar({ showDebug = false, layout = 'bottom' }: TabBarProps) {
   const { activeTab, setTab } = useAppState();
-  const tabs = showDebug ? [...TABS, DEBUG_TAB] : TABS;
+  const tabs = showDebug ? [...TABS[layout], DEBUG] : TABS[layout];
 
   return (
-    <nav className="tab-bar">
-      {tabs.map(({ tab, label, glyph: Glyph }) => {
-        const active = tab === activeTab;
-        return (
-          <ToggleButton
-            key={tab}
-            variant="ghost"
-            isSelected={active}
-            onChange={(isSelected) => isSelected && setTab(tab)}
-            className="flex-1 flex-col gap-1 rounded-none h-auto bg-transparent py-2 data-[hovered=true]:bg-transparent data-[pressed=true]:bg-transparent"
-            style={{ color: active ? 'var(--accent)' : 'var(--muted)' }}
-            aria-label={label}
-          >
-            <Glyph />
-            <span className="text-xs font-medium">{label}</span>
-          </ToggleButton>
-        );
-      })}
+    <nav
+      className={`shell-nav shell-nav--${layout}`}
+      aria-label={layout === 'bottom' ? 'Main navigation' : 'Sidebar navigation'}
+    >
+      {tabs.map(({ tab, label, icon: Icon }) => (
+        <Button
+          key={tab}
+          variant="ghost"
+          className="shell-nav-item"
+          aria-current={tab === activeTab ? 'page' : undefined}
+          onPress={() => setTab(tab)}
+        >
+          <span className="shell-nav-icon">
+            <Icon size={22} strokeWidth={1.8} aria-hidden="true" />
+          </span>
+          <span>{label}</span>
+        </Button>
+      ))}
     </nav>
   );
 }

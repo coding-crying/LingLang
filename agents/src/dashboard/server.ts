@@ -6,42 +6,77 @@
  * - Monitor active goals
  * - View real-time session stats
  */
-
-import * as dotenv from 'dotenv';
-dotenv.config({ path: '.env.local' });
-
-import express from 'express';
+import { JobStatus } from '@livekit/protocol';
+import { execFileSync } from 'child_process';
 import cors from 'cors';
-import fs from 'node:fs';
+import * as dotenv from 'dotenv';
+import { and, asc, desc, eq, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
+import express from 'express';
+import { AccessToken, AgentDispatchClient, RoomServiceClient } from 'livekit-server-sdk';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AccessToken, AgentDispatchClient, RoomServiceClient } from 'livekit-server-sdk';
-import { JobStatus } from '@livekit/protocol';
-import { watchEvents, type AgentEvent } from '../lib/trace.js';
+import { LANGUAGES } from '../config/languages.js';
 import { db } from '../db/index.js';
-import { users, lexemes, userVocabulary, activeGoals, units, userPersona, userLanguageLevels, reviewLogs, sessionSummaries, contentSources, contentChunks, userContentProgress, userSourceProfiles } from '../db/schema.js';
-import { eq, desc, sql, gte, lte, and, or, isNull, inArray } from 'drizzle-orm';
-import { execFileSync } from 'child_process';
-import { authenticateByUsername, createUser, claimUser, hashPassword } from '../lib/user-auth.js';
-import { writePersona } from '../lib/persona.js';
-import { placeUserInSource, listSourceChunks, activateChunk } from '../lib/curriculum.js';
-import { readLearnerView } from '../lib/learner-view.js';
-import { ingestSource, type ContentKind } from '../lib/ingest.js';
 import {
+  activeGoals,
+  contentChunks,
+  contentSources,
+  lexemes,
+  reviewLogs,
+  sessionSummaries,
+  units,
+  userContentProgress,
+  userLanguageLevels,
+  userPersona,
+  userSourceProfiles,
+  userVocabulary,
+  users,
+} from '../db/schema.js';
+import {
+  type ContentIntent,
+  type ProfileAnswers,
   evaluateProfile,
   inferSource,
   questionsFor,
   resolveLastStudiedAt,
-  type ContentIntent,
-  type ProfileAnswers,
 } from '../lib/content-profile.js';
 import { applyProfileAnswers, onSourceReady } from '../lib/content-reconcile.js';
-import type { StudyIntensity } from '../lib/prior-knowledge.js';
-import { getGoogleKeyPlan, setGoogleApiKey, clearGoogleApiKey } from '../lib/google-budget.js';
-import { LANGUAGES } from '../config/languages.js';
+import { notifyNewSignup } from '../lib/admin-notifications.js';
+import { activateChunk, listSourceChunks, placeUserInSource } from '../lib/curriculum.js';
+import { DashboardSessions } from '../lib/dashboard-sessions.js';
+import { createEvidenceRouter } from '../lib/evidence/api.js';
+import { createConversationRouter } from '../lib/conversation-api.js';
+import { clearGoogleApiKey, getGoogleKeyPlan, setGoogleApiKey } from '../lib/google-budget.js';
+import { type ContentKind, ingestSource } from '../lib/ingest.js';
 import { isSupportedTargetLanguage } from '../lib/language-selection.js';
-import { computeStreak, bucketVocabHistory } from './stats.js';
+import { readLearnerView } from '../lib/learner-view.js';
+import { writePersona, readPersona } from '../lib/persona.js';
+import { PERSONA_FIELDS, validatePersonaPatch } from '../lib/persona-policy.js';
+import { invalidateLearnerView } from '../lib/learner-view.js';
+import { createModelPromptRouter, interruptAlignmentJobs } from '../lib/model-prompts/api.js';
+import { createConversationArchive } from '../lib/conversation-store.js';
+import type { StudyIntensity } from '../lib/prior-knowledge.js';
+import {
+  deleteProviderKey,
+  getDecryptedKey,
+  getProviders,
+  listProviderKeyNames,
+  putProviderKey,
+  resolveProviders,
+  sanitizeProviders,
+  setProviders,
+} from '../lib/provider-config.js';
+import { probeAll } from '../lib/provider-probe.js';
+import { installProviderPolicyRoutes } from './provider-policy-routes.js';
+import { type AgentEvent, watchEvents } from '../lib/trace.js';
+import { authenticateByUsername, claimUser, createUser, hashPassword } from '../lib/user-auth.js';
+import { mountPipecatRuntime } from './pipecat-runtime.js';
+import { createInternalRouter } from './internal-api.js';
+import { bucketVocabHistory, computeStreak } from './stats.js';
+
+dotenv.config({ path: '.env.local' });
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -71,11 +106,15 @@ const corsAllowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
   .filter(Boolean);
 
 if (corsAllowedOrigins.length > 0) {
-  app.use(cors({
-    origin: corsAllowedOrigins,
-    credentials: true,
-  }));
-  console.log(`[CORS] Allowing credentialed cross-origin requests from: ${corsAllowedOrigins.join(', ')}`);
+  app.use(
+    cors({
+      origin: corsAllowedOrigins,
+      credentials: true,
+    }),
+  );
+  console.log(
+    `[CORS] Allowing credentialed cross-origin requests from: ${corsAllowedOrigins.join(', ')}`,
+  );
 }
 
 const crossOriginCookies = process.env.CROSS_ORIGIN_COOKIES === 'true';
@@ -96,12 +135,30 @@ app.use((_req, res, next) => {
 });
 
 // ============================================================================
+// INTERNAL SERVICE API
+// ============================================================================
+
+// Mounted at /internal, deliberately NOT under /api: the blanket
+// `app.use('/api', requireAuth)` further down is browser-session auth, and a
+// service caller has no cookie. This router carries its own shared-secret
+// middleware and is loopback-only by default. It fails closed — with
+// INTERNAL_SERVICE_TOKEN unset every route returns 503, so an unconfigured
+// deployment exposes nothing. See internal-api.ts.
+mountPipecatRuntime(app, requireAuth, (query) => db.execute(query), async (userId, requested) => {
+  const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
+  if (!user?.targetLanguage || (requested !== undefined && requested !== user.targetLanguage)) {
+    throw new Error('Voice session must use the authenticated learner target language');
+  }
+  return user.targetLanguage;
+});
+app.use('/internal', createInternalRouter());
+
+// ============================================================================
 // AUTHENTICATION
 // ============================================================================
 
-// In-memory sessions (survives HMR, lost on server restart)
-const sessions = new Map<string, { userId: string; createdAt: number }>();
-const SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+// Revocable sessions survive deployments; only token digests are stored in PostgreSQL.
+const sessions = new DashboardSessions((query) => db.execute(query));
 
 // Rate limiting for login attempts (per IP)
 const loginAttempts = new Map<string, { count: number; lastAttempt: number }>();
@@ -126,14 +183,24 @@ function parseCookies(cookieHeader: string | undefined): Record<string, string> 
 }
 
 // Auth middleware — protects dashboard and API routes
-function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction): void {
+async function requireAuth(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction,
+): Promise<void> {
   const cookies = parseCookies(req.headers.cookie);
   const sessionId = cookies['ll_session'];
-  const session = sessionId ? sessions.get(sessionId) : undefined;
+  let session: { userId: string } | null = null;
+  try {
+    session = sessionId ? await sessions.get(sessionId) : null;
+  } catch {
+    // Fail closed, but don't mislabel a database outage as an expired login.
+    res.status(503).json({ error: 'Sign-in is temporarily unavailable. Please try again.' });
+    return;
+  }
 
-  if (!session || (Date.now() - session.createdAt) > SESSION_MAX_AGE_MS) {
+  if (!session) {
     // Expired or missing session
-    if (sessionId) sessions.delete(sessionId);
     // req.path, not req.originalUrl: when this runs as the blanket
     // `app.use('/api', requireAuth)` mount, Express strips the mount
     // prefix from req.path (it'd be '/content-sources', not
@@ -207,7 +274,10 @@ app.get('/login', (_req, res) => {
 
 app.post('/api/login', async (req, res) => {
   try {
-    const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+    const clientIp =
+      (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
+      req.socket.remoteAddress ||
+      'unknown';
 
     // Rate limit check
     if (!checkLoginRateLimit(clientIp)) {
@@ -225,18 +295,20 @@ app.post('/api/login', async (req, res) => {
     if (!user) {
       recordLoginAttempt(clientIp, false);
       // Constant-time delay to slow down brute force
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 500));
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
     recordLoginAttempt(clientIp, true);
 
     // Create session
-    const sessionId = crypto.randomUUID();
-    sessions.set(sessionId, { userId: user.id, createdAt: Date.now() });
+    const sessionId = await sessions.create(user.id);
 
     // Set cookie — always use Secure when behind nginx (x-forwarded-proto)
-    res.setHeader('Set-Cookie', `ll_session=${sessionId}; HttpOnly; ${sessionCookieAttrs(req)}; Path=/; Max-Age=86400`);
+    res.setHeader(
+      'Set-Cookie',
+      `ll_session=${sessionId}; HttpOnly; ${sessionCookieAttrs(req)}; Path=/; Max-Age=86400`,
+    );
 
     console.log(`[Auth] User "${user.username}" (${user.id}) logged in from ${clientIp}`);
     res.json({ success: true, user: { id: user.id, username: user.username } });
@@ -265,7 +337,10 @@ app.post('/api/register', requireAuth, async (req, res) => {
 
     // Derive a URL-safe id from the username. Falls back to a random suffix
     // if the result is empty (e.g. username is all non-alphanumerics).
-    const idBase = String(username).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    const idBase = String(username)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
     const id = idBase || `user_${Date.now().toString(36)}`;
 
     const existing = await db.query.users.findFirst({ where: eq(users.id, id) });
@@ -281,7 +356,17 @@ app.post('/api/register', requireAuth, async (req, res) => {
       nativeLanguage: nativeLanguage || 'en',
     });
 
-    console.log(`[Auth] Admin ${req.user.id} created user ${id} (${username}) target=${targetLanguage || 'unset'}`);
+    void notifyNewSignup({
+      kind: 'admin registration',
+      id,
+      username: String(username),
+      targetLanguage: targetLanguage || null,
+      nativeLanguage: nativeLanguage || 'en',
+    });
+
+    console.log(
+      `[Auth] Admin ${req.user.id} created user ${id} (${username}) target=${targetLanguage || 'unset'}`,
+    );
     res.json({ success: true, user: { id, username } });
   } catch (error) {
     res.status(500).json({ error: String(error) });
@@ -298,7 +383,10 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 app.post('/api/signup', async (req, res) => {
   try {
-    const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+    const clientIp =
+      (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
+      req.socket.remoteAddress ||
+      'unknown';
 
     if (!checkLoginRateLimit(clientIp)) {
       return res.status(429).json({ error: 'Too many attempts. Try again in 15 minutes.' });
@@ -319,7 +407,10 @@ app.post('/api/signup', async (req, res) => {
       return res.status(400).json({ error: 'a valid email is required' });
     }
 
-    const idBase = String(username).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    const idBase = String(username)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
     const id = idBase || `user_${Date.now().toString(36)}`;
 
     const existingId = await db.query.users.findFirst({ where: eq(users.id, id) });
@@ -344,12 +435,23 @@ app.post('/api/signup', async (req, res) => {
       nativeLanguage: nativeLanguage || 'en',
     });
 
+    void notifyNewSignup({
+      kind: 'self-serve signup',
+      id,
+      username: String(username),
+      email: String(email),
+      targetLanguage: targetLanguage || null,
+      nativeLanguage: nativeLanguage || 'en',
+    });
+
     recordLoginAttempt(clientIp, true);
 
     // Log the new user straight in — same session/cookie mechanics as /api/login.
-    const sessionId = crypto.randomUUID();
-    sessions.set(sessionId, { userId: id, createdAt: Date.now() });
-    res.setHeader('Set-Cookie', `ll_session=${sessionId}; HttpOnly; ${sessionCookieAttrs(req)}; Path=/; Max-Age=86400`);
+    const sessionId = await sessions.create(id);
+    res.setHeader(
+      'Set-Cookie',
+      `ll_session=${sessionId}; HttpOnly; ${sessionCookieAttrs(req)}; Path=/; Max-Age=86400`,
+    );
 
     console.log(`[Auth] New self-serve signup: "${username}" (${id}) from ${clientIp}`);
     res.json({ success: true, user: { id, username } });
@@ -370,7 +472,10 @@ app.post('/api/signup', async (req, res) => {
 // narrowly-scoped code path rather than branching logic inside signup.
 app.post('/api/demo/claim', async (req, res) => {
   try {
-    const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+    const clientIp =
+      (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
+      req.socket.remoteAddress ||
+      'unknown';
 
     if (!checkLoginRateLimit(clientIp)) {
       return res.status(429).json({ error: 'Too many attempts. Try again in 15 minutes.' });
@@ -417,7 +522,12 @@ app.post('/api/demo/claim', async (req, res) => {
       return res.status(409).json({ error: 'An account with this email already exists' });
     }
 
-    const claimed = await claimUser({ id: demoUserId, username: String(username), email: String(email), password: String(password) });
+    const claimed = await claimUser({
+      id: demoUserId,
+      username: String(username),
+      email: String(email),
+      password: String(password),
+    });
     if (!claimed) {
       // Lost a race with another claim attempt on the same row between the
       // check above and the update's WHERE guard.
@@ -425,11 +535,22 @@ app.post('/api/demo/claim', async (req, res) => {
       return res.status(409).json({ error: 'This demo session has already been claimed' });
     }
 
+    void notifyNewSignup({
+      kind: 'demo claim',
+      id: demoUserId,
+      username: String(username),
+      email: String(email),
+      targetLanguage: demoRow.targetLanguage,
+      nativeLanguage: demoRow.nativeLanguage,
+    });
+
     recordLoginAttempt(clientIp, true);
 
-    const sessionId = crypto.randomUUID();
-    sessions.set(sessionId, { userId: demoUserId, createdAt: Date.now() });
-    res.setHeader('Set-Cookie', `ll_session=${sessionId}; HttpOnly; ${sessionCookieAttrs(req)}; Path=/; Max-Age=86400`);
+    const sessionId = await sessions.create(demoUserId);
+    res.setHeader(
+      'Set-Cookie',
+      `ll_session=${sessionId}; HttpOnly; ${sessionCookieAttrs(req)}; Path=/; Max-Age=86400`,
+    );
 
     console.log(`[Auth] Demo session claimed: "${username}" (${demoUserId}) from ${clientIp}`);
     res.json({ success: true, user: { id: demoUserId, username } });
@@ -438,12 +559,19 @@ app.post('/api/demo/claim', async (req, res) => {
   }
 });
 
-app.post('/api/logout', (req, res) => {
+app.post('/api/logout', async (req, res) => {
   const cookies = parseCookies(req.headers.cookie);
   const sessionId = cookies['ll_session'];
-  if (sessionId) sessions.delete(sessionId);
+  try {
+    if (sessionId) await sessions.revoke(sessionId);
+  } catch {
+    return res.status(503).json({ error: 'Could not sign out. Please try again.' });
+  }
 
-  res.setHeader('Set-Cookie', `ll_session=; HttpOnly; ${sessionCookieAttrs(req)}; Path=/; Max-Age=0`);
+  res.setHeader(
+    'Set-Cookie',
+    `ll_session=; HttpOnly; ${sessionCookieAttrs(req)}; Path=/; Max-Age=0`,
+  );
   res.json({ success: true });
 });
 
@@ -453,9 +581,10 @@ app.post('/api/logout', (req, res) => {
 // by GemmaAudioSTT when LINGLANG_DUMP_AUDIO is set; named <iso-ts>_<key>.wav.
 // Key is the audio id from user.transcript events. Strict [A-Za-z0-9] key
 // match — no path traversal surface.
-const AUDIO_DUMP_DIR = process.env.LINGLANG_DUMP_AUDIO && process.env.LINGLANG_DUMP_AUDIO !== '1'
-  ? process.env.LINGLANG_DUMP_AUDIO
-  : '/tmp/linglang-audio-dumps';
+const AUDIO_DUMP_DIR =
+  process.env.LINGLANG_DUMP_AUDIO && process.env.LINGLANG_DUMP_AUDIO !== '1'
+    ? process.env.LINGLANG_DUMP_AUDIO
+    : '/tmp/linglang-audio-dumps';
 // Admin-only: dumped WAVs carry no per-user ownership metadata (audioId is
 // generated in GemmaAudioSTT with no user context available at that scope),
 // so any authenticated user could otherwise enumerate/brute-force another
@@ -498,6 +627,12 @@ app.get('/api/me', requireAuth, async (req, res) => {
         googleUsageMicros: googlePlan.useShared ? googlePlan.spentMicros : 0,
         googleUsageLimitMicros: googlePlan.useShared ? googlePlan.limitMicros : null,
       },
+      // 2026-09-02: capabilities the UI adapts to. Local mode is off on
+      // shared deployments (it burns the operator's GPU); self-hosters
+      // flip ALLOW_LOCAL_MODE=true and the picker reappears.
+      capabilities: {
+        allowLocalMode: process.env.ALLOW_LOCAL_MODE === 'true',
+      },
     });
   } catch {
     res.json({ user: req.user });
@@ -531,6 +666,10 @@ app.post('/api/waitlist', async (req, res) => {
 
 // Protect all /api/ routes below this point
 app.use('/api', requireAuth);
+// Evidence reads derive their owner from authentication, never a URL user ID.
+app.use('/api/learning-evidence', createEvidenceRouter());
+app.use('/api/conversations', createConversationRouter());
+app.use('/api/model-prompts', createModelPromptRouter());
 
 // Get all users — 2026-06-25: per-user data isolation. Non-admin users
 // only see their own row.
@@ -538,7 +677,7 @@ app.get('/api/users', requireAuth, async (req, res) => {
   try {
     if (req.user!.id === 'will') {
       const allUsers = await db.query.users.findMany({
-        orderBy: [desc(users.createdAt)]
+        orderBy: [desc(users.createdAt)],
       });
       return res.json(allUsers);
     }
@@ -553,13 +692,13 @@ app.get('/api/users', requireAuth, async (req, res) => {
 // access their own row.
 app.get('/api/users/:userId', requireAuth, async (req, res) => {
   try {
-    const { userId } = req.params;
+    const userId = req.params.userId as string;
     if (req.user!.id !== userId && req.user!.id !== 'will') {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
     const user = await db.query.users.findFirst({
-      where: eq(users.id, userId)
+      where: eq(users.id, userId),
     });
 
     if (!user) {
@@ -569,13 +708,13 @@ app.get('/api/users/:userId', requireAuth, async (req, res) => {
     // Get progress stats
     const progress = await db.query.userVocabulary.findMany({
       where: eq(userVocabulary.userId, userId),
-      with: { lexeme: true }
+      with: { lexeme: true },
     });
 
     // Get active goals
     const goals = await db.query.activeGoals.findMany({
       where: eq(activeGoals.userId, userId),
-      orderBy: [desc(activeGoals.createdAt)]
+      orderBy: [desc(activeGoals.createdAt)],
     });
 
     // Calculate stats using FSRS state distribution
@@ -588,17 +727,31 @@ app.get('/api/users/:userId', requireAuth, async (req, res) => {
 
     for (const p of progress) {
       switch (p.state) {
-        case 0: stateDistribution.new++; break;
-        case 1: stateDistribution.learning++; break;
-        case 2: stateDistribution.review++; break;
-        case 3: stateDistribution.relearning++; break;
+        case 0:
+          stateDistribution.new++;
+          break;
+        case 1:
+          stateDistribution.learning++;
+          break;
+        case 2:
+          stateDistribution.review++;
+          break;
+        case 3:
+          stateDistribution.relearning++;
+          break;
       }
     }
 
     // Strip sensitive columns — passwordHash and the encrypted Google key
     // were previously returned verbatim in `user`. Surface Google-key
     // status/usage as plain booleans/numbers instead of the raw column.
-    const { passwordHash: _passwordHash, googleApiKeyEncrypted, googleUsageMicros, googleUsageLimitMicros, ...safeUser } = user;
+    const {
+      passwordHash: _passwordHash,
+      googleApiKeyEncrypted,
+      googleUsageMicros,
+      googleUsageLimitMicros,
+      ...safeUser
+    } = user;
     const googlePlan = await getGoogleKeyPlan(userId as string);
 
     res.json({
@@ -613,9 +766,9 @@ app.get('/api/users/:userId', requireAuth, async (req, res) => {
       stats: {
         totalVocab: progress.length,
         stateDistribution,
-        activeGoals: goals.filter(g => g.status === 'active').length,
-        completedGoals: goals.filter(g => g.status === 'completed').length,
-      }
+        activeGoals: goals.filter((g) => g.status === 'active').length,
+        completedGoals: goals.filter((g) => g.status === 'completed').length,
+      },
     });
   } catch (error) {
     res.status(500).json({ error: String(error) });
@@ -625,6 +778,8 @@ app.get('/api/users/:userId', requireAuth, async (req, res) => {
 // Save/clear a user's own Google API key (BYO — unlimited use of Cloud
 // mode, no draw against the shared-key budget). Never echoed back; GET
 // /api/users/:userId only exposes a hasGoogleApiKey boolean.
+installProviderPolicyRoutes(app, requireAuth);
+
 app.put('/api/users/:userId/google-key', requireAuth, async (req, res) => {
   try {
     const { userId } = req.params;
@@ -655,6 +810,194 @@ app.delete('/api/users/:userId/google-key', requireAuth, async (req, res) => {
   }
 });
 
+// ============================================================================
+// BYO SPEECH-STACK PROVIDERS (2026-09-02) — see lib/provider-config.ts
+// Same auth shape as /google-key: own-user or admin. Config (baseURLs,
+// model names, key *names*) is safe to GET; key material never leaves the
+// server.
+// ============================================================================
+
+function ownsOrAdmin(req: any, userId: string): boolean {
+  return req.user!.id === userId || req.user!.id === 'will';
+}
+
+app.get('/api/users/:userId/providers', requireAuth, async (req, res) => {
+  try {
+    const userId = req.params.userId as string;
+    if (!ownsOrAdmin(req, userId)) return res.status(403).json({ error: 'Forbidden' });
+    const providers = await getProviders(userId);
+    const keyNames = await listProviderKeyNames(userId as string);
+    res.json({ providers: providers ?? null, keyNames });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.put('/api/users/:userId/providers', requireAuth, async (req, res) => {
+  try {
+    const userId = req.params.userId as string;
+    if (!ownsOrAdmin(req, userId)) return res.status(403).json({ error: 'Forbidden' });
+    let sanitized;
+    try {
+      sanitized = sanitizeProviders(req.body?.providers);
+    } catch (validationErr) {
+      return res.status(400).json({ error: String((validationErr as Error).message) });
+    }
+    // Referential check: a keyRef pointing at a nonexistent vault key is
+    // almost certainly a UI bug or a deleted key — refuse the save rather
+    // than silently running keyless at session start.
+    const keyNames = new Set(await listProviderKeyNames(userId as string));
+    for (const comp of ['stt', 'llm', 'tts'] as const) {
+      const ref = sanitized[comp]?.keyRef;
+      if (ref && !keyNames.has(ref.toLowerCase())) {
+        return res.status(400).json({ error: `${comp}.keyRef '${ref}' not found in your keys` });
+      }
+    }
+    await setProviders(userId, sanitized);
+    res.json({ success: true, providers: sanitized });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.put('/api/users/:userId/provider-keys/:keyName', requireAuth, async (req, res) => {
+  try {
+    const userId = req.params.userId as string;
+    const keyName = req.params.keyName as string;
+    if (!ownsOrAdmin(req, userId)) return res.status(403).json({ error: 'Forbidden' });
+    const { apiKey } = req.body ?? {};
+    if (typeof apiKey !== 'string' || apiKey.trim().length < 10) {
+      return res.status(400).json({ error: 'apiKey looks too short to be valid' });
+    }
+    await putProviderKey(userId, keyName, apiKey.trim());
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+app.delete('/api/users/:userId/provider-keys/:keyName', requireAuth, async (req, res) => {
+  try {
+    const userId = req.params.userId as string;
+    const keyName = req.params.keyName as string;
+    if (!ownsOrAdmin(req, userId)) return res.status(403).json({ error: 'Forbidden' });
+    await deleteProviderKey(userId, keyName);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// Latency/streaming probe for BYO endpoints (lib/provider-probe.ts).
+// Body: { providers?: <draft> } — probes the draft if given (test before
+// you save), else the stored config. Keys resolve server-side from the
+// vault by keyRef, so the client can never point this at an arbitrary
+// URL with an arbitrary key. 20s per-user cooldown: the probe fetches
+// user-supplied URLs from the server, and while that reach already
+// exists via real sessions, a button people can hammer needs a brake.
+const probeCooldown = new Map<string, number>();
+app.post('/api/users/:userId/providers/probe', requireAuth, async (req, res) => {
+  try {
+    const userId = req.params.userId as string;
+    if (!ownsOrAdmin(req, userId)) return res.status(403).json({ error: 'Forbidden' });
+    const last = probeCooldown.get(userId) ?? 0;
+    if (Date.now() - last < 20_000) {
+      return res
+        .status(429)
+        .json({ error: `probe again in ${Math.ceil((20_000 - (Date.now() - last)) / 1000)}s` });
+    }
+    probeCooldown.set(userId, Date.now());
+
+    let providersToProbe;
+    if (req.body?.providers !== undefined) {
+      try {
+        providersToProbe = sanitizeProviders(req.body.providers);
+      } catch (validationErr) {
+        return res.status(400).json({ error: String((validationErr as Error).message) });
+      }
+    } else {
+      providersToProbe = (await getProviders(userId)) ?? undefined;
+    }
+    if (
+      !providersToProbe ||
+      (!providersToProbe.stt && !providersToProbe.llm && !providersToProbe.tts)
+    ) {
+      return res.status(400).json({ error: 'nothing configured to probe' });
+    }
+    // Decrypt keyRefs for the draft exactly like dispatch does.
+    const resolved = await resolveProviders(userId, providersToProbe);
+    if (!resolved) return res.status(400).json({ error: 'nothing configured to probe' });
+    const results = await probeAll(resolved);
+    res.json({ results });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// Model auto-discovery for a BYO endpoint (2026-09-02): the UI asks
+// "what models does this server actually have?" so the learner picks from
+// a dropdown instead of typing a model name they got from a README.
+// Body: { baseUrl, keyRef?, vendor? } — same SSRF posture as the probe
+// (http(s) only, no embedded credentials; on a self-hosted box localhost
+// is the point). Key resolves server-side from the vault; the client
+// never sends one. OmniVoice has no /v1/models but does have /v1/voices,
+// so vendor=omnivoice lists voices instead.
+app.post('/api/users/:userId/providers/models', requireAuth, async (req, res) => {
+  try {
+    const userId = req.params.userId as string;
+    if (!ownsOrAdmin(req, userId)) return res.status(403).json({ error: 'Forbidden' });
+    const { baseUrl, keyRef, vendor } = req.body ?? {};
+    if (typeof baseUrl !== 'string' || !baseUrl.trim()) {
+      return res.status(400).json({ error: 'baseUrl required' });
+    }
+    let u: URL;
+    try {
+      u = new URL(baseUrl.trim());
+    } catch {
+      return res.status(400).json({ error: 'baseUrl is not a valid URL' });
+    }
+    if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password) {
+      return res.status(400).json({ error: 'baseUrl must be http(s) without credentials' });
+    }
+    let apiKey: string | undefined;
+    if (typeof keyRef === 'string' && keyRef.trim()) {
+      apiKey = (await getDecryptedKey(userId, keyRef.trim().toLowerCase())) ?? undefined;
+    }
+    const isOmni = vendor === 'omnivoice';
+    const listUrl = isOmni
+      ? new URL('/v1/voices', u).toString()
+      : new URL(u.pathname.replace(/\/$/, '') + '/models', u).toString();
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    const r = await fetch(listUrl, { headers, signal: AbortSignal.timeout(8000) });
+    if (!r.ok) {
+      return res.status(502).json({ error: `${listUrl} -> HTTP ${r.status}` });
+    }
+    const body = await r.json().catch(() => null);
+    let models: string[] = [];
+    if (isOmni) {
+      models = Array.isArray(body?.voices)
+        ? body.voices
+        : Array.isArray(body?.data)
+          ? body.data.map((v: any) => (typeof v === 'string' ? v : v?.id)).filter(Boolean)
+          : [];
+    } else if (Array.isArray(body?.data)) {
+      models = body.data.map((m: any) => m?.id).filter(Boolean);
+    } else if (Array.isArray(body?.models)) {
+      models = body.models
+        .map((m: any) => (typeof m === 'string' ? m : (m?.id ?? m?.model)))
+        .filter(Boolean);
+    } else if (Array.isArray(body)) {
+      models = body
+        .map((m: any) => (typeof m === 'string' ? m : (m?.name ?? m?.model)))
+        .filter(Boolean);
+    }
+    res.json({ models: [...new Set(models)].sort() });
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
 // Get vocabulary with progress
 app.get('/api/users/:userId/vocabulary', requireAuth, async (req, res) => {
   try {
@@ -673,7 +1016,7 @@ app.get('/api/users/:userId/vocabulary', requireAuth, async (req, res) => {
 
     // Filter by FSRS state if specified
     if (state !== undefined) {
-      progress = progress.filter(p => p.state === parseInt(state as string));
+      progress = progress.filter((p) => p.state === parseInt(state as string));
     }
 
     res.json(progress);
@@ -694,12 +1037,14 @@ app.get('/api/users/:userId/language-levels', requireAuth, async (req, res) => {
       where: eq(userLanguageLevels.userId, userId),
     });
 
-    res.json(rows.map(r => ({
-      languageCode: r.languageCode,
-      proficiencyLevel: r.proficiencyLevel,
-      confidence: r.confidence,
-      source: r.source,
-    })));
+    res.json(
+      rows.map((r) => ({
+        languageCode: r.languageCode,
+        proficiencyLevel: r.proficiencyLevel,
+        confidence: r.confidence,
+        source: r.source,
+      })),
+    );
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -713,14 +1058,16 @@ app.get('/api/users/:userId/summary', requireAuth, async (req, res) => {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
-    const reviewDateRows = await db.select({ reviewDate: reviewLogs.reviewDate })
+    const reviewDateRows = await db
+      .select({ reviewDate: reviewLogs.reviewDate })
       .from(reviewLogs)
       .where(eq(reviewLogs.userId, userId));
-    const streak = computeStreak(reviewDateRows.map(r => r.reviewDate));
+    const streak = computeStreak(reviewDateRows.map((r) => r.reviewDate));
 
-    const talkTimeRows = await db.select({
-      totalMinutes: sql<number>`coalesce(sum(${sessionSummaries.durationMinutes}), 0)`,
-    })
+    const talkTimeRows = await db
+      .select({
+        totalMinutes: sql<number>`coalesce(sum(${sessionSummaries.durationMinutes}), 0)`,
+      })
       .from(sessionSummaries)
       .where(eq(sessionSummaries.userId, userId));
     const totalMinutes = Number(talkTimeRows[0]?.totalMinutes ?? 0);
@@ -729,7 +1076,8 @@ app.get('/api/users/:userId/summary', requireAuth, async (req, res) => {
     // Uses the user_vocabulary_due_idx (userId, due) composite index —
     // an equality match on userId plus a range match on due is exactly
     // what that index is built for.
-    const wordsDueRows = await db.select({ count: sql<number>`count(*)` })
+    const wordsDueRows = await db
+      .select({ count: sql<number>`count(*)` })
       .from(userVocabulary)
       .where(and(eq(userVocabulary.userId, userId), lte(userVocabulary.due, new Date())));
     const wordsDue = Number(wordsDueRows[0]?.count ?? 0);
@@ -750,16 +1098,160 @@ app.get('/api/users/:userId/vocab-history', requireAuth, async (req, res) => {
     const weeksParam = parseInt((req.query.weeks as string) || '12', 10);
     const weeks = Number.isFinite(weeksParam) && weeksParam > 0 ? weeksParam : 12;
 
-    const logs = await db.select({
-      userVocabularyId: reviewLogs.userVocabularyId,
-      reviewDate: reviewLogs.reviewDate,
-      state: reviewLogs.state,
-    })
+    const logs = await db
+      .select({
+        userVocabularyId: reviewLogs.userVocabularyId,
+        reviewDate: reviewLogs.reviewDate,
+        state: reviewLogs.state,
+      })
       .from(reviewLogs)
       .where(eq(reviewLogs.userId, userId));
 
     const result = bucketVocabHistory(logs, weeks);
     res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+// ============================================================================
+// KNOWN WORDS — "what do I actually know?" view over the implicit SRS data.
+// ============================================================================
+
+// The proof that conversations are being indexed: every word the user has
+// produced in a session lands in user_vocabulary (origin='conversation').
+// Buckets map FSRS state -> learner-facing labels:
+//   0 New        = heard/seen, never produced correctly yet
+//   1 Learning   = starting to produce it, still effortful
+//   2 Mastered   = FSRS review state, recall is stable
+//   3 Relearning = was mastered, lapsed, being rebuilt
+app.get('/api/users/:userId/known-words', requireAuth, async (req, res) => {
+  try {
+    const userId = req.params.userId as string;
+    if (req.user!.id !== userId && req.user!.id !== 'will') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const language = (req.query.language as string | undefined) || undefined;
+    const search = ((req.query.search as string) || '').trim().toLowerCase();
+    const limit = Math.min(
+      500,
+      Math.max(1, parseInt((req.query.limit as string) || '60', 10) || 60),
+    );
+    const offset = Math.max(0, parseInt((req.query.offset as string) || '0', 10) || 0);
+
+    const vocabWhere = language
+      ? and(eq(userVocabulary.userId, userId), eq(lexemes.language, language))
+      : eq(userVocabulary.userId, userId);
+    // Same predicate for queries that do NOT join lexemes (recency below):
+    // constrain via a subquery instead of referencing lexemes.language.
+    const vocabWhereNoJoin = language
+      ? and(
+          eq(userVocabulary.userId, userId),
+          sql`${userVocabulary.lexemeId} in (select ${lexemes.id} from ${lexemes} where ${lexemes.language} = ${language})`,
+        )
+      : eq(userVocabulary.userId, userId);
+
+    // Per-language state buckets in one grouped query.
+    const bucketRows = await db
+      .select({
+        language: lexemes.language,
+        state: userVocabulary.state,
+        count: sql<number>`count(*)`,
+      })
+      .from(userVocabulary)
+      .innerJoin(lexemes, eq(userVocabulary.lexemeId, lexemes.id))
+      .where(vocabWhere)
+      .groupBy(lexemes.language, userVocabulary.state);
+
+    // Recency: words first indexed in the last 7/30 days.
+    // NOTE: postgres-js rejects Date objects inside raw `sql` fragments
+    // ("string argument must be string|Buffer|ArrayBuffer") — pass ISO strings.
+    const now = Date.now();
+    const since7 = new Date(now - 7 * 86_400_000).toISOString();
+    const since30 = new Date(now - 30 * 86_400_000).toISOString();
+    const recentRows = await db
+      .select({
+        week: sql<number>`count(*) filter (where ${userVocabulary.createdAt} >= ${since7})`,
+        month: sql<number>`count(*) filter (where ${userVocabulary.createdAt} >= ${since30})`,
+      })
+      .from(userVocabulary)
+      .where(vocabWhereNoJoin);
+
+    const buckets: Record<
+      string,
+      { new: number; learning: number; mastered: number; relearning: number; total: number }
+    > = {};
+    for (const r of bucketRows) {
+      const b = (buckets[r.language] ??= {
+        new: 0,
+        learning: 0,
+        mastered: 0,
+        relearning: 0,
+        total: 0,
+      });
+      const key = (['new', 'learning', 'mastered', 'relearning'] as const)[r.state] ?? 'new';
+      b[key] += Number(r.count);
+      b.total += Number(r.count);
+    }
+
+    // The word list itself. Sort modes:
+    //   lastUsed (default): most-recently-touched first (that's what makes
+    //     "this session's words showed up" obvious)
+    //   due: next review first — the SRS queue view.
+    const sort = (req.query.sort as string | undefined) === 'due' ? 'due' : 'lastUsed';
+    let rows = await db
+      .select({
+        lemma: lexemes.lemma,
+        translation: lexemes.translation,
+        pos: lexemes.pos,
+        language: lexemes.language,
+        state: userVocabulary.state,
+        reps: userVocabulary.reps,
+        lapses: userVocabulary.lapses,
+        stability: userVocabulary.stability,
+        receptiveExposures: userVocabulary.receptiveExposures,
+        origin: userVocabulary.origin,
+        lastReview: userVocabulary.lastReview,
+        createdAt: userVocabulary.createdAt,
+        due: userVocabulary.due,
+      })
+      .from(userVocabulary)
+      .innerJoin(lexemes, eq(userVocabulary.lexemeId, lexemes.id))
+      .where(vocabWhere)
+      .orderBy(
+        ...(sort === 'due'
+          ? [asc(userVocabulary.due)]
+          : [desc(userVocabulary.lastReview), desc(userVocabulary.createdAt)]),
+      )
+      .limit(limit)
+      .offset(offset);
+
+    if (search) {
+      rows = rows.filter(
+        (r) =>
+          r.lemma.toLowerCase().includes(search) || r.translation.toLowerCase().includes(search),
+      );
+    }
+
+    const totals = Object.values(buckets).reduce(
+      (acc, b) => ({
+        new: acc.new + b.new,
+        learning: acc.learning + b.learning,
+        mastered: acc.mastered + b.mastered,
+        relearning: acc.relearning + b.relearning,
+        total: acc.total + b.total,
+      }),
+      { new: 0, learning: 0, mastered: 0, relearning: 0, total: 0 },
+    );
+
+    res.json({
+      buckets,
+      totals,
+      recent: { week: Number(recentRows[0]?.week ?? 0), month: Number(recentRows[0]?.month ?? 0) },
+      words: rows,
+      limit,
+      offset,
+    });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -782,7 +1274,8 @@ app.get('/api/content-sources', requireAuth, async (req, res) => {
     if (sources.length === 0) return res.json([]);
 
     const sourceIds = sources.map((s) => s.id);
-    const chunkRows = await db.select({ id: contentChunks.id, sourceId: contentChunks.sourceId })
+    const chunkRows = await db
+      .select({ id: contentChunks.id, sourceId: contentChunks.sourceId })
       .from(contentChunks)
       .where(inArray(contentChunks.sourceId, sourceIds));
 
@@ -794,8 +1287,11 @@ app.get('/api/content-sources', requireAuth, async (req, res) => {
     const allChunkIds = chunkRows.map((c) => c.id);
     const progressRows = allChunkIds.length
       ? await db.query.userContentProgress.findMany({
-        where: and(eq(userContentProgress.userId, userId), inArray(userContentProgress.chunkId, allChunkIds)),
-      })
+          where: and(
+            eq(userContentProgress.userId, userId),
+            inArray(userContentProgress.chunkId, allChunkIds),
+          ),
+        })
       : [];
     const progressByChunk = new Map(progressRows.map((p) => [p.chunkId, p]));
 
@@ -803,7 +1299,10 @@ app.get('/api/content-sources', requireAuth, async (req, res) => {
     // different point for every learner. A source with no profile row, or
     // one still 'needed', is what the library greys out.
     const profileRows = await db.query.userSourceProfiles.findMany({
-      where: and(eq(userSourceProfiles.userId, userId), inArray(userSourceProfiles.sourceId, sourceIds)),
+      where: and(
+        eq(userSourceProfiles.userId, userId),
+        inArray(userSourceProfiles.sourceId, sourceIds),
+      ),
     });
     const profileBySource = new Map(profileRows.map((p) => [p.sourceId, p]));
 
@@ -842,7 +1341,9 @@ app.get('/api/content-sources', requireAuth, async (req, res) => {
         // A 'skipped' profile is NOT pending — the learner declined, and
         // re-nagging them is how a gentle prompt becomes an annoying one.
         needsProfile: !profile || profile.status === 'needed',
-        pendingQuestionCount: evaluation ? evaluation.missing.length : questionsFor(s.kind as ContentKind, null).length,
+        pendingQuestionCount: evaluation
+          ? evaluation.missing.length
+          : questionsFor(s.kind as ContentKind, null).length,
       };
     });
 
@@ -899,16 +1400,19 @@ app.post('/api/content-sources', requireAuth, async (req, res) => {
     if (req.body?.intent) answers.intent = req.body.intent as ContentIntent;
     const evaluation = evaluateProfile(kind as ContentKind, answers);
 
-    await db.insert(userSourceProfiles).values({
-      userId,
-      sourceId,
-      intent: (answers.intent as ContentIntent) ?? 'study',
-      status: evaluation.status,
-      answers,
-      lastStudiedAt: resolveLastStudiedAt(answers.last_studied),
-      intensity: (answers.intensity as StudyIntensity) ?? null,
-      profiledAt: evaluation.status === 'complete' ? new Date() : null,
-    }).onConflictDoNothing();
+    await db
+      .insert(userSourceProfiles)
+      .values({
+        userId,
+        sourceId,
+        intent: (answers.intent as ContentIntent) ?? 'study',
+        status: evaluation.status,
+        answers,
+        lastStudiedAt: resolveLastStudiedAt(answers.last_studied),
+        intensity: (answers.intensity as StudyIntensity) ?? null,
+        profiledAt: evaluation.status === 'complete' ? new Date() : null,
+      })
+      .onConflictDoNothing();
 
     // Fire-and-forget: ingestSource manages its own status transitions
     // (inserts as 'ingesting', flips to 'ready'/'failed' on completion) and
@@ -963,16 +1467,20 @@ app.get('/api/content-sources/:sourceId/profile', requireAuth, async (req, res) 
   try {
     const userId = req.user!.id;
     const { sourceId } = req.params as { sourceId: string };
-    const source = await db.query.contentSources.findFirst({ where: eq(contentSources.id, sourceId) });
+    const source = await db.query.contentSources.findFirst({
+      where: eq(contentSources.id, sourceId),
+    });
     if (!source) return res.status(404).json({ error: 'Not found' });
-    if (source.ownerId && source.ownerId !== userId) return res.status(403).json({ error: 'Forbidden' });
+    if (source.ownerId && source.ownerId !== userId)
+      return res.status(403).json({ error: 'Forbidden' });
 
     const profile = await db.query.userSourceProfiles.findFirst({
       where: and(eq(userSourceProfiles.userId, userId), eq(userSourceProfiles.sourceId, sourceId)),
     });
     const answers = (profile?.answers ?? {}) as ProfileAnswers;
     const evaluation = evaluateProfile(source.kind as ContentKind, answers);
-    const countRows = await db.select({ count: sql<number>`count(*)::int` })
+    const countRows = await db
+      .select({ count: sql<number>`count(*)::int` })
       .from(contentChunks)
       .where(eq(contentChunks.sourceId, sourceId));
     const chunkCount = countRows[0]?.count ?? 0;
@@ -986,7 +1494,10 @@ app.get('/api/content-sources/:sourceId/profile', requireAuth, async (req, res) 
       status: profile?.status ?? 'needed',
       answers,
       reconciledAt: profile?.reconciledAt ?? null,
-      questions: questionsFor(source.kind as ContentKind, (answers.intent as ContentIntent) ?? null),
+      questions: questionsFor(
+        source.kind as ContentKind,
+        (answers.intent as ContentIntent) ?? null,
+      ),
       missing: evaluation.missing,
       next: evaluation.next,
     });
@@ -1002,9 +1513,12 @@ app.put('/api/content-sources/:sourceId/profile', requireAuth, async (req, res) 
   try {
     const userId = req.user!.id;
     const { sourceId } = req.params as { sourceId: string };
-    const source = await db.query.contentSources.findFirst({ where: eq(contentSources.id, sourceId) });
+    const source = await db.query.contentSources.findFirst({
+      where: eq(contentSources.id, sourceId),
+    });
     if (!source) return res.status(404).json({ error: 'Not found' });
-    if (source.ownerId && source.ownerId !== userId) return res.status(403).json({ error: 'Forbidden' });
+    if (source.ownerId && source.ownerId !== userId)
+      return res.status(403).json({ error: 'Forbidden' });
 
     const incoming = (req.body?.answers ?? {}) as ProfileAnswers;
     if (req.body?.intent) incoming.intent = req.body.intent as ContentIntent;
@@ -1013,7 +1527,9 @@ app.put('/api/content-sources/:sourceId/profile', requireAuth, async (req, res) 
     // and typed flows converge on identical state. `skip` is the explicit
     // "don't ask me": reconcile on conservative defaults rather than
     // leaving the source inert forever.
-    const result = await applyProfileAnswers(userId, sourceId, incoming, { skip: req.body?.skip === true });
+    const result = await applyProfileAnswers(userId, sourceId, incoming, {
+      skip: req.body?.skip === true,
+    });
 
     // result.reconcileStarted is false when ingestion is still running --
     // onSourceReady picks the profile up when chunks exist.
@@ -1030,10 +1546,14 @@ app.post('/api/content-sources/:sourceId/select', requireAuth, async (req, res) 
   try {
     const userId = req.user!.id;
     const { sourceId } = req.params;
-    const source = await db.query.contentSources.findFirst({ where: eq(contentSources.id, sourceId) });
+    const source = await db.query.contentSources.findFirst({
+      where: eq(contentSources.id, sourceId),
+    });
     if (!source) return res.status(404).json({ error: 'Not found' });
-    if (source.ownerId && source.ownerId !== userId) return res.status(403).json({ error: 'Forbidden' });
-    if (source.status !== 'ready') return res.status(400).json({ error: `Source is ${source.status}, not ready` });
+    if (source.ownerId && source.ownerId !== userId)
+      return res.status(403).json({ error: 'Forbidden' });
+    if (source.status !== 'ready')
+      return res.status(400).json({ error: `Source is ${source.status}, not ready` });
 
     await placeUserInSource(userId, sourceId);
     res.json({ success: true });
@@ -1051,9 +1571,12 @@ app.get('/api/content-sources/:sourceId/chunks', requireAuth, async (req, res) =
   try {
     const userId = req.user!.id;
     const { sourceId } = req.params as { sourceId: string };
-    const source = await db.query.contentSources.findFirst({ where: eq(contentSources.id, sourceId) });
+    const source = await db.query.contentSources.findFirst({
+      where: eq(contentSources.id, sourceId),
+    });
     if (!source) return res.status(404).json({ error: 'Not found' });
-    if (source.ownerId && source.ownerId !== userId) return res.status(403).json({ error: 'Forbidden' });
+    if (source.ownerId && source.ownerId !== userId)
+      return res.status(403).json({ error: 'Forbidden' });
 
     const chunks = await listSourceChunks(userId, sourceId);
     res.json(chunks);
@@ -1065,24 +1588,34 @@ app.get('/api/content-sources/:sourceId/chunks', requireAuth, async (req, res) =
 // Explicit "go here" — jump straight to one chunk, bypassing coverage-based
 // auto-placement and the one-step-at-a-time skipActiveChunk path. Same
 // trust-the-user precedent as the voice "let's move on" trigger.
-app.post('/api/content-sources/:sourceId/chunks/:chunkId/activate', requireAuth, async (req, res) => {
-  try {
-    const userId = req.user!.id;
-    const { sourceId, chunkId } = req.params as { sourceId: string; chunkId: string };
-    const source = await db.query.contentSources.findFirst({ where: eq(contentSources.id, sourceId) });
-    if (!source) return res.status(404).json({ error: 'Not found' });
-    if (source.ownerId && source.ownerId !== userId) return res.status(403).json({ error: 'Forbidden' });
+app.post(
+  '/api/content-sources/:sourceId/chunks/:chunkId/activate',
+  requireAuth,
+  async (req, res) => {
+    try {
+      const userId = req.user!.id;
+      const { sourceId, chunkId } = req.params as { sourceId: string; chunkId: string };
+      const source = await db.query.contentSources.findFirst({
+        where: eq(contentSources.id, sourceId),
+      });
+      if (!source) return res.status(404).json({ error: 'Not found' });
+      if (source.ownerId && source.ownerId !== userId)
+        return res.status(403).json({ error: 'Forbidden' });
 
-    const chunk = await db.query.contentChunks.findFirst({ where: eq(contentChunks.id, chunkId) });
-    if (!chunk || chunk.sourceId !== sourceId) return res.status(404).json({ error: 'Chunk not found in this source' });
+      const chunk = await db.query.contentChunks.findFirst({
+        where: eq(contentChunks.id, chunkId),
+      });
+      if (!chunk || chunk.sourceId !== sourceId)
+        return res.status(404).json({ error: 'Chunk not found in this source' });
 
-    const result = await activateChunk(userId, chunkId);
-    if (!result) return res.status(404).json({ error: 'Not found' });
-    res.json({ success: true, coverage: result.coverage });
-  } catch (error) {
-    res.status(500).json({ error: String(error) });
-  }
-});
+      const result = await activateChunk(userId, chunkId);
+      if (!result) return res.status(404).json({ error: 'Not found' });
+      res.json({ success: true, coverage: result.coverage });
+    } catch (error) {
+      res.status(500).json({ error: String(error) });
+    }
+  },
+);
 
 // The learner's current active content_chunks row (or null), for the Voice
 // tab's curriculum pill/sheet — same data readLearnerView already computes
@@ -1115,11 +1648,11 @@ app.get('/api/curriculum', async (req, res) => {
     if (language) {
       allUnits = await db.query.units.findMany({
         where: eq(units.language, language as string),
-        with: { lexemes: true }
+        with: { lexemes: true },
       });
     } else {
       allUnits = await db.query.units.findMany({
-        with: { lexemes: true }
+        with: { lexemes: true },
       });
     }
 
@@ -1150,31 +1683,88 @@ app.get('/api/runtime', async (req, res) => {
   }
 });
 
+// Processor capability benchmark — Debug-only, synthetic diagnostics. The
+// report contains no learner data; it is an index over the checked-in,
+// versioned evidence-v2 fixtures. Match the current user's configured LLM
+// without exposing provider keys or endpoint credentials.
+app.get('/api/processor-benchmark', requireAuth, async (req, res) => {
+  try {
+    if (req.user!.id !== 'will') return res.status(403).json({ error: 'Forbidden' });
+    const reportCandidates = [
+      path.join(__dirname, 'data', 'processor-model-benchmark.json'),
+      path.join(__dirname, '..', 'data', 'processor-model-benchmark.json'),
+      path.join(__dirname, '..', '..', 'data', 'processor-model-benchmark.json'),
+      path.join(process.cwd(), 'data', 'processor-model-benchmark.json'),
+    ];
+    const reportPath = reportCandidates.find((candidate) => fs.existsSync(candidate));
+    if (!reportPath) return res.status(404).json({ error: 'Processor benchmark report not found' });
+
+    const report = JSON.parse(fs.readFileSync(reportPath, 'utf-8')) as {
+      schemaVersion?: string;
+      benchmarkId?: string;
+      generatedAt?: string;
+      purpose?: string;
+      selectionPolicy?: unknown;
+      models?: Array<{ model?: string }>;
+    };
+    const providers = await getProviders(req.user!.id);
+    const realtimeEnabled = providers?.realtime?.enabled === true;
+    const configuredModel = realtimeEnabled
+      ? process.env.CLOUD_PROCESSOR_LLM_MODEL ||
+        process.env.PROCESSOR_LLM_MODEL ||
+        process.env.LOCAL_LLM_MODEL ||
+        null
+      : providers?.llm?.model ||
+        process.env.PROCESSOR_LLM_MODEL ||
+        process.env.CLOUD_PROCESSOR_LLM_MODEL ||
+        process.env.LOCAL_LLM_MODEL ||
+        null;
+    const normalized = configuredModel?.toLowerCase().trim();
+    const match =
+      report.models?.find((entry) => {
+        const candidate = entry.model?.toLowerCase().trim();
+        return (
+          candidate === normalized ||
+          (!!candidate && !!normalized && candidate.endsWith(`/${normalized}`))
+        );
+      }) ?? null;
+    return res.json({
+      ok: true,
+      report,
+      configuredModel,
+      configuredModelSource: realtimeEnabled
+        ? 'realtime processor'
+        : providers?.llm?.model
+          ? 'user LLM provider'
+          : 'processor environment',
+      configuredModelBenchmarked: !!match,
+      configuredModelResult: match,
+    });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: String(error) });
+  }
+});
+
 // Database stats
 app.get('/api/stats', async (req, res) => {
   try {
-    const userCount = await db.select({ count: sql<number>`count(*)` })
-      .from(users);
+    const userCount = await db.select({ count: sql<number>`count(*)` }).from(users);
 
-    const lexemeCount = await db.select({ count: sql<number>`count(*)` })
-      .from(lexemes);
+    const lexemeCount = await db.select({ count: sql<number>`count(*)` }).from(lexemes);
 
-    const progressCount = await db.select({ count: sql<number>`count(*)` })
-      .from(userVocabulary);
+    const progressCount = await db.select({ count: sql<number>`count(*)` }).from(userVocabulary);
 
-    const unitCount = await db.select({ count: sql<number>`count(*)` })
-      .from(units);
+    const unitCount = await db.select({ count: sql<number>`count(*)` }).from(units);
 
     // Get languages
-    const languages = await db.selectDistinct({ language: units.language })
-      .from(units);
+    const languages = await db.selectDistinct({ language: units.language }).from(units);
 
     res.json({
       users: userCount[0]?.count ?? 0,
       lexemes: lexemeCount[0]?.count ?? 0,
       progressEntries: progressCount[0]?.count ?? 0,
       units: unitCount[0]?.count ?? 0,
-      languages: languages.map(l => l.language),
+      languages: languages.map((l) => l.language),
     });
   } catch (error) {
     res.status(500).json({ error: String(error) });
@@ -1217,30 +1807,31 @@ app.get('/api/vocabulary', async (req, res) => {
   // logged in. Every user's vocabulary page silently showed Will's data.
   const userId = req.user?.id || 'will';
   const lang = req.query.lang as string | undefined;
-  const sort = req.query.sort as string || 'due';
+  const sort = (req.query.sort as string) || 'due';
 
   try {
-    let q = db.select({
-      id: lexemes.id,
-      lemma: lexemes.lemma,
-      pos: lexemes.pos,
-      language: lexemes.language,
-      translation: lexemes.translation,
-      frequencyRank: lexemes.frequencyRank,
-      // SRS state
-      state: userVocabulary.state,
-      stability: userVocabulary.stability,
-      difficulty: userVocabulary.difficulty,
-      reps: userVocabulary.reps,
-      lapses: userVocabulary.lapses,
-      due: userVocabulary.due,
-      lastReview: userVocabulary.lastReview,
-      scaffoldedCount: userVocabulary.scaffoldedCount,
-      nativeSubstitutionCount: userVocabulary.nativeSubstitutionCount,
-    })
-    .from(userVocabulary)
-    .innerJoin(lexemes, eq(userVocabulary.lexemeId, lexemes.id))
-    .where(eq(userVocabulary.userId, userId));
+    let q = db
+      .select({
+        id: lexemes.id,
+        lemma: lexemes.lemma,
+        pos: lexemes.pos,
+        language: lexemes.language,
+        translation: lexemes.translation,
+        frequencyRank: lexemes.frequencyRank,
+        // SRS state
+        state: userVocabulary.state,
+        stability: userVocabulary.stability,
+        difficulty: userVocabulary.difficulty,
+        reps: userVocabulary.reps,
+        lapses: userVocabulary.lapses,
+        due: userVocabulary.due,
+        lastReview: userVocabulary.lastReview,
+        scaffoldedCount: userVocabulary.scaffoldedCount,
+        nativeSubstitutionCount: userVocabulary.nativeSubstitutionCount,
+      })
+      .from(userVocabulary)
+      .innerJoin(lexemes, eq(userVocabulary.lexemeId, lexemes.id))
+      .where(eq(userVocabulary.userId, userId));
 
     if (lang) {
       q = q.where(and(eq(userVocabulary.userId, userId), eq(lexemes.language, lang))) as any;
@@ -1262,7 +1853,7 @@ app.get('/api/vocabulary', async (req, res) => {
 
     res.json({
       total: rows.length,
-      words: rows.map(r => ({
+      words: rows.map((r) => ({
         ...r,
         stateName: ['New', 'Learning', 'Review', 'Relearning'][r.state] || 'Unknown',
         isMastered: r.state === 2 && r.stability > 5 && r.reps > 5,
@@ -1278,11 +1869,13 @@ app.get('/api/vocabulary', async (req, res) => {
 // Gated behind requireAuth for consistency with the rest of /api/* even
 // though the data isn't user-specific.
 app.get('/api/languages/voices', requireAuth, async (_req, res) => {
-  res.json(Object.values(LANGUAGES).map(lang => ({
-    code: lang.code,
-    name: lang.name,
-    voiceName: lang.tts.voice,
-  })));
+  res.json(
+    Object.values(LANGUAGES).map((lang) => ({
+      code: lang.code,
+      name: lang.name,
+      voiceName: lang.tts.voice,
+    })),
+  );
 });
 
 // ============================================================================
@@ -1299,14 +1892,19 @@ app.get('/api/services', async (req, res) => {
       clearTimeout(timeoutId);
       return { name, status: 'up', latencyMs: Date.now() - start, httpCode: response.status };
     } catch (e: any) {
-      return { name, status: 'down', latencyMs: Date.now() - start, error: e.name === 'AbortError' ? 'timeout' : e.message };
+      return {
+        name,
+        status: 'down',
+        latencyMs: Date.now() - start,
+        error: e.name === 'AbortError' ? 'timeout' : e.message,
+      };
     }
   };
 
   const [stt, tts, ollama] = await Promise.all([
-    checkService('STT (Qwen3-ASR)', 'http://localhost:8001/health'),
+    checkService('STT (Qwen3-ASR)', 'http://localhost:8002/health'),
     checkService('TTS (OmniVoice)', 'http://localhost:8882/health'),
-    checkService('LLM (vLLM Gemma 4 QAT)', 'http://localhost:8093/v1/models'),
+    checkService('LLM (K2 vLLM)', 'http://localhost:8889/v1/models'),
   ]);
 
   // Ollama: which models are currently loaded in VRAM
@@ -1314,7 +1912,7 @@ app.get('/api/services', async (req, res) => {
   let ollamaLoaded = false;
   try {
     const r = await fetch('http://localhost:11434/api/ps');
-    const d = await r.json() as any;
+    const d = (await r.json()) as any;
     ollamaModels = (d.models || []).map((m: any) => ({
       name: m.name,
       sizeVramMiB: Math.round((m.size_vram || 0) / 1024 / 1024),
@@ -1330,24 +1928,41 @@ app.get('/api/services', async (req, res) => {
   // GPU memory
   let gpu: any = null;
   try {
-    const gpuInfo = execFileSync('nvidia-smi', ['--query-gpu=memory.used,memory.free,memory.total', '--format=csv,noheader,nounits'], { encoding: 'utf-8', timeout: 5000 }).trim();
+    const gpuInfo = execFileSync(
+      'nvidia-smi',
+      ['--query-gpu=memory.used,memory.free,memory.total', '--format=csv,noheader,nounits'],
+      { encoding: 'utf-8', timeout: 5000 },
+    ).trim();
     const [used, free, total] = gpuInfo.split(',').map((s: string) => parseInt(s.trim()));
-    const appsRaw = execFileSync('nvidia-smi', ['--query-compute-apps=pid,used_memory,name', '--format=csv,noheader'], { encoding: 'utf-8', timeout: 5000 }).trim();
+    const appsRaw = execFileSync(
+      'nvidia-smi',
+      ['--query-compute-apps=pid,used_memory,name', '--format=csv,noheader'],
+      { encoding: 'utf-8', timeout: 5000 },
+    ).trim();
     // Label processes by reading their cmdline
-    const processes = appsRaw ? appsRaw.split('\n').filter(Boolean).map(line => {
-      const parts = line.split(',').map((s: string) => s.trim());
-      const pid = parts[0];
-      const memoryMiB = parseInt(parts[1]);
-      let label = parts[2]?.split('/').pop() ?? parts[2] ?? 'unknown';
-      try {
-        const cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim();
-        if (cmd.includes('server_stt')) label = 'STT (Faster Whisper)';
-        else if (cmd.includes('openai_tts_server')) label = 'TTS (MossTTS)';
-        else if (cmd.includes('node')) label = 'LiveKit Agent';
-        else if (cmd.includes('ollama')) label = 'Ollama';
-      } catch {}
-      return { pid, memoryMiB, name: label };
-    }).filter(p => !isNaN(p.memoryMiB)) : [];
+    const processes = appsRaw
+      ? appsRaw
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => {
+            const parts = line.split(',').map((s: string) => s.trim());
+            const pid = parts[0];
+            const memoryMiB = parseInt(parts[1]);
+            let label = parts[2]?.split('/').pop() ?? parts[2] ?? 'unknown';
+            try {
+              const cmd = fs
+                .readFileSync(`/proc/${pid}/cmdline`, 'utf8')
+                .replace(/\0/g, ' ')
+                .trim();
+              if (cmd.includes('server_stt')) label = 'STT (Faster Whisper)';
+              else if (cmd.includes('openai_tts_server')) label = 'TTS (MossTTS)';
+              else if (cmd.includes('node')) label = 'LiveKit Agent';
+              else if (cmd.includes('ollama')) label = 'Ollama';
+            } catch {}
+            return { pid, memoryMiB, name: label };
+          })
+          .filter((p) => !isNaN(p.memoryMiB))
+      : [];
     gpu = { usedMiB: used, freeMiB: free, totalMiB: total, processes };
   } catch {}
 
@@ -1395,19 +2010,34 @@ async function probeUrl(url: string, timeoutMs = 2500): Promise<boolean> {
 
 app.get('/api/local-health', requireAuth, async (req, res) => {
   const checkedAt = Date.now();
+  // 2026-09-02: on shared deployments local mode is off entirely (it runs
+  // on the operator's GPU). Report allowed=false and skip probing — the
+  // answer is the flag, not the health of services nobody should reach.
+  const allowed = process.env.ALLOW_LOCAL_MODE === 'true';
+  if (!allowed) {
+    return res.json({ online: false, allowed: false, checkedAt });
+  }
   if (LOCAL_MODE_BACKEND === 'audex') {
     const audexUrl = process.env.AUDEX_URL || 'http://127.0.0.1:7860';
     const online = await probeUrl(`${audexUrl}/api/status`);
-    return res.json({ online, backend: 'audex', checkedAt });
+    return res.json({ online, allowed: true, backend: 'audex', checkedAt });
   }
 
   // local-gemma-audio: require the whole trio up, same ports /api/services checks.
+  // 2026-09-06: STT probe moved 8001→8002 (Qwen3-ASR's real port; 8001 is
+  // Moonshine CPU-fallback, intentionally stopped when the GPU stack is up),
+  // LLM probe moved 8093→8889 (K2 replaced the dead Gemma QAT server).
   const [sttUp, ttsUp, llmUp] = await Promise.all([
-    probeUrl('http://localhost:8001/health'),
+    probeUrl('http://localhost:8002/health'),
     probeUrl('http://localhost:8882/health'),
-    probeUrl('http://localhost:8093/v1/models'),
+    probeUrl('http://localhost:8889/v1/models'),
   ]);
-  res.json({ online: sttUp && ttsUp && llmUp, backend: 'local-gemma-audio', checkedAt });
+  res.json({
+    online: sttUp && ttsUp && llmUp,
+    allowed: true,
+    backend: 'local-gemma-audio',
+    checkedAt,
+  });
 });
 
 // ============================================================================
@@ -1447,13 +2077,13 @@ app.get('/api/activity', async (req, res) => {
 
 // Patterns that should never appear in the log stream
 const SECRET_PATTERNS: RegExp[] = [
-  /sk[-_][a-zA-Z0-9]{20,}/g,       // API keys (sk-..., sk_...)
-  /API[a-zA-Z0-9]{12,}/g,           // LiveKit API keys
-  /Agym[a-zA-Z0-9]{30,}/g,          // LiveKit API secrets
+  /sk[-_][a-zA-Z0-9]{20,}/g, // API keys (sk-..., sk_...)
+  /API[a-zA-Z0-9]{12,}/g, // LiveKit API keys
+  /Agym[a-zA-Z0-9]{30,}/g, // LiveKit API secrets
   /Bearer\s+[a-zA-Z0-9._-]{20,}/g, // Auth tokens
-  /apikey[=:]\s*\S{20,}/gi,        // Key-value pairs
+  /apikey[=:]\s*\S{20,}/gi, // Key-value pairs
   /api[-_]?secret[=:]\s*\S{20,}/gi, // Secret values
-  /password[=:]\s*\S{8,}/gi,        // Passwords
+  /password[=:]\s*\S{8,}/gi, // Passwords
 ];
 
 function redactSecrets(line: string): string {
@@ -1470,7 +2100,7 @@ app.get('/api/logs', requireAuth, (req, res) => {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
+    Connection: 'keep-alive',
     'X-Content-Type-Options': 'nosniff',
   });
 
@@ -1523,10 +2153,15 @@ app.get('/api/logs', requireAuth, (req, res) => {
 // ============================================================================
 
 app.get('/api/events', requireAuth, (req, res) => {
+  const requestedSessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : '';
+  if (!requestedSessionId) {
+    return res.status(400).json({ error: 'sessionId query parameter is required' });
+  }
+
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
+    Connection: 'keep-alive',
     'X-Content-Type-Options': 'nosniff',
   });
 
@@ -1551,18 +2186,40 @@ app.get('/api/events', requireAuth, (req, res) => {
   const userId = req.user!.id;
   const escapedUserId = userId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const ownSessionPattern = new RegExp(`^room-linglang-${escapedUserId}-[^-]+-${escapedUserId}$`);
+  if (!ownSessionPattern.test(requestedSessionId)) {
+    return res.status(403).json({ error: 'sessionId does not belong to the authenticated user' });
+  }
 
   const cleanup = watchEvents(
     (event: AgentEvent) => {
-      if (!ownSessionPattern.test(event.sessionId)) return;
+      if (event.sessionId !== requestedSessionId) return;
       try {
         res.write(`data: ${JSON.stringify(event)}\n\n`);
-      } catch { /* client disconnected */ }
+      } catch {
+        /* client disconnected */
+      }
     },
-    () => { /* ignore errors */ }
+    () => {
+      /* ignore errors */
+    },
   );
 
+  // 2026-09-10: keep the stream alive through the reverse proxy. Nothing is
+  // written while a session is quiet (a user sitting on the dashboard between
+  // turns), so the proxy's read timeout fires and the browser gets a 504 —
+  // confirmed live for a beta user at 23:30, whose chat log then stopped
+  // updating until a manual reload. An SSE comment every 15s is invisible to
+  // EventSource but resets every idle timer on the path.
+  const keepAlive = setInterval(() => {
+    try {
+      res.write(': keepalive\n\n');
+    } catch {
+      /* client disconnected */
+    }
+  }, 15_000);
+
   req.on('close', () => {
+    clearInterval(keepAlive);
     cleanup();
   });
 });
@@ -1589,7 +2246,20 @@ const VALID_MODES: TutorMode[] = ['local', 'cloud'];
 app.post('/api/token', requireAuth, async (req, res) => {
   try {
     const requestedMode = req.body?.mode;
-    const mode: TutorMode = VALID_MODES.includes(requestedMode) ? requestedMode : 'local';
+    // 2026-09-02: cloud is the default now. Local mode runs the tutor on
+    // OUR GPU and is disabled by default on shared deployments — a
+    // self-hoster on their own hardware opts back in with
+    // ALLOW_LOCAL_MODE=true (their "local" is their own box, which is the
+    // whole point). Without the flag, a local request is refused rather
+    // than silently served.
+    const allowLocal = process.env.ALLOW_LOCAL_MODE === 'true';
+    if (requestedMode === 'local' && !allowLocal) {
+      return res.status(400).json({
+        error:
+          'Local mode is not enabled on this deployment. Use Cloud mode, or (self-hosters) set ALLOW_LOCAL_MODE=true.',
+      });
+    }
+    const mode: TutorMode = VALID_MODES.includes(requestedMode) ? requestedMode : 'cloud';
 
     // 2026-06-25: per-user deterministic room. Each user gets their own
     // room `linglang-<userId>`. The room name is NOT client-controlled
@@ -1632,7 +2302,11 @@ app.post('/api/token', requireAuth, async (req, res) => {
     // request" events 3s apart, both processing identical VAD/transcript
     // events for room linglang-will). Check for an existing dispatch first.
     const livekitUrl = process.env.LIVEKIT_URL || '';
-    const dispatchClient = new AgentDispatchClient(livekitUrl.replace('wss://', 'https://'), apiKey, apiSecret);
+    const dispatchClient = new AgentDispatchClient(
+      livekitUrl.replace('wss://', 'https://'),
+      apiKey,
+      apiSecret,
+    );
     const agentName = process.env.LINGLANG_AGENT_NAME ?? 'linglang-tutor';
 
     // listDispatch() throws for a room that doesn't exist yet (the normal
@@ -1656,11 +2330,14 @@ app.post('/api/token', requireAuth, async (req, res) => {
       // deleted the stale record via the API. Only count a dispatch as
       // live if it has no jobs yet (still pending assignment) or at least
       // one job that isn't JS_FAILED/JS_SUCCESS (i.e. actually running).
-      alreadyDispatched = existing.some(d => {
+      alreadyDispatched = existing.some((d) => {
         if (d.agentName !== agentName) return false;
         const jobs = d.state?.jobs ?? [];
         if (jobs.length === 0) return true;
-        return jobs.some(j => j.state?.status !== JobStatus.JS_FAILED && j.state?.status !== JobStatus.JS_SUCCESS);
+        return jobs.some(
+          (j) =>
+            j.state?.status !== JobStatus.JS_FAILED && j.state?.status !== JobStatus.JS_SUCCESS,
+        );
       });
     } catch {
       // Room doesn't exist yet (or listDispatch failed for some other
@@ -1668,7 +2345,9 @@ app.post('/api/token', requireAuth, async (req, res) => {
     }
 
     if (alreadyDispatched) {
-      console.log(`[Dashboard] Agent already dispatched for user ${userId} in room ${roomName}, skipping`);
+      console.log(
+        `[Dashboard] Agent already dispatched for user ${userId} in room ${roomName}, skipping`,
+      );
     } else {
       // 2026-07-18: Local mode is capped to ONE concurrent session across
       // ALL users while Audex is still being fixed — the local server is
@@ -1679,12 +2358,19 @@ app.post('/api/token', requireAuth, async (req, res) => {
       // Only checked for a NEW dispatch — reconnecting to your OWN
       // already-running local session is never blocked by this.
       if (mode === 'local') {
-        const roomService = new RoomServiceClient(livekitUrl.replace('wss://', 'https://'), apiKey, apiSecret);
+        const roomService = new RoomServiceClient(
+          livekitUrl.replace('wss://', 'https://'),
+          apiKey,
+          apiSecret,
+        );
         const activeRooms = await roomService.listRooms().catch(() => []);
-        const otherLocalRoom = activeRooms.find((r) => r.name.endsWith('-local') && r.name !== roomName);
+        const otherLocalRoom = activeRooms.find(
+          (r) => r.name.endsWith('-local') && r.name !== roomName,
+        );
         if (otherLocalRoom) {
           return res.status(423).json({
-            error: 'Local mode is in use by another session right now (it only supports one at a time). Try Cloud mode, or wait a bit.',
+            error:
+              'Local mode is in use by another session right now (it only supports one at a time). Try Cloud mode, or wait a bit.',
           });
         }
       }
@@ -1694,27 +2380,62 @@ app.post('/api/token', requireAuth, async (req, res) => {
       // incurs new cost here, so budget exhaustion mid-session doesn't cut
       // an existing conversation off.
       let googleApiKey: string | undefined;
-      if (mode === 'cloud') {
+      // 2026-09-02: BYO providers (see lib/provider-config.ts). Resolved
+      // per dispatch so key edits take effect on the next session, and
+      // passed down via job metadata like googleApiKey. A user who BYO'd
+      // the whole cascaded stack never touches Google at all — skip the
+      // shared-budget tripwire for them even in cloud mode (the factory
+      // downgrades gemini->cloud when BYO components are present).
+      const providers = await resolveProviders(userId).catch((err) => {
+        console.warn(
+          `[Dashboard] resolveProviders(${userId}) failed, using env defaults: ${String(err).slice(0, 120)}`,
+        );
+        return null;
+      });
+      const byoCoversGoogle =
+        !!providers &&
+        (providers.llm || providers.tts || providers.stt) &&
+        !providers.realtimeEnabled;
+      if (mode === 'cloud' && !byoCoversGoogle) {
         const plan = await getGoogleKeyPlan(userId);
         if (plan.useShared && plan.overBudget) {
           return res.status(402).json({
-            error: 'Shared Google API budget for this period is used up. Add your own free Gemini API key in Profile to keep using Cloud mode, or switch to Local mode.',
+            error:
+              'Shared Google API budget for this period is used up. Add your own free Gemini API key in Profile to keep using Cloud mode, or switch to Local mode.',
           });
         }
         googleApiKey = plan.apiKey ?? undefined;
+      } else if (mode === 'cloud' && byoCoversGoogle) {
+        // Still hand over the Google key if they have one — realtime
+        // could be enabled later without re-dispatching anything else.
+        googleApiKey = (await getGoogleKeyPlan(userId).catch(() => null))?.apiKey ?? undefined;
       }
 
       try {
         await dispatchClient.createDispatch(roomName, agentName, {
-          metadata: JSON.stringify({ mode, userId, googleApiKey, billGoogleUsage: mode === 'cloud' && !googleApiKey }),
+          metadata: JSON.stringify({
+            mode,
+            userId,
+            googleApiKey,
+            providers,
+            billGoogleUsage: mode === 'cloud' && !googleApiKey && !byoCoversGoogle,
+          }),
         });
-        console.log(`[Dashboard] Agent dispatch for user ${userId} in room ${roomName} (mode=${mode})`);
+        console.log(
+          `[Dashboard] Agent dispatch for user ${userId} in room ${roomName} (mode=${mode})`,
+        );
       } catch (dispatchErr: any) {
         console.warn(`[Dashboard] Agent dispatch warning: ${dispatchErr.message || dispatchErr}`);
       }
     }
 
-    res.json({ token, url: process.env.LIVEKIT_URL, roomName, mode });
+    res.json({
+      token,
+      url: process.env.LIVEKIT_URL,
+      roomName,
+      mode,
+      eventSessionId: `room-${roomName}-${userId}`,
+    });
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -1726,14 +2447,8 @@ app.post('/api/token', requireAuth, async (req, res) => {
 
 // Root: redirect to login. We don't ship a public landing page —
 // users always land on auth. Authenticated users go straight to /dashboard.
-app.get('/', (req, res) => {
-  const cookies = parseCookies(req.headers.cookie);
-  const sessionId = cookies['ll_session'];
-  const session = sessionId ? sessions.get(sessionId) : undefined;
-  if (session && (Date.now() - session.createdAt) <= SESSION_MAX_AGE_MS) {
-    return res.redirect('/dashboard');
-  }
-  return res.redirect('/login');
+app.get('/', requireAuth, (_req, res) => {
+  res.redirect('/dashboard');
 });
 
 // Dashboard — new React app (Vite build output in public/app/)
@@ -1779,22 +2494,32 @@ app.get('/api/vocabulary/:language', async (req, res) => {
     }
 
     const user = await db.query.users.findFirst({
-      where: eq(users.id, userId as string)
+      where: eq(users.id, userId as string),
     });
 
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
+    // Language is filtered in SQL. This used to take the `limit` most
+    // recently reviewed rows and THEN drop the ones in other languages, so a
+    // learner whose recent activity is in another language saw a short list
+    // or an empty one — the route is "vocabulary by language" but the limit
+    // was applied across all languages first.
     const progress = await db.query.userVocabulary.findMany({
-      where: eq(userVocabulary.userId, userId as string),
+      where: and(
+        eq(userVocabulary.userId, userId as string),
+        inArray(
+          userVocabulary.lexemeId,
+          db.select({ id: lexemes.id }).from(lexemes).where(eq(lexemes.language, language)),
+        ),
+      ),
       with: { lexeme: true },
       orderBy: [desc(userVocabulary.lastReview)],
       limit: parseInt(limit as string),
     });
 
-    const filtered = progress.filter(p => p.lexeme.language === language);
-    res.json(filtered);
+    res.json(progress);
   } catch (error) {
     res.status(500).json({ error: String(error) });
   }
@@ -1827,7 +2552,7 @@ app.patch('/api/users/:userId', requireAuth, async (req, res) => {
 
     // Check user exists first
     const user = await db.query.users.findFirst({
-      where: eq(users.id, userId)
+      where: eq(users.id, userId),
     });
 
     if (!user) {
@@ -1843,7 +2568,7 @@ app.patch('/api/users/:userId', requireAuth, async (req, res) => {
     }
 
     const updated = await db.query.users.findFirst({
-      where: eq(users.id, userId)
+      where: eq(users.id, userId),
     });
     res.json(updated);
   } catch (error) {
@@ -1860,70 +2585,31 @@ app.patch('/api/users/:userId', requireAuth, async (req, res) => {
  * Returns the merged persona for a user+language.
  */
 app.get('/api/users/:userId/persona', requireAuth, async (req, res) => {
+  res.setHeader('Cache-Control', 'private, no-store');
+  const userId = String(req.params.userId || '');
+  const lang = String(req.query.lang || 'all');
+  if (req.user!.id !== userId && req.user!.id !== 'will') return res.status(403).json({ error: 'Forbidden' });
+  if (!/^(all|[a-z]{2,3})$/.test(lang)) return res.status(400).json({ error: 'Invalid language' });
   try {
-    const { userId } = req.params;
-    const lang = (req.query.lang as string) || 'all';
-    if (req.user!.id !== userId && req.user!.id !== 'will') {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
-    const rows = await db.select().from(userPersona)
-      .where(eq(userPersona.userId, userId));
-    res.json({ userId, rows });
-  } catch (error) {
-    res.status(500).json({ error: String(error) });
-  }
+    const rows = await db.select().from(userPersona).where(eq(userPersona.userId, userId));
+    res.json({ userId, rows, effective: await readPersona(userId, lang), activation: 'next-session; live coaching is best-effort' });
+  } catch { res.status(503).json({ error: 'Preferences temporarily unavailable' }); }
 });
 
-/**
- * PATCH /api/users/:userId/persona
- * Body: { languageCode, personaOverride?, tone?, correctionStyle?, teachingMode?, extraInstructions? }
- * Upserts the persona for the given user+language. Source = 'ui'.
- */
 app.patch('/api/users/:userId/persona', requireAuth, async (req, res) => {
+  const userId = String(req.params.userId || '');
+  if (req.user!.id !== userId && req.user!.id !== 'will') return res.status(403).json({ error: 'Forbidden' });
   try {
-    const { userId } = req.params;
-    if (req.user!.id !== userId && req.user!.id !== 'will') {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
-    const {
-      languageCode = 'all',
-      personaOverride,
-      tone,
-      correctionStyle,
-      teachingMode,
-      extraInstructions,
-    } = req.body;
-
-    const validTones = ['roast', 'warm', 'neutral', 'formal', 'drill-sergeant', null, ''];
-    const validCorrections = ['immediate', 'gentle', 'ignore', 'end-of-turn', null, ''];
-    const validModes = ['conversational', 'drill', 'roleplay', 'storytelling', null, ''];
-
-    if (tone !== undefined && !validTones.includes(tone)) {
-      return res.status(400).json({ error: `Invalid tone: ${tone}` });
-    }
-    if (correctionStyle !== undefined && !validCorrections.includes(correctionStyle)) {
-      return res.status(400).json({ error: `Invalid correctionStyle: ${correctionStyle}` });
-    }
-    if (teachingMode !== undefined && !validModes.includes(teachingMode)) {
-      return res.status(400).json({ error: `Invalid teachingMode: ${teachingMode}` });
-    }
-
-    const patch: Record<string, string | null> = { source: 'ui' };
-    if (personaOverride !== undefined) patch.personaOverride = personaOverride || null;
-    if (tone !== undefined) patch.tone = tone || null;
-    if (correctionStyle !== undefined) patch.correctionStyle = correctionStyle || null;
-    if (teachingMode !== undefined) patch.teachingMode = teachingMode || null;
-    if (extraInstructions !== undefined) patch.extraInstructions = extraInstructions || null;
-
-    if (Object.keys(patch).length <= 1) {
-      return res.status(400).json({ error: 'No valid fields to update' });
-    }
-
-    await writePersona(userId, languageCode, patch as any);
-    res.json({ ok: true, userId, languageCode, patch });
-  } catch (error) {
-    res.status(500).json({ error: String(error) });
-  }
+    const languageCode = req.body.languageCode ?? 'all';
+    const values = validatePersonaPatch(req.body);
+    const inherit = req.body.inheritFields ?? [];
+    if (!Array.isArray(inherit) || !inherit.every(key => PERSONA_FIELDS.includes(key))) return res.status(400).json({ error: 'Invalid preference fields' });
+    if (!/^(all|[a-z]{2,3})$/.test(languageCode)) return res.status(400).json({ error: 'Invalid language' });
+    if (inherit.length) await db.execute(sql`UPDATE user_persona SET explicit_preferences=explicit_preferences-${inherit}::text[],updated_at=now() WHERE user_id=${userId} AND language_code=${languageCode}`);
+    if (Object.keys(values).length) await writePersona(userId, languageCode, {...values, source:'ui'});
+    invalidateLearnerView(userId, languageCode);
+    res.json({ ok:true, effective:await readPersona(userId,languageCode), activation:'next-session; live coaching is best-effort' });
+  } catch { res.status(400).json({ error:'Invalid preferences (text fields are limited to 2000 characters)' }); }
 });
 
 // ============================================================================
@@ -1963,7 +2649,8 @@ app.post('/api/users/:userId/onboarding/:lang', requireAuth, async (req, res) =>
       return res.status(400).json({ error: 'userId, lang, and selfRatedLevel are required' });
     }
 
-    const { saveOnboardingData, completeOnboarding, selfRatedLevelToAnchor } = await import('../lib/onboarding.js');
+    const { saveOnboardingData, completeOnboarding, selfRatedLevelToAnchor } =
+      await import('../lib/onboarding.js');
     const { setLevel } = await import('../lib/level-inference.js');
 
     // 2026-07-16: the multi-question form (prior study / goals) was cut —
@@ -2001,11 +2688,7 @@ app.post('/api/users/:userId/onboarding/:lang', requireAuth, async (req, res) =>
 // Serve public assets if they exist. Each is registered explicitly so
 // missing files return 404 (not 500 from a sendFile ENOENT). Files
 // that don't exist are simply skipped at startup.
-const publicFiles = [
-  'css/design-tokens.css',
-  'css/landing.css',
-  'js/landing.js',
-];
+const publicFiles = ['css/design-tokens.css', 'css/landing.css', 'js/landing.js'];
 for (const file of publicFiles) {
   const filePath = path.join(__dirname, 'public', file);
   if (!fs.existsSync(filePath)) {
@@ -2030,14 +2713,20 @@ app.get('/js/dashboard.js', requireAuth, (_req, res) => {
 });
 
 // Generic static files — but block auth-protected pages from being served here
-app.use(express.static(path.join(__dirname, 'public'), {
-  setHeaders: (res, filePath) => {
-    // Never serve dashboard or login HTML from static middleware
-    if (filePath.includes('dashboard.html') || filePath.includes('dashboard.css') || filePath.includes('dashboard.js')) {
-      res.status(404).end();
-    }
-  }
-}));
+app.use(
+  express.static(path.join(__dirname, 'public'), {
+    setHeaders: (res, filePath) => {
+      // Never serve dashboard or login HTML from static middleware
+      if (
+        filePath.includes('dashboard.html') ||
+        filePath.includes('dashboard.css') ||
+        filePath.includes('dashboard.js')
+      ) {
+        res.status(404).end();
+      }
+    },
+  }),
+);
 
 // ============================================================================
 // START SERVER
@@ -2045,8 +2734,16 @@ app.use(express.static(path.join(__dirname, 'public'), {
 
 // 2026-06-25: removed initialiseAuth() — auth is now per-user via the DB.
 // The server starts up clean; the first /api/login call hits the DB.
+// Restart recovery never auto-resumes provider spending; partial reports remain reviewable.
+void interruptAlignmentJobs().catch(() => console.error('[Alignment] Restart recovery failed'));
+const conversationRecovery = createConversationArchive();
+const replayConversations = () => conversationRecovery.drain().then(result => {
+  if (result.pending) console.warn(`[Archive] ${result.pending} pending durable events`);
+}).catch(() => console.error('[Archive] Recovery failed; files retained'));
+void replayConversations();
+setInterval(() => { void replayConversations(); }, 5000).unref();
 app.listen(PORT, () => {
-    console.log(`
+  console.log(`
 ╔════════════════════════════════════════════════════════════╗
 ║              LingLang Dashboard Server                     ║
 ╠════════════════════════════════════════════════════════════╣
@@ -2056,4 +2753,4 @@ app.listen(PORT, () => {
 ║  Rate:  10 login attempts / 15 min per IP                  ║
 ╚════════════════════════════════════════════════════════════╝
     `);
-  });
+});

@@ -39,12 +39,54 @@ interface RuntimeState {
   lastPlannerRun?: { at?: number; reason?: string; rawPrompt?: string; rawResponse?: string } | null;
   subagentChats?: Array<{ role: string; timestamp: number; prompt: string; response: string }>;
   sessionTrace?: Array<{ at: number; event: string; detail?: string }>;
-  updatedAt?: number;
+  // ISO string at runtime (see ago()); typed loosely to match the writer.
+  updatedAt?: number | string;
 }
 
-function ago(ts?: number | null): string {
+interface BenchmarkModel {
+  model: string;
+  label: string;
+  sourceFile: string;
+  promptVersion: string;
+  fixtureCount: number;
+  certified: boolean;
+  limitation: string;
+  metrics: {
+    exactMatchRate: number;
+    exactMatches: number;
+    falseRecallCredits: number;
+    falseFailures: number;
+    missedRecall: number;
+    rejectedOrErrors: number;
+    latencyP50Ms: number;
+    latencyP95Ms: number;
+  };
+}
+
+interface BenchmarkResponse {
+  ok: boolean;
+  error?: string;
+  configuredModel?: string | null;
+  configuredModelSource?: string;
+  configuredModelBenchmarked?: boolean;
+  configuredModelResult?: BenchmarkModel | null;
+  report?: {
+    benchmarkId: string;
+    generatedAt: string;
+    purpose: string;
+    selectionPolicy?: { qualityWinner?: string; latencyAwareAlternative?: string; policyNote?: string };
+    models: BenchmarkModel[];
+  };
+}
+
+function ago(ts?: number | string | null): string {
   if (!ts) return '—';
-  const s = Math.round((Date.now() - ts) / 1000);
+  // updatedAt arrives as an ISO string (JSON.stringify(new Date()) in
+  // tutor-event-driven.ts); epoch-ms numbers arrive as numbers. Coerce both.
+  const t = typeof ts === 'string' ? Date.parse(ts) : ts;
+  if (!Number.isFinite(t)) return '—';
+  const s = Math.round((Date.now() - t) / 1000);
+  if (s < 0) return 'just now';
   if (s < 60) return `${s}s ago`;
   if (s < 3600) return `${Math.round(s / 60)}m ago`;
   return `${Math.round(s / 3600)}h ago`;
@@ -65,6 +107,75 @@ function RawBlock({ label, text }: { label: string; text?: string }) {
         <span className="dbg-meta">{chars.toLocaleString()} chars · ~{approxTokens.toLocaleString()} tok</span>
       </button>
       {open && <pre className="dbg-pre">{text}</pre>}
+    </div>
+  );
+}
+
+function BenchmarkPanel() {
+  const [data, setData] = useState<BenchmarkResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch('/api/processor-benchmark')
+      .then(async (res) => {
+        const body = await res.json() as BenchmarkResponse;
+        if (!res.ok || !body.ok) throw new Error(body.error || `HTTP ${res.status}`);
+        if (!cancelled) setData(body);
+      })
+      .catch((e) => { if (!cancelled) setError(String(e)); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const models = data?.report?.models ?? [];
+  return (
+    <div className="dbg-panel dbg-benchmark-panel">
+      <div className="dbg-panel-header">
+        <h2>Processor capability test <span className="dbg-meta">· evidence-v2</span></h2>
+        <button className="dbg-btn" onClick={() => setOpen((v) => !v)}>{open ? '▼' : '▶'}</button>
+      </div>
+      {open && (
+        <div className="dbg-body">
+          {error && <div className="dbg-empty">Benchmark unavailable: {error}</div>}
+          {!error && !data && <div className="dbg-empty">Loading benchmark…</div>}
+          {data && (
+            <>
+              <div className="dbg-benchmark-current">
+                <div>
+                  <span className="dbg-k">active processor</span>{' '}
+                  <strong>{data.configuredModel || 'not reported'}</strong>{' '}
+                  <span className="dbg-meta">({data.configuredModelSource || 'runtime'})</span>
+                </div>
+                <div className={data.configuredModelBenchmarked ? 'dbg-benchmark-match' : 'dbg-benchmark-unmatched'}>
+                  {data.configuredModelBenchmarked ? '✓ benchmarked below' : '○ not in this fixture set'}
+                </div>
+              </div>
+              <div className="dbg-benchmark-note">
+                {data.report?.purpose} Results are diagnostic, not a certification or a claim about mastery.
+              </div>
+              <div className="dbg-benchmark-grid">
+                {models.map((model) => (
+                  <div className={`dbg-benchmark-card${model.model === data.configuredModelResult?.model ? ' is-active' : ''}`} key={model.model}>
+                    <div className="dbg-benchmark-model">{model.label}</div>
+                    <div className="dbg-meta dbg-benchmark-id">{model.model}</div>
+                    <div className="dbg-benchmark-stat"><strong>{Math.round(model.metrics.exactMatchRate * 100)}%</strong> exact fixture match</div>
+                    <div className="dbg-benchmark-stats">
+                      <span>missed recall <b>{model.metrics.missedRecall}</b></span>
+                      <span>errors <b>{model.metrics.rejectedOrErrors}</b></span>
+                      <span>p50 <b>{model.metrics.latencyP50Ms}ms</b></span>
+                      <span>p95 <b>{model.metrics.latencyP95Ms}ms</b></span>
+                    </div>
+                    {model.model === data.report?.selectionPolicy?.qualityWinner && <span className="dbg-benchmark-badge">quality winner</span>}
+                    {model.model === data.report?.selectionPolicy?.latencyAwareAlternative && <span className="dbg-benchmark-badge is-muted">latency alternative</span>}
+                  </div>
+                ))}
+              </div>
+              <div className="dbg-meta">{data.report?.generatedAt} · 36 synthetic cases · prompt {models[0]?.promptVersion ?? '—'}</div>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -189,6 +300,7 @@ export default function DebugTab() {
       <p className="dbg-sub-note">
         Live agent reasoning and the exact text handed to each model. Admin only.
       </p>
+      <BenchmarkPanel />
       <RuntimePanel />
       <AgentFlow />
     </div>

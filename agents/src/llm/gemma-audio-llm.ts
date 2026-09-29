@@ -116,16 +116,16 @@ class GemmaAudioLLMStream extends llm.LLMStream {
           model: this._model,
           messages,
           stream: true,
-          // 2026-07-02: this was forcing enable_thinking:true on every
-          // conversational turn, overriding the server's no-think default
-          // template (see gemma4-qat-vllm) and causing full chain-of-thought
-          // reasoning ("Sharp/witty? Yes. Roast with charm? Yes...") to be
-          // generated as the actual reply, sometimes running long enough to
-          // read as a hang. The conversation agent is the low-latency path —
-          // only Processor/Planner should ever request thinking, and only
-          // deliberately. Explicit false here so the default is never
-          // ambiguous even if the server-side template changes again.
-          chat_template_kwargs: { enable_thinking: false },
+          // 2026-09-08: endpoint is now Ling-3.0-tiny (vLLM :8889). Ling's
+          // hybrid-reasoning template THINKS BY DEFAULT (~250 reasoning
+          // tokens, analysis leaks into spoken content, +1.5s). K2's dial
+          // (reasoning_effort) is inert here. enable_thinking:false gives
+          // 0.1s TTFB, zero reasoning tokens — and K2's template ignored
+          // it, so the kwarg is safe across both models.
+          chat_template_kwargs: {
+            reasoning_effort: process.env.CONVERSATION_REASONING_EFFORT || 'low',
+            enable_thinking: false,
+          },
           temperature: 0.6,
           ...(this._extraKwargs ?? {}),
         }),

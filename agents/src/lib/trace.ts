@@ -32,6 +32,8 @@ import { randomUUID } from 'node:crypto';
 
 export type EventType =
   | 'user.transcript'
+  | 'user.transcript.partial'   // in-flight learner speech, replaced by the final
+  | 'user.transcript.rejected'  // retract a provisional phantom by itemId
   | 'agent.reply'
   | 'agent.state_change'
   | 'planner.start'

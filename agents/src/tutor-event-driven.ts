@@ -23,8 +23,100 @@
  * - Timer tick (30s) when signals pending
  * - After processor SRS updates
  */
-
+import {
+  type JobContext,
+  type JobProcess,
+  WorkerOptions,
+  cli,
+  defineAgent,
+  voice,
+} from '@livekit/agents';
+import { llm } from '@livekit/agents';
+import * as openai from '@livekit/agents-plugin-openai';
+import * as silero from '@livekit/agents-plugin-silero';
 import * as dotenv from 'dotenv';
+import { eq } from 'drizzle-orm';
+import { spawn } from 'node:child_process';
+import { rename, writeFile } from 'node:fs/promises';
+import http from 'node:http';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import * as z from 'zod';
+import {
+  LANGUAGES,
+  REALTIME_MODE_NAMES,
+  SESSION_FALLBACK_LANGUAGE,
+  getLanguageConfig,
+  isRealtimeOnlyLanguage,
+  nativeLanguageName,
+  resolveLanguageConfig,
+  resolveSessionLanguage,
+} from './config/languages.js';
+import {
+  PLATFORM_KNOWLEDGE,
+  buildCoachNote,
+  buildInstructions,
+  buildOnboardingInstructions,
+} from './config/prompts/base.js';
+import type { PromptContext } from './config/prompts/base.js';
+import { PLANNER_SYSTEM_PROMPT, buildPlannerPrompt } from './config/prompts/supervisor.js';
+import { resolveVoice } from './config/voices.js';
+import { db } from './db/index.js';
+import { parseSupervisorPersona } from './lib/persona-policy.js';
+import { profileIdentity, resolveConversationRoute } from './lib/model-prompts/profile.js';
+import { readProfile } from './lib/model-prompts/store.js';
+import { createConversationArchive } from './lib/conversation-store.js';
+import type { ConversationEvent } from './lib/conversation-archive.js';
+import { users } from './db/schema.js';
+import {
+  COACH_TOOL_INSTRUCTIONS,
+  CoachContext,
+  createCoachContextTool,
+} from './lib/coach-context.js';
+import { ContextManager } from './lib/context.js';
+import { recomputeActiveChunkCoverage, skipActiveChunk } from './lib/curriculum.js';
+import { buildEvidencePacket, evidenceMode } from './lib/evidence/runtime.js';
+import { runShadow } from './lib/evidence/service.js';
+import { type SessionMode, buildFrontierInfo } from './lib/frontier.js';
+import {
+  MAX_THROTTLE_NOTCHES,
+  buildMixLine,
+  computeTargetShare,
+  findForeignScriptChar,
+  measureTargetShare,
+  targetShareForLevel,
+} from './lib/language-mix.js';
+import { invalidateLearnerView, readLearnerView } from './lib/learner-view.js';
+import { buildLearnerPromptContext } from './lib/tutor-prompt-context.js';
+import { measureReplyOov } from './lib/lexical-lint.js';
+import { llmEvents } from './lib/llm-events.js';
+import { recordErrorObservations, recordUtterance } from './lib/memory.js';
+import {
+  buildOnboardingContext,
+  completeOnboarding,
+  getOnboardingLadder,
+  getOnboardingState,
+  saveOnboardingData,
+} from './lib/onboarding.js';
+import { readPersona } from './lib/persona.js';
+import { assessRealtimeTranscript } from './lib/realtime-transcript-guard.js';
+import { RealtimeUtteranceTracker } from './lib/realtime-utterances.js';
+import { StrayGenerationGuard } from './lib/stray-generation-guard.js';
+import { emitEvent, getSessionId, setSessionId } from './lib/trace.js';
+import { TranscriptDeduplicator } from './lib/transcript-deduplicator.js';
+import { UserAudioTap } from './lib/user-audio-tap.js';
+import { resolveAnalysisEndpoint } from './llm/analysis-endpoint.js';
+import {
+  GemmaAudioSTT,
+  audioPayloadRegistry,
+  registerUserAudioSpan,
+  setAudioTranscript,
+} from './stt/gemma-audio-stt.js';
+import { transcribeAudioWithQwen3ASR } from './stt/qwen3-asr-client.js';
+import { contentTools } from './tools/content-tools.js';
+import { dbTools } from './tools/db-tools.js';
+import { runProcessor, transcribeAudioWithLocalLLM } from './tools/supervisor-functions.js';
+
 // override:true ensures .env.local always wins over inherited shell env —
 // otherwise a stray SERVICE_MODE=cloud from a parent shell silently pins us
 // to the cloud stack and the local gemma-audio path never runs.
@@ -33,51 +125,9 @@ const _envMode = process.env.SERVICE_MODE || 'local';
 const _envTts = process.env.TTS_MODE || 'local';
 const _envLlm = process.env.LOCAL_LLM_URL || 'unset';
 const _envLlmModel = process.env.LOCAL_LLM_MODEL || 'unset';
-console.log(`[ENV] SERVICE_MODE=${_envMode} TTS_MODE=${_envTts} LLM_URL=${_envLlm} LLM_MODEL=${_envLlmModel} (dotenv loaded ${_dotenvResult.parsed ? Object.keys(_dotenvResult.parsed).length : 0} vars${_dotenvResult.error ? `, error: ${_dotenvResult.error.message}` : ''})`);
-
-import {
-  type JobContext,
-  type JobProcess,
-  WorkerOptions,
-  cli,
-  defineAgent,
-  voice
-} from '@livekit/agents';
-import * as openai from '@livekit/agents-plugin-openai';
-import * as silero from '@livekit/agents-plugin-silero';
-import { llm } from '@livekit/agents';
-import * as z from 'zod';
-import { fileURLToPath } from 'node:url';
-import { spawn } from 'node:child_process';
-import { resolve, dirname } from 'node:path';
-import { writeFile, rename } from 'node:fs/promises';
-import http from 'node:http';
-
-import { runProcessor, transcribeAudioWithLocalLLM } from './tools/supervisor-functions.js';
-import { transcribeAudioWithQwen3ASR } from './stt/qwen3-asr-client.js';
-import { resolveAnalysisEndpoint } from './llm/analysis-endpoint.js';
-import { resolveVoice } from './config/voices.js';
-import { readPersona } from './lib/persona.js';
-import { dbTools } from './tools/db-tools.js';
-import { contentTools } from './tools/content-tools.js';
-import { ContextManager } from './lib/context.js';
-import { audioPayloadRegistry, setAudioTranscript, GemmaAudioSTT } from './stt/gemma-audio-stt.js';
-import { getLanguageConfig, nativeLanguageName, LANGUAGES, resolveLanguageConfig, resolveSessionLanguage, isRealtimeOnlyLanguage, REALTIME_MODE_NAMES, SESSION_FALLBACK_LANGUAGE } from './config/languages.js';
-import { buildInstructions, buildCoachNote, buildOnboardingInstructions, PLATFORM_KNOWLEDGE } from './config/prompts/base.js';
-import type { PromptContext } from './config/prompts/base.js';
-import { computeTargetShare, buildMixLine, measureTargetShare, targetShareForLevel, MAX_THROTTLE_NOTCHES, findForeignScriptChar } from './lib/language-mix.js';
-import { PLANNER_SYSTEM_PROMPT, buildPlannerPrompt } from './config/prompts/supervisor.js';
-import { readLearnerView, invalidateLearnerView, formatWordList } from './lib/learner-view.js';
-import { measureReplyOov } from './lib/lexical-lint.js';
-import { buildFrontierInfo, type SessionMode } from './lib/frontier.js';
-import { db } from './db/index.js';
-import { users } from './db/schema.js';
-import { eq } from 'drizzle-orm';
-import { emitEvent, setSessionId, getSessionId } from './lib/trace.js';
-import { recordUtterance, recordErrorObservations } from './lib/memory.js';
-import { recomputeActiveChunkCoverage, skipActiveChunk } from './lib/curriculum.js';
-import { llmEvents } from './lib/llm-events.js';
-import { getOnboardingState, saveOnboardingData, completeOnboarding, buildOnboardingContext, getOnboardingLadder } from './lib/onboarding.js';
+console.log(
+  `[ENV] SERVICE_MODE=${_envMode} TTS_MODE=${_envTts} LLM_URL=${_envLlm} LLM_MODEL=${_envLlmModel} (dotenv loaded ${_dotenvResult.parsed ? Object.keys(_dotenvResult.parsed).length : 0} vars${_dotenvResult.error ? `, error: ${_dotenvResult.error.message}` : ''})`,
+);
 
 // ============================================================================
 // CONVERSATION HISTORY (for context)
@@ -91,7 +141,7 @@ import { getOnboardingState, saveOnboardingData, completeOnboarding, buildOnboar
  */
 interface AudioAttachment {
   audioId: string;
-  audioUri: string;       // data:audio/wav;base64,...
+  audioUri: string; // data:audio/wav;base64,...
   durationSec: number;
 }
 
@@ -99,7 +149,7 @@ interface ConversationTurn {
   role: 'user' | 'assistant';
   content: string;
   timestamp: number;
-  audio?: AudioAttachment;  // present on user turns that came in as native audio
+  audio?: AudioAttachment; // present on user turns that came in as native audio
 }
 
 class ConversationHistory {
@@ -135,8 +185,12 @@ class ConversationHistory {
 
   getContext(): string {
     return this.turns
-      .map(t => `${t.role === 'user' ? 'User' : 'Tutor'}: ${t.content}`)
+      .map((t) => `${t.role === 'user' ? 'User' : 'Tutor'}: ${t.content}`)
       .join('\n');
+  }
+
+  getEvidenceTurns(): { role: 'user' | 'assistant'; content: string }[] {
+    return this.turns.map((t) => ({ role: t.role, content: t.content }));
   }
 
   /**
@@ -186,9 +240,9 @@ class ConversationHistory {
    */
   getRecentTutorText(): string {
     return this.turns
-      .filter(t => t.role === 'assistant')
+      .filter((t) => t.role === 'assistant')
       .slice(-2)
-      .map(t => t.content)
+      .map((t) => t.content)
       .join(' ');
   }
 
@@ -224,7 +278,18 @@ class ConversationHistory {
     // text in front of it at all. Losing "scaffolded" detection accuracy
     // is a worthwhile trade for not writing hallucinated FSRS grades.
     if (last.role === 'user') {
-      if (last.audio && this.audioCapable) {
+      // A turn whose content is already the learner's real words (realtime
+      // sessions: Gemini's inputTranscription) must go down the TEXT branch
+      // even when an audio clip is attached. The clip is a tap segment whose
+      // duration comes from text arrival, not speech — an 11-word turn logged
+      // `dur=0.3s`, which caps the ceiling at 2 words and tells the model
+      // "at most ~2 words could fit", while the analysis endpoint is
+      // text-only anyway. Result before this fix: every realtime turn skipped
+      // by the supervisor's audio-without-transcript guard (Sept 4) or
+      // gutted by the hallucination ceiling. See docs: SRS wrote nothing
+      // between 2026-09-03 and 2026-09-10 because of this.
+      const placeholderTurn = /^\[audio key=/.test(last.content);
+      if (last.audio && this.audioCapable && placeholderTurn) {
         // 2026-07-02: a 1.57s clip produced a fabricated 9-word English
         // sentence — physically impossible (speech tops out ~2-3
         // words/sec, so ~4 words max). The system prompt's "return empty
@@ -258,13 +323,15 @@ class ConversationHistory {
 function httpGet(url: string, timeoutMs = 2000): Promise<boolean> {
   return new Promise((resolve) => {
     const timer = setTimeout(() => resolve(false), timeoutMs);
-    http.get(url, (res) => {
-      clearTimeout(timer);
-      resolve(res.statusCode !== undefined && res.statusCode < 500);
-    }).on('error', () => {
-      clearTimeout(timer);
-      resolve(false);
-    });
+    http
+      .get(url, (res) => {
+        clearTimeout(timer);
+        resolve(res.statusCode !== undefined && res.statusCode < 500);
+      })
+      .on('error', () => {
+        clearTimeout(timer);
+        resolve(false);
+      });
   });
 }
 
@@ -284,7 +351,14 @@ async function ensureLocalServices(): Promise<void> {
     checks.push({ name: 'TTS', url: 'http://localhost:8882/v1/audio/speech' });
   }
 
-  checks.push({ name: 'LLM', url: 'http://localhost:8093/v1/models' });
+  // 2026-09-09: was hardcoded to :8093 (dead Gemma QAT box) so the probe
+  // reported the LLM down even when :8889 was serving, and every session
+  // logged a bogus `[LocalServices] Down: LLM` line. Follow the same env
+  // chain the factory uses for the actual call.
+  checks.push({
+    name: 'LLM',
+    url: `${(process.env.PROCESSOR_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8889/v1').replace(/\/+$/, '')}/models`,
+  });
 
   if (checks.length === 0) {
     return; // nothing local to check (e.g. gemini / cloud-only)
@@ -310,7 +384,9 @@ async function ensureLocalServices(): Promise<void> {
         healthy: r.ok,
         latencyMs: r.latencyMs,
       });
-    } catch { /* trace not initialized in prewarm — harmless */ }
+    } catch {
+      /* trace not initialized in prewarm — harmless */
+    }
   }
 
   if (down.length === 0) {
@@ -334,7 +410,11 @@ async function persistSessionSummaryAsync(
   targetLang: string,
   startedAt: Date,
   runningSummary: string,
-  stats: { totalSrsUpdates: number; allErrors: Array<{ lemma: string; rule?: string }>; allHints: string[] },
+  stats: {
+    totalSrsUpdates: number;
+    allErrors: Array<{ lemma: string; rule?: string }>;
+    allHints: string[];
+  },
 ): Promise<void> {
   const endedAt = new Date();
   const durationMinutes = Math.round((endedAt.getTime() - startedAt.getTime()) / 60_000);
@@ -346,7 +426,8 @@ async function persistSessionSummaryAsync(
   for (const e of stats.allErrors) {
     errorMap.set(e.lemma, e.rule || 'error');
   }
-  const errorsPattern = [...errorMap.entries()].map(([lemma, rule]) => `${lemma}: ${rule}`).join('; ') || null;
+  const errorsPattern =
+    [...errorMap.entries()].map(([lemma, rule]) => `${lemma}: ${rule}`).join('; ') || null;
 
   // nextSessionHint is the whole continuity mechanism: it is the ONLY field
   // the next session's greeting reads, so when it's null the tutor opens
@@ -364,15 +445,17 @@ async function persistSessionSummaryAsync(
   // something worth returning to; padding it would make the next greeting
   // announce a plan to focus on nothing, which is worse than opening
   // normally.
-  const hintFromGrammar = stats.allHints.length > 0
-    ? [...new Set(stats.allHints)].slice(-3).join('; ')
-    : null;
+  const hintFromGrammar =
+    stats.allHints.length > 0 ? [...new Set(stats.allHints)].slice(-3).join('; ') : null;
   const troubleWords = [...errorMap.keys()].slice(-3);
-  const nextHint = hintFromGrammar
-    ?? (troubleWords.length > 0 ? `words that gave trouble: ${troubleWords.join(', ')}` : null);
+  const nextHint =
+    hintFromGrammar ??
+    (troubleWords.length > 0 ? `words that gave trouble: ${troubleWords.join(', ')}` : null);
 
   // The planner has been maintaining a running summary all session — use it directly.
-  const summary = runningSummary || `Session lasted ${durationMinutes}min with ${stats.totalSrsUpdates} word reviews.`;
+  const summary =
+    runningSummary ||
+    `Session lasted ${durationMinutes}min with ${stats.totalSrsUpdates} word reviews.`;
 
   await ContextManager.writeSessionSummary(userId, {
     languageCode: targetLang,
@@ -417,7 +500,9 @@ async function persistSessionSummaryAsync(
 // hit the same FP8-on-Ampere problem — only this mapping was reverted.
 // There will only ever be one "local" option in the UI, so this is a
 // straight swap, not an added mode.
-function resolveServiceMode(ctx: JobContext): 'local' | 'cloud' | 'local-gemma-audio' | 'local-qwen' | 'gemini' | 'audex' {
+function resolveServiceMode(
+  ctx: JobContext,
+): 'local' | 'cloud' | 'local-gemma-audio' | 'local-qwen' | 'gemini' | 'audex' {
   try {
     const raw = ctx.job.metadata;
     if (raw) {
@@ -428,7 +513,15 @@ function resolveServiceMode(ctx: JobContext): 'local' | 'cloud' | 'local-gemma-a
   } catch {
     // Malformed metadata — fall through to the env default below.
   }
-  return (process.env.SERVICE_MODE as 'local' | 'cloud' | 'local-gemma-audio' | 'local-qwen' | 'gemini' | 'audex') || 'local';
+  return (
+    (process.env.SERVICE_MODE as
+      | 'local'
+      | 'cloud'
+      | 'local-gemma-audio'
+      | 'local-qwen'
+      | 'gemini'
+      | 'audex') || 'local'
+  );
 }
 
 // 2026-07-17: /api/token resolves the caller's Google API plan (BYO key vs
@@ -438,12 +531,18 @@ function resolveServiceMode(ctx: JobContext): 'local' | 'cloud' | 'local-gemma-a
 // is only present when the user has their own key; `billGoogleUsage` marks
 // a gemini-mode session as needing to record its estimated cost against
 // the shared key on disconnect (see the gemini usage-accrual block below).
-function resolveGoogleBilling(ctx: JobContext): { googleApiKey?: string; billGoogleUsage: boolean } {
+function resolveGoogleBilling(ctx: JobContext): {
+  googleApiKey?: string;
+  billGoogleUsage: boolean;
+} {
   try {
     const raw = ctx.job.metadata;
     if (raw) {
       const parsed = JSON.parse(raw);
-      return { googleApiKey: parsed?.googleApiKey || undefined, billGoogleUsage: !!parsed?.billGoogleUsage };
+      return {
+        googleApiKey: parsed?.googleApiKey || undefined,
+        billGoogleUsage: !!parsed?.billGoogleUsage,
+      };
     }
   } catch {
     // Malformed metadata — no per-user key/billing info available.
@@ -457,6 +556,23 @@ function resolveGoogleBilling(ctx: JobContext): { googleApiKey?: string; billGoo
   // resolveDemoBilling below for why it's billed against a global bucket
   // instead of this per-user one).
   return { billGoogleUsage: !!process.env.DEMO_SESSION_TIME_LIMIT_MS };
+}
+
+// 2026-09-02: BYO providers ride the same dispatch-metadata channel as
+// googleApiKey (see /api/token in dashboard/server.ts). Already decrypted
+// server-side by resolveProviders(); here we just lift them out of JSON.
+// Type is structural (not imported) to keep the worker's import graph light.
+function resolveProvidersFromMeta(
+  ctx: JobContext,
+): import('./lib/provider-config.js').ResolvedProviders | undefined {
+  try {
+    const raw = ctx.job.metadata;
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw);
+    return parsed?.providers || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export default defineAgent({
@@ -498,8 +614,37 @@ export default defineAgent({
       // Malformed metadata — fall through and log the raw (non-JSON,
       // therefore not a valid carrier for a key) string as-is.
     }
-    console.log(`[Tutor-ED] Resolved service mode: ${resolvedMode} (job metadata: ${redactedMetadata})`);
+    // 2026-09-02: BYO providers must be known BEFORE resolvedMode is frozen
+    // into isGemini below — a user who BYO'd cascaded components but never
+    // opted into realtime runs the cascaded stack even though 'cloud'
+    // dispatch maps to gemini. (ServiceFactory mirrors this guard for
+    // non-dashboard callers; here it must happen first because isGemini
+    // gates STT/TTS construction ~500 lines later.)
+    const byoProviders = resolveProvidersFromMeta(ctx);
     const { googleApiKey, billGoogleUsage } = resolveGoogleBilling(ctx);
+    if (byoProviders) {
+      const hasGoogleKey = !!(
+        googleApiKey ||
+        process.env.GOOGLE_API_KEY ||
+        process.env.GEMINI_API_KEY
+      );
+      if (byoProviders.realtimeEnabled && hasGoogleKey && resolvedMode !== 'gemini') {
+        console.log('[Tutor-ED] BYO realtime.enabled -> upgrading session mode to gemini');
+        resolvedMode = 'gemini';
+      } else if (
+        resolvedMode === 'gemini' &&
+        (byoProviders.stt || byoProviders.llm || byoProviders.tts) &&
+        !byoProviders.realtimeEnabled
+      ) {
+        console.log(
+          '[Tutor-ED] BYO providers present, no realtime opt-in -> staying cascaded (cloud)',
+        );
+        resolvedMode = 'cloud';
+      }
+    }
+    console.log(
+      `[Tutor-ED] Resolved service mode: ${resolvedMode} (job metadata: ${redactedMetadata})`,
+    );
 
     const participant = await ctx.waitForParticipant();
     const userId = participant.identity || 'test-user';
@@ -524,7 +669,9 @@ export default defineAgent({
       const { getDemoBudgetStatus } = await import('./lib/demo-budget.js');
       const demoBudget = await getDemoBudgetStatus();
       if (demoBudget.overBudget) {
-        console.warn(`[Tutor-ED] Global demo budget exhausted (${demoBudget.spentMicros}/${demoBudget.limitMicros} micros) — declining session`);
+        console.warn(
+          `[Tutor-ED] Global demo budget exhausted (${demoBudget.spentMicros}/${demoBudget.limitMicros} micros) — declining session`,
+        );
         await ctx.room.disconnect();
         return;
       }
@@ -540,7 +687,7 @@ export default defineAgent({
 
     // === USER SETUP ===
     let user = await db.query.users.findFirst({
-      where: eq(users.id, userId)
+      where: eq(users.id, userId),
     });
 
     if (!user) {
@@ -552,7 +699,7 @@ export default defineAgent({
         proficiencyLevel: 'beginner',
       });
       user = await db.query.users.findFirst({
-        where: eq(users.id, userId)
+        where: eq(users.id, userId),
       });
     }
 
@@ -565,7 +712,9 @@ export default defineAgent({
     // session can teach anything, so bail rather than silently picking one for
     // them (that fallback is exactly how everyone ended up in Russian).
     if (!user.targetLanguage && !isDemoSession) {
-      console.warn(`[Tutor-ED] No target language selected for ${userId} — ending session; the app must onboard them first.`);
+      console.warn(
+        `[Tutor-ED] No target language selected for ${userId} — ending session; the app must onboard them first.`,
+      );
       await ctx.room.disconnect();
       return;
     }
@@ -592,7 +741,7 @@ export default defineAgent({
     if (isRealtimeOnlyLanguage(targetLang) && !REALTIME_MODE_NAMES.has(resolvedMode)) {
       console.log(
         `[Tutor-ED] "${targetLang}" has no local voice — running this session in gemini ` +
-        `instead of ${resolvedMode}, rather than dropping the learner to English.`,
+          `instead of ${resolvedMode}, rather than dropping the learner to English.`,
       );
       resolvedMode = 'gemini';
     }
@@ -605,7 +754,7 @@ export default defineAgent({
     if (resolvedLang.fellBackFrom) {
       console.error(
         `[Tutor-ED] Cannot run "${resolvedLang.fellBackFrom}" in ${resolvedMode} mode — ` +
-        `starting in ${langConfig.name} instead. The learner should be told and asked to pick again.`,
+          `starting in ${langConfig.name} instead. The learner should be told and asked to pick again.`,
       );
       targetLang = langConfig.code;
     }
@@ -651,21 +800,25 @@ export default defineAgent({
     // probe-evidence flow (spec §6.5) is worthless if it doesn't take
     // effect until the NEXT session.
     let userLevel = levelEstimate.level;
-    console.log(`[Tutor-ED] Level: ${userLevel} (${levelEstimate.source}, score=${levelEstimate.score.toFixed(1)}, conf=${levelEstimate.confidence.toFixed(2)})`);
+    console.log(
+      `[Tutor-ED] Level: ${userLevel} (${levelEstimate.source}, score=${levelEstimate.score.toFixed(1)}, conf=${levelEstimate.confidence.toFixed(2)})`,
+    );
 
     // === ONBOARDING STATE ===
     // Check if this user has completed onboarding for this language.
     // If not, the agent runs the onboarding conversation first, then
     // switches to normal tutoring once the verdict JSON is emitted.
-    const onboardingState = await getOnboardingState(userId, targetLang);
+    let onboardingState = await getOnboardingState(userId, targetLang);
     let inOnboarding = !onboardingState?.isComplete;
     // Fetched once per session (not per buildDynamicInstructions call —
     // that runs on every refresh during the 5-8 turn intake) — real words
     // from frequency_rank data to ground the staircase, spec §9. Only
     // fetch when actually needed.
-    const onboardingLadder = inOnboarding ? await getOnboardingLadder(targetLang) : [];
+    let onboardingLadder = inOnboarding ? await getOnboardingLadder(targetLang) : [];
     if (inOnboarding) {
-      console.log(`[Tutor-ED] Onboarding incomplete for ${userId}/${targetLang} — running intake flow (ladder: ${onboardingLadder.map((w) => w.lemma).join(', ') || 'none — falling back to unanchored'})`);
+      console.log(
+        `[Tutor-ED] Onboarding incomplete for ${userId}/${targetLang} — running intake flow (ladder: ${onboardingLadder.map((w) => w.lemma).join(', ') || 'none — falling back to unanchored'})`,
+      );
       // While the demo's language is still undecided, targetLang is only a
       // placeholder — writing the intake row now files it under a language
       // the visitor never asked for (every demo pt session had its intake
@@ -680,7 +833,8 @@ export default defineAgent({
     // every prompt build (§1/§4 of the redesign) — no session-local persona
     // or style cache. writePersona() call sites invalidate the cached view
     // so a patch takes effect on the very next build, not after a TTL.
-    const { buildPersonaBlockSync, writePersona, parsePersonaRequest } = await import('./lib/persona.js');
+    const { buildPersonaBlock, buildPersonaBlockSync, readPersona, writePersona, parsePersonaRequest } =
+      await import('./lib/persona.js');
 
     // === DYNAMIC INSTRUCTIONS (Supervisor-driven teaching plan) ===
     let supervisorNudge = '';
@@ -691,9 +845,51 @@ export default defineAgent({
     // re-injected turn after turn.
     let lastPromptContext: PromptContext | null = null;
     let lastCoachNote: string | null = null;
+    // A realtime coach packet is context, not a learner turn. Never append it
+    // while Gemini is thinking/speaking: doing so races the Live API's active
+    // turn and makes a harmless context update look like a new user event.
+    let pendingCoachNote: string | null = null;
+    const coachContext = new CoachContext();
+    const coachToolEnabled = isGemini && !isDemoSession && process.env.LINGLANG_COACH_TOOL === '1';
+    const coachTools = coachToolEnabled
+      ? [
+          createCoachContextTool(coachContext, (snapshot) => {
+            trace(
+              'coach.tool.read',
+              JSON.stringify({ version: snapshot.version, ageMs: snapshot.ageMs }),
+            );
+          }),
+        ]
+      : [];
     let runningSummary = '';
     let lastPlanAt = 0;
     const sessionStartedAt = new Date();
+    const evidenceSessionId = `${getSessionId()}:${crypto.randomUUID()}`;
+    // Immutable for this voice session. Preferences can refresh, model versions cannot.
+    const modelIdentity = profileIdentity(resolveConversationRoute(resolvedMode, byoProviders, googleApiKey), targetLang);
+    const modelProfile = isDemoSession ? { revision: 0, guidance: null } : await readProfile(userId, modelIdentity.key);
+    const archive = createConversationArchive();
+    const archiveWrites = new Set<Promise<unknown>>();
+    const archiveTurn = (event: Omit<ConversationEvent, 'userId' | 'sessionId' | 'language' | 'occurredAt'>) => {
+      // Anonymous demos keep their existing non-retention promise.
+      if (isDemoSession) return Promise.resolve();
+      const write = archive.record({ ...event, modelProfile: `${modelIdentity.key}:${modelProfile.revision}`, userId, sessionId: evidenceSessionId, language: targetLang, occurredAt: new Date().toISOString() })
+        .catch(() => { console.error('[Archive] Durable capture failed'); emitEvent('session.error', { component: 'conversation-archive', archiveSessionId: evidenceSessionId }); });
+      archiveWrites.add(write);
+      void write.finally(() => archiveWrites.delete(write));
+      return write;
+    };
+    const drainArchive = () => archive.drain().then(result => {
+      if (result.pending) console.warn(`[Archive] ${result.pending} events awaiting database delivery`);
+    }).catch(() => console.error('[Archive] Outbox replay failed; retained on disk'));
+    void drainArchive();
+    const archiveTimer = setInterval(() => { void drainArchive(); }, 5000);
+    archiveTimer.unref();
+    ctx.addShutdownCallback(async () => {
+      clearInterval(archiveTimer);
+      await Promise.allSettled([...archiveWrites]);
+      await Promise.race([drainArchive(), new Promise(resolve => setTimeout(resolve, 3000))]);
+    });
 
     // Cumulative session data for summary on disconnect
     const sessionStats = {
@@ -724,9 +920,13 @@ export default defineAgent({
       if (agentBusySince !== null && Date.now() - agentBusySince > AGENT_STUCK_TIMEOUT_MS) {
         console.error(
           `[Tutor-ED] CRITICAL: agent state stuck for >${AGENT_STUCK_TIMEOUT_MS}ms — ` +
-          `self-terminating job process to force recovery (see 2026-07-16 note above)`,
+            `self-terminating job process to force recovery (see 2026-07-16 note above)`,
         );
-        try { trace('watchdog.stuck_exit', `busyMs=${Date.now() - agentBusySince}`); } catch { /* best effort */ }
+        try {
+          trace('watchdog.stuck_exit', `busyMs=${Date.now() - agentBusySince}`);
+        } catch {
+          /* best effort */
+        }
         process.exit(1);
       }
     }, 10_000);
@@ -760,7 +960,11 @@ export default defineAgent({
       if (subagentChats.length > 20) subagentChats.shift();
     };
 
-    const runtimeStatePath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'runtime_state.json');
+    const runtimeStatePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      '..',
+      'runtime_state.json',
+    );
     let runtimeStateWritePending: NodeJS.Timeout | null = null;
     const writeRuntimeStateSoon = () => {
       if (runtimeStateWritePending) return;
@@ -795,7 +999,7 @@ export default defineAgent({
     // The conversation prompt adapts to session phase, error density, user
     // engagement, and detected style. These are signals the orchestrator
     // owns; the prompt builder is pure.
-    const recentUserTurnWords: number[] = []  // word counts, last 3 turns
+    const recentUserTurnWords: number[] = []; // word counts, last 3 turns
 
     // 2026-06-30: moved up from line ~1096. entry() calls
     // buildDynamicInstructions() at line 591, which captures this. A `let`
@@ -814,8 +1018,8 @@ export default defineAgent({
     // duplicate-bubble bug fixed in Task 4a (see review notes on
     // tutor-event-driven.ts:1611/:1807).
     let currentExchangeTurnSeq = 0;
-    const recentErrorCounts: number[] = []    // errors per processor run, last 3
-    const MAX_RECENT = 3
+    const recentErrorCounts: number[] = []; // errors per processor run, last 3
+    const MAX_RECENT = 3;
 
     // Nudge lifecycle (§5): a nudge older than this many turns is dropped
     // from the prompt so a stalled/failed planner cycle can't leave a stale
@@ -845,6 +1049,54 @@ export default defineAgent({
     let cleanRunsSinceThrottle = 0;
     const THROTTLE_DECAY_RUNS = 8;
 
+    // ── Reply-length watchdog ──
+    // The length directive (computeLengthLine) tells the tutor how long to
+    // be, but nothing verified it obeyed. Track the tutor's own recent
+    // reply word counts; when replies overshoot the target band for
+    // several turns in a row, computeLengthLine escalates from "1
+    // sentence" to a hard cap. Self-correcting: once replies come back
+    // under the cap the escalation decays (see lengthWatchdogLine).
+    const recentTutorReplyWords: number[] = [];
+    const TUTOR_REPLY_WINDOW = 4; // replies considered
+    const TUTOR_OVERSHOOT_STREAK = 3; // consecutive overshoots before tightening
+    let tutorOvershootStreak = 0;
+    function noteTutorReplyLength(text: string): void {
+      const words = text.trim().split(/\s+/).filter(Boolean).length;
+      recentTutorReplyWords.push(words);
+      if (recentTutorReplyWords.length > TUTOR_REPLY_WINDOW) recentTutorReplyWords.shift();
+      if (words > replyLengthCap() * 1.5) {
+        tutorOvershootStreak++;
+      } else {
+        tutorOvershootStreak = 0;
+      }
+    }
+    function replyLengthCap(): number {
+      // Mirror the level baselines in computeLengthLine (words, generous).
+      if (userLevel === 'pre_a1' || userLevel === 'a1') return 18;
+      if (userLevel === 'a2' || userLevel === 'b1') return 30;
+      return 45;
+    }
+    // Non-empty when the tutor has blown through the length band
+    // TUTOR_OVERSHOOT_STREAK times in a row — computeLengthLine turns
+    // this into a hard word cap. Consumed once per prompt build (the
+    // streak itself only resets on an in-band reply, so a persistently
+    // verbose tutor stays tightened).
+    let lengthWatchdogFired = false;
+    function consumeLengthWatchdog(): string | null {
+      if (tutorOvershootStreak >= TUTOR_OVERSHOOT_STREAK) {
+        if (!lengthWatchdogFired) {
+          trace(
+            'length.watchdog',
+            `streak=${tutorOvershootStreak} recent=${recentTutorReplyWords.join(',')}`,
+          );
+        }
+        lengthWatchdogFired = true;
+        return `Your last ${tutorOvershootStreak} replies ran long (${recentTutorReplyWords.slice(-TUTOR_OVERSHOOT_STREAK).join(', ')} words). Hard cap this turn: ${Math.round(replyLengthCap() / 2)} words. Finish the thought in one breath.`;
+      }
+      lengthWatchdogFired = false;
+      return null;
+    }
+
     // Session phase (§3): signal-driven, not turn-count-driven. wrapup is
     // sticky once set — reached only via an explicit "wants_to_end" signal
     // or the participant leaving, never by turn count alone (a long
@@ -852,49 +1104,49 @@ export default defineAgent({
     let forcedWrapup = false;
 
     function computeSessionPhase(turnCount: number): 'opening' | 'warmup' | 'flow' | 'wrapup' {
-      if (forcedWrapup) return 'wrapup'
-      if (turnCount === 0) return 'opening'
-      if (turnCount <= 2) return 'warmup'
-      return 'flow'
+      if (forcedWrapup) return 'wrapup';
+      if (turnCount === 0) return 'opening';
+      if (turnCount <= 2) return 'warmup';
+      return 'flow';
     }
 
     function computeErrorDensity(): number {
-      if (recentErrorCounts.length === 0) return 0
-      const sum = recentErrorCounts.reduce((a, b) => a + b, 0)
+      if (recentErrorCounts.length === 0) return 0;
+      const sum = recentErrorCounts.reduce((a, b) => a + b, 0);
       // 4 errors in a turn = 1.0, normalized
-      return Math.min(1, sum / (recentErrorCounts.length * 4))
+      return Math.min(1, sum / (recentErrorCounts.length * 4));
     }
 
     function computeEngagement(): 'fast' | 'medium' | 'slow' {
-      if (recentUserTurnWords.length === 0) return 'medium'
-      const avg = recentUserTurnWords.reduce((a, b) => a + b, 0) / recentUserTurnWords.length
-      if (avg < 3) return 'fast'  // terse
-      if (avg > 12) return 'slow'  // long, detailed
-      return 'medium'
+      if (recentUserTurnWords.length === 0) return 'medium';
+      const avg = recentUserTurnWords.reduce((a, b) => a + b, 0) / recentUserTurnWords.length;
+      if (avg < 3) return 'fast'; // terse
+      if (avg > 12) return 'slow'; // long, detailed
+      return 'medium';
     }
 
     // Turn-length trend and error trend — shared with the planner's
     // engagement block (§5) so its mandate has real inputs instead of
     // "care about enjoyment equally" with nothing to act on.
     function computeTurnLengthTrend(): 'growing' | 'shrinking' | 'steady' {
-      if (recentUserTurnWords.length < MAX_RECENT) return 'steady'
-      const first = recentUserTurnWords[0]!
-      const last = recentUserTurnWords[recentUserTurnWords.length - 1]!
-      if (last > first * 1.3) return 'growing'
-      if (last < first * 0.7) return 'shrinking'
-      return 'steady'
+      if (recentUserTurnWords.length < MAX_RECENT) return 'steady';
+      const first = recentUserTurnWords[0]!;
+      const last = recentUserTurnWords[recentUserTurnWords.length - 1]!;
+      if (last > first * 1.3) return 'growing';
+      if (last < first * 0.7) return 'shrinking';
+      return 'steady';
     }
 
     function computeErrorTrend(): 'rising' | 'falling' | 'steady' {
-      if (recentErrorCounts.length < MAX_RECENT) return 'steady'
-      const first = recentErrorCounts[0]!
-      const last = recentErrorCounts[recentErrorCounts.length - 1]!
-      if (last > first) return 'rising'
-      if (last < first) return 'falling'
-      return 'steady'
+      if (recentErrorCounts.length < MAX_RECENT) return 'steady';
+      const first = recentErrorCounts[0]!;
+      const last = recentErrorCounts[recentErrorCounts.length - 1]!;
+      if (last > first) return 'rising';
+      if (last < first) return 'falling';
+      return 'steady';
     }
 
-    const buildDynamicInstructions = async (): Promise<string> => {
+    const buildDynamicInstructionsBody = async (): Promise<string> => {
       // Onboarding mode: use the intake prompt until the verdict tool is called
       if (inOnboarding) {
         return buildOnboardingInstructions({
@@ -905,39 +1157,51 @@ export default defineAgent({
           languageUndecided,
           // Hand-written hook, if one is configured — see DEMO_OPENING_LINE.
           openingLine: process.env.DEMO_OPENING_LINE?.trim() || undefined,
-          existingData: onboardingState ? {
-            priorStudy: onboardingState.priorStudy ?? undefined,
-            studyDetails: onboardingState.studyDetails ?? undefined,
-            goals: onboardingState.goals ?? undefined,
-            goalDetails: onboardingState.goalDetails ?? undefined,
-            selfRatedLevel: onboardingState.selfRatedLevel ?? undefined,
-          } : undefined,
+          existingData: onboardingState
+            ? {
+                priorStudy: onboardingState.priorStudy ?? undefined,
+                studyDetails: onboardingState.studyDetails ?? undefined,
+                goals: onboardingState.goals ?? undefined,
+                goalDetails: onboardingState.goalDetails ?? undefined,
+                selfRatedLevel: onboardingState.selfRatedLevel ?? undefined,
+              }
+            : undefined,
           ladderWords: onboardingLadder,
+          persona: buildPersonaBlock(await readPersona(userId, targetLang)),
         });
       }
 
-      const errorContext = lastProcessorRun?.structuredErrors
-        ?.map((e: any) => `${e.lemma}: ${e.grammarRule?.rule || 'error'}`)
-        .join('; ') || 'None';
+      const errorContext =
+        lastProcessorRun?.structuredErrors
+          ?.map((e: any) => `${e.lemma}: ${e.grammarRule?.rule || 'error'}`)
+          .join('; ') || 'None';
 
       const hintContext = lastProcessorRun?.grammarHints?.join(' ') || 'None';
 
-      const phase = computeSessionPhase(totalUserTurns)
+      const phase = computeSessionPhase(totalUserTurns);
       const adaptive = {
         sessionPhase: phase,
         turnCount: totalUserTurns,
         errorDensity: computeErrorDensity(),
         pacing: computeEngagement(),
+        lengthWatchdog: consumeLengthWatchdog(),
       } as const;
 
       // The one read path (§1): due/new words, frontier inputs, and the
       // persona row, all live off the DB with a short TTL — no session
       // cache to keep in sync by hand.
       const view = await readLearnerView(userId, targetLang);
-      const frontier = buildFrontierInfo(view.dueWords, view.newWords, view.dueBacklog, view.recentSuccess, sessionMode);
+      const frontier = buildFrontierInfo(
+        view.dueWords,
+        view.newWords,
+        view.dueBacklog,
+        view.recentSuccess,
+        sessionMode,
+      );
 
       const nudgeAgeTurns = nudgeIssuedAtTurn !== null ? totalUserTurns - nudgeIssuedAtTurn : null;
-      const activeNudge = nudgeAgeTurns !== null && nudgeAgeTurns > NUDGE_TTL_TURNS ? '' : supervisorNudge;
+      const activeNudge =
+        nudgeAgeTurns !== null && nudgeAgeTurns > NUDGE_TTL_TURNS ? '' : supervisorNudge;
 
       const mixTargetShare = computeTargetShare({
         userLevel,
@@ -951,19 +1215,21 @@ export default defineAgent({
         nativeLanguage: usersNativeLanguage,
       });
 
-      const promptCtx = {
+      const promptCtx = buildLearnerPromptContext(view, {
+        modelGuidance: modelProfile.guidance ?? undefined,
         targetLanguage: langConfig.name,
         nativeLanguage: usersNativeLanguage,
         userLevel,
         persona: buildPersonaBlockSync(
-          view.persona.personaOverride, view.persona.tone,
-          view.persona.correctionStyle, view.persona.teachingMode,
+          view.persona.personaOverride,
+          view.persona.tone,
+          view.persona.correctionStyle,
+          view.persona.teachingMode,
           view.persona.extraInstructions,
         ),
         frontier,
         recentErrors: errorContext,
         grammarHints: hintContext,
-        demandWords: formatWordList(view.demandWords),
         // Re-enabled 2026-07-07 after redesigning the card format. The
         // original multi-field block (Topic:/Phrases:/Vocab:/Grammar:)
         // reproducibly broke real audio attention regardless of wording
@@ -977,14 +1243,14 @@ export default defineAgent({
         // model-generated card, not a hand-crafted one. If the card format
         // or wrapper text ever changes, re-verify with real audio first —
         // this model's audio attention is measurably fragile to phrasing.
-        lessonCard: view.activeChunk?.card ?? undefined,
-        goalUpdate: activeNudge || 'Just chat. React to what they say. If quiet, ask a simple question.',
+        goalUpdate:
+          activeNudge || 'Just chat. React to what they say. If quiet, ask a simple question.',
         previousSessionContext: greetingContext,
         mixLine,
         adaptive,
         specialInstructions: langConfig.pedagogy.specialInstructions,
         realtime: isGemini,
-      };
+      });
       // Stashed so the realtime path can rebuild just the volatile tail as
       // an injected [COACH] note — under Gemini the system prompt this
       // returns is only ever read once, at connect.
@@ -996,6 +1262,21 @@ export default defineAgent({
       // without guessing. Real accounts already know what they signed up
       // for — no reason to spend their context window on it.
       return isDemoSession ? `${instructions}\n\n${PLATFORM_KNOWLEDGE}` : instructions;
+    };
+
+    // Every pre-connect refresh must retain the tool contract (not just the
+    // Agent constructor). Otherwise initial context refresh erases it silently.
+    const buildDynamicInstructions = async (): Promise<string> => {
+      const instructions = await buildDynamicInstructionsBody();
+      if (!coachToolEnabled) return instructions;
+      if (inOnboarding) {
+        coachContext.update(
+          `Intake remains in progress for ${langConfig.name}. Continue onboarding; respect the learner's stated background and goals.`,
+        );
+      }
+      return `${instructions}
+
+${COACH_TOOL_INSTRUCTIONS}`;
     };
 
     // === ONBOARDING VERDICT TOOL (§10, revised 2026-07-10 per learner-field
@@ -1016,7 +1297,11 @@ export default defineAgent({
         studyDetails: z.string().optional().describe('Free text, e.g. "Duolingo 6 months"'),
         goals: z.array(z.enum(['travel', 'work', 'heritage', 'media', 'academic', 'other'])),
         goalDetails: z.string().optional(),
-        selfRatedLevel: z.enum(['pre_a1', 'a1', 'a2', 'b1', 'b2', 'c1', 'c2']).describe('Their OWN self-report, for context only — this does not set their level. Their level comes from how they actually did on the words you asked them to try.'),
+        selfRatedLevel: z
+          .enum(['pre_a1', 'a1', 'a2', 'b1', 'b2', 'c1', 'c2'])
+          .describe(
+            'Their OWN self-report, for context only — this does not set their level. Their level comes from how they actually did on the words you asked them to try.',
+          ),
       }),
       execute: async (args: any) => {
         console.log(`[Onboarding] Verdict tool called: self-rated=${args.selfRatedLevel}`);
@@ -1038,8 +1323,12 @@ export default defineAgent({
         // for why this can't wait for the next session.
         const freshEstimate = await inferLevel(userId, targetLang);
         userLevel = freshEstimate.level;
-        console.log(`[Onboarding] Level re-inferred post-intake: ${userLevel} (${freshEstimate.source}, score=${freshEstimate.score.toFixed(1)})`);
-        setNudge(`Onboarding complete. The user's level is ${userLevel}. Start the first real lesson — pick up naturally from the intake conversation.`);
+        console.log(
+          `[Onboarding] Level re-inferred post-intake: ${userLevel} (${freshEstimate.source}, score=${freshEstimate.score.toFixed(1)})`,
+        );
+        setNudge(
+          `Onboarding complete. The user's level is ${userLevel}. Start the first real lesson — pick up naturally from the intake conversation.`,
+        );
         await refreshInstructions();
         pendingSignals.push('onboarding_complete');
         updatePlanNow('onboarding_complete').catch(() => {});
@@ -1058,16 +1347,27 @@ export default defineAgent({
     // has to take effect on the very next breath.
     const setTargetLanguageTool = llm.tool({
       name: 'set_target_language',
-      description: "Set the language you are teaching. Call this the instant the learner names what they want to learn, before you reply to them. Pass the ISO 639-1 code — most widely-spoken languages work (es, fr, pt, ru, ar, de, it, ja, ko, zh, hi, uk, pl, tr, vi, th, sv, el, he and more). If the tool comes back unsupported, tell the learner that one isn't available yet and ask what else they'd like; never teach a language the tool rejected.",
+      description:
+        "Set the language you are teaching. Call this the instant the learner names what they want to learn, before you reply to them. Pass the ISO 639-1 code — most widely-spoken languages work (es, fr, pt, ru, ar, de, it, ja, ko, zh, hi, uk, pl, tr, vi, th, sv, el, he and more). If the tool comes back unsupported, tell the learner that one isn't available yet and ask what else they'd like; never teach a language the tool rejected.",
       parameters: z.object({
-        language: z.string().describe('ISO 639-1 code of the language the learner wants to learn, e.g. "es", "ja", "de"'),
+        language: z
+          .string()
+          .describe(
+            'ISO 639-1 code of the language the learner wants to learn, e.g. "es", "ja", "de"',
+          ),
       }),
       execute: async (args: any) => {
-        const code = String(args.language || '').toLowerCase().trim();
+        const code = String(args.language || '')
+          .toLowerCase()
+          .trim();
         const cfg = resolveLanguageConfig(code);
         if (!cfg) {
           trace('lang.tool', `${code} unsupported`);
-          return { ok: false, unsupported: true, note: `${code} isn't available yet — ask them to pick another language.` };
+          return {
+            ok: false,
+            unsupported: true,
+            note: `${code} isn't available yet — ask them to pick another language.`,
+          };
         }
         const ok = await applyTargetLanguage(code, 'tool');
         trace('lang.tool', `${code} ok=${ok}`);
@@ -1094,7 +1394,13 @@ export default defineAgent({
       // learner filling a form -- see tools/content-tools.ts. Excluded
       // from demo sessions: an anonymous visitor has no library, so the
       // tools would only ever return empty.
-      tools: [...dbTools, ...onboardingTools, ...demoTools, ...(isDemoSession ? [] : contentTools)],
+      tools: [
+        ...dbTools,
+        ...onboardingTools,
+        ...coachTools,
+        ...demoTools,
+        ...(isDemoSession ? [] : contentTools),
+      ],
     });
 
     // === CREATE SERVICES (LOCAL, CLOUD, OR GEMINI) ===
@@ -1111,7 +1417,7 @@ export default defineAgent({
       // targetLang is still the placeholder default — pinning speech
       // recognition to it made the model hear plain English as broken
       // Russian. What they're about to speak is their own language.
-      speechLanguage: languageUndecided ? (user.nativeLanguage || 'en') : undefined,
+      speechLanguage: languageUndecided ? user.nativeLanguage || 'en' : undefined,
       // Same reason as speechLanguage: fixed at connect, so it can't be
       // inherited from a placeholder. One default across demo and app so
       // signing up doesn't change who the user is talking to; a signed-in
@@ -1119,6 +1425,10 @@ export default defineAgent({
       voice: resolveVoice(sessionPersona?.voice),
       userId,
       googleApiKey,
+      // 2026-09-02: BYO per-component overrides (see lib/provider-config.ts).
+      // Mode reconciliation already happened above; the factory's own
+      // guard is a no-op here but stays for direct (non-dashboard) callers.
+      providers: byoProviders,
     });
 
     const mode = serviceFactory.getMode();
@@ -1148,17 +1458,24 @@ export default defineAgent({
         if (transcript === null && mode !== 'local-qwen') {
           const maxWords = Math.max(2, Math.round(durationSec * 3));
           transcript = await transcribeAudioWithLocalLLM(
-            [{
-              role: 'user',
-              content: [
-                // Same physical word ceiling the processor's audio messages
-                // carry — the stated bound is what keeps the 12B from
-                // inventing words that couldn't fit in the clip.
-                { type: 'text', text: `[User spoke for ${durationSec.toFixed(2)}s — at most ~${maxWords} words could physically fit in that time. Transcribe only the words you clearly hear; if you can't make out real words, output nothing.]` },
-                { type: 'audio_url', audio_url: { url: audioUri } },
-              ],
-            }],
-            process.env.PROCESSOR_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8093/v1',
+            [
+              {
+                role: 'user',
+                content: [
+                  // Same physical word ceiling the processor's audio messages
+                  // carry — the stated bound is what keeps the 12B from
+                  // inventing words that couldn't fit in the clip.
+                  {
+                    type: 'text',
+                    text: `[User spoke for ${durationSec.toFixed(2)}s — at most ~${maxWords} words could physically fit in that time. Transcribe only the words you clearly hear; if you can't make out real words, output nothing.]`,
+                  },
+                  { type: 'audio_url', audio_url: { url: audioUri } },
+                ],
+              },
+            ],
+            process.env.PROCESSOR_LLM_URL ||
+              process.env.LOCAL_LLM_URL ||
+              'http://localhost:8093/v1',
             process.env.PROCESSOR_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma4-12b-it-qat',
             process.env.PROCESSOR_LLM_KEY || process.env.LOCAL_LLM_KEY || '',
             langConfig.name,
@@ -1173,7 +1490,9 @@ export default defineAgent({
         if (transcript) {
           const foreign = findForeignScriptChar(transcript, langConfig.code);
           if (foreign) {
-            console.warn(`[STT] Rejecting transcript with foreign-script char "${foreign}" (target=${langConfig.code}): "${transcript.slice(0, 60)}"`);
+            console.warn(
+              `[STT] Rejecting transcript with foreign-script char "${foreign}" (target=${langConfig.code}): "${transcript.slice(0, 60)}"`,
+            );
             trace('stt.transcript.foreign_script_rejected', transcript.slice(0, 80));
             return null;
           }
@@ -1190,19 +1509,55 @@ export default defineAgent({
     // llama-swap unloads models after idle TTL; first request after load takes 30s+.
     // Fire a tiny request to wake the model and populate the KV cache before the user speaks.
     if (!isGemini && mode !== 'audex' && (llmService as any).model) {
-      const warmUrl = process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1';
+      // 2026-09-03: BYO endpoints must warm THEIR url — the hardcoded
+      // :8082 default pointed at nothing and the cold llama-swap load then
+      // raced the stuck-watchdog (49s page-in > 40s timeout = killed session).
+      const warmUrl =
+        byoProviders?.llm?.baseUrl || process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1';
       const warmModel = (llmService as any).model;
       console.log(`[Warmup] Warming local LLM: ${warmModel}`);
       fetch(`${warmUrl}/chat/completions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          // 2026-09-03: cloud BYO endpoints (tokenrouter) 401'd the headerless
+          // ping — warmup silently did nothing. Local llama-swap ignores it.
+          ...(byoProviders?.llm?.apiKey
+            ? { Authorization: `Bearer ${byoProviders.llm.apiKey}` }
+            : {}),
+        },
         body: JSON.stringify({
           model: warmModel,
           messages: [{ role: 'user', content: 'ready' }],
           max_tokens: 1,
         }),
-      }).then(() => console.log(`[Warmup] Local LLM ready`))
+      })
+        .then(() => console.log(`[Warmup] Local LLM ready`))
         .catch((e: any) => console.log(`[Warmup] Failed (non-fatal): ${e.message}`));
+    }
+    // 2026-09-03: warm the BYO TTS too — OmniVoice's first synthesis pays a
+    // ~6.5s voice-model load (measured: 6576ms TTFB cold vs ~420ms warm),
+    // which lands squarely on the greeting the user hears first.
+    if (!isGemini && mode !== 'audex' && byoProviders?.tts?.baseUrl) {
+      const ttsBase = byoProviders.tts.baseUrl
+        .replace(/\/v1\/audio\/speech\/?$/, '')
+        .replace(/\/$/, '');
+      console.log(`[Warmup] Warming BYO TTS: ${ttsBase}`);
+      fetch(`${ttsBase}/v1/audio/speech`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'omnivoice',
+          input: 'ready',
+          voice: byoProviders.tts.voice || 'default',
+          response_format: 'pcm',
+        }),
+      })
+        .then(async (res) => {
+          await res.arrayBuffer();
+          console.log(`[Warmup] BYO TTS ready`);
+        })
+        .catch((e: any) => console.log(`[Warmup] TTS failed (non-fatal): ${e.message}`));
     }
     // Also warm the supervisor/processor model (think variant) in parallel.
     // 2026-07-17: skip in audex mode — SUPERVISOR_LLM_URL defaults to the
@@ -1211,8 +1566,9 @@ export default defineAgent({
     // but there's no point firing a request known to fail.
     if (mode !== 'audex') {
       const supModel = process.env.SUPERVISOR_LLM_MODEL || process.env.LOCAL_LLM_MODEL;
-      const supUrl = process.env.SUPERVISOR_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1';
-      if (supModel && supModel !== ((llmService as any).model)) {
+      const supUrl =
+        process.env.SUPERVISOR_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1';
+      if (supModel && supModel !== (llmService as any).model) {
         fetch(`${supUrl}/chat/completions`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1221,7 +1577,8 @@ export default defineAgent({
             messages: [{ role: 'user', content: 'ready' }],
             max_tokens: 1,
           }),
-        }).then(() => console.log(`[Warmup] Supervisor model ready`))
+        })
+          .then(() => console.log(`[Warmup] Supervisor model ready`))
           .catch(() => {});
       }
     }
@@ -1328,6 +1685,44 @@ export default defineAgent({
     }) as typeof agent.sttNode;
 
     // === HELPERS: instruction refresh ===
+    const deliverCoachNote = async (note: string): Promise<boolean> => {
+      const realtimeSession = (agent as any)._agentActivity?.realtimeSession;
+      if (!realtimeSession) {
+        trace('coach.note.undeliverable', 'no realtimeSession on agent._agentActivity');
+        return false;
+      }
+
+      try {
+        // Gemini's public Live API accepts incremental `clientContent`
+        // messages with turnComplete=false. The LiveKit Google plugin
+        // deliberately disables its managed updateChatCtx() path for
+        // gemini-3.1, because it cannot represent message removal, but that
+        // capability flag does not mean the underlying WebSocket cannot
+        // accept an append-only content event.
+        if ((llmService as any)?.capabilities?.midSessionChatCtxUpdate === false) {
+          realtimeSession.sendClientEvent({
+            type: 'content',
+            value: {
+              turns: [{ role: 'user', parts: [{ text: note }] }],
+              turnComplete: false,
+            },
+          });
+          trace('coach.note.injected_direct', note);
+        } else {
+          const ctx = realtimeSession.chatCtx;
+          ctx.addMessage({ role: 'user', content: note });
+          await realtimeSession.updateChatCtx(ctx);
+          trace('coach.note', note);
+        }
+        lastCoachNote = note;
+        return true;
+      } catch (error) {
+        trace('coach.note.delivery_failed', String(error).slice(0, 240));
+        return false;
+      }
+    };
+
+    // === HELPERS: instruction refresh ===
     const refreshInstructions = async () => {
       trace('instructions.refresh');
       // 2026-07-12: this used to hand-set `_instructions` and push it
@@ -1351,7 +1746,11 @@ export default defineAgent({
       // plugin's updateInstructions() only marks the session for restart.
       // So the adaptive tail (planner nudge, frontier words, error
       // treatment, mix line) has to travel as conversation instead —
-      // updateChatCtx DOES deliver mid-session. Without this the whole
+      // updateChatCtx delivers only on models advertising mutable chat context.
+      // Gemini 3.1 rejects this path; do not confuse a no-op with delivery.
+      // deliverCoachNote selects the direct lane when
+      // midSessionChatCtxUpdate === false.
+      // Without a supported transport the whole
       // adaptive loop runs, logs, and changes nothing the learner hears.
       //
       // It goes to the realtime session directly rather than through
@@ -1375,14 +1774,22 @@ export default defineAgent({
           // was effectively running on its opening prompt all session.
           // The failure is now traced instead of swallowed.
           const realtimeSession = (agent as any)._agentActivity?.realtimeSession;
-          if (realtimeSession) {
-            lastCoachNote = note;
-            const ctx = realtimeSession.chatCtx;
-            ctx.addMessage({ role: 'user', content: note });
-            await realtimeSession.updateChatCtx(ctx);
-            trace('coach.note', note);
-          } else {
-            trace('coach.note.undeliverable', 'no realtimeSession on agent._agentActivity');
+          if (coachToolEnabled) {
+            coachContext.update(note);
+            trace(
+              'coach.note.cached',
+              `version=${coachContext.read().version}; awaits model tool call`,
+            );
+          } else if (realtimeSession) {
+            // Refreshes can run after the learner's turn has already caused
+            // Gemini to start speaking. Queue the packet for the next idle
+            // boundary rather than mutating an active Live API turn.
+            if (agentBusySince !== null) {
+              pendingCoachNote = note;
+              trace('coach.note.queued', `busy=${Date.now() - agentBusySince}ms ${note}`);
+            } else {
+              await deliverCoachNote(note);
+            }
           }
         }
       }
@@ -1421,25 +1828,43 @@ export default defineAgent({
       // Update TTS voice to match the new language
       const ttsService = session.tts as any;
       if (ttsService?.updateVoice) {
-        ttsService.updateVoice(newConfig.tts.omnivoiceVoice || 'auto', newConfig.tts.omnivoiceLanguage || newLang);
+        ttsService.updateVoice(
+          newConfig.tts.omnivoiceVoice || 'auto',
+          newConfig.tts.omnivoiceLanguage || newLang,
+        );
       } else if (!isGemini) {
-        console.warn(`[Lang:${source}] TTS does not support updateVoice — voice will stay as the old language`);
+        console.warn(
+          `[Lang:${source}] TTS does not support updateVoice — voice will stay as the old language`,
+        );
       }
 
       // Now that the language is real, open the intake record against it.
       if (wasUndecided) {
         await saveOnboardingData(userId, newLang, {}).catch((err: any) =>
-          console.warn('[Lang] Could not open onboarding row:', err?.message));
+          console.warn('[Lang] Could not open onboarding row:', err?.message),
+        );
       }
+
+      // Demo sessions start with an English placeholder before the learner
+      // names the language they want. Reload every target-scoped onboarding
+      // input after that choice; otherwise the first real prompt can retain
+      // the placeholder language's ladder, intake answers, and level.
+      onboardingState = await getOnboardingState(userId, newLang);
+      inOnboarding = !onboardingState?.isComplete;
+      onboardingLadder = inOnboarding ? await getOnboardingLadder(newLang) : [];
+      const freshLanguageEstimate = await inferLevel(userId, newLang);
+      userLevel = freshLanguageEstimate.level;
 
       await refreshDbContext();
       invalidateLearnerView(userId, newLang);
-      setNudge(wasUndecided
-        // First answer of a demo, not a change of mind — there is nothing
-        // to switch away from, and framing it as a switch would have the
-        // tutor apologise for a language the visitor never asked for.
-        ? `They just told you they want to learn ${newConfig.name}. React with delight IN THEIR OWN LANGUAGE, then hand them exactly ONE short ${newConfig.name} phrase with its meaning in the same breath, and get them saying it. Assume they understand no ${newConfig.name} at all yet — a full sentence of it right now is noise to them, not a welcome. No more setup questions.`
-        : `The user just asked to switch to ${newConfig.name}. Switch immediately, no pushback — don't question it, joke about it, or make them justify it. That's not a teaching moment, it's a request to honor. Greet them warmly in ${newConfig.name} right now and find out what they know.`);
+      setNudge(
+        wasUndecided
+          ? // First answer of a demo, not a change of mind — there is nothing
+            // to switch away from, and framing it as a switch would have the
+            // tutor apologise for a language the visitor never asked for.
+            `They just told you they want to learn ${newConfig.name}. React with delight IN THEIR OWN LANGUAGE, then hand them exactly ONE short ${newConfig.name} phrase with its meaning in the same breath, and get them saying it. Assume they understand no ${newConfig.name} at all yet — a full sentence of it right now is noise to them, not a welcome. No more setup questions.`
+          : `The user just asked to switch to ${newConfig.name}. Switch immediately, no pushback — don't question it, joke about it, or make them justify it. That's not a teaching moment, it's a request to honor. Greet them warmly in ${newConfig.name} right now and find out what they know.`,
+      );
       await refreshInstructions();
       pendingSignals.push('language_changed');
       updatePlanNow('user_request').catch(() => {});
@@ -1510,9 +1935,18 @@ export default defineAgent({
     const handleSupervisorTriggers = async (triggers: any[]) => {
       // Reverse map: language name → ISO code (for fallback reclassification)
       const langNameToCode: Record<string, string> = {
-        english: 'en', russian: 'ru', spanish: 'es', french: 'fr',
-        portuguese: 'pt', arabic: 'ar', german: 'de', chinese: 'zh',
-        japanese: 'ja', korean: 'ko', italian: 'it', dutch: 'nl',
+        english: 'en',
+        russian: 'ru',
+        spanish: 'es',
+        french: 'fr',
+        portuguese: 'pt',
+        arabic: 'ar',
+        german: 'de',
+        chinese: 'zh',
+        japanese: 'ja',
+        korean: 'ko',
+        italian: 'it',
+        dutch: 'nl',
       };
 
       for (const trigger of triggers) {
@@ -1520,7 +1954,9 @@ export default defineAgent({
         if (trigger.type === 'goal_change' && trigger.value) {
           const langCode = langNameToCode[trigger.value.toLowerCase()];
           if (langCode && langCode !== targetLang) {
-            console.log(`[Trigger] Reclassifying goal_change→language_change: ${trigger.value} → ${langCode}`);
+            console.log(
+              `[Trigger] Reclassifying goal_change→language_change: ${trigger.value} → ${langCode}`,
+            );
             trigger.type = 'language_change';
             trigger.value = langCode;
           }
@@ -1549,9 +1985,13 @@ export default defineAgent({
             });
             if (candidates.length === 1) {
               newLang = candidates[0]![0];
-              console.log(`[Trigger] language_change value was a no-op (${targetLang}→${targetLang}); recovered "${newLang}" from trigger reason`);
+              console.log(
+                `[Trigger] language_change value was a no-op (${targetLang}→${targetLang}); recovered "${newLang}" from trigger reason`,
+              );
             } else {
-              console.warn(`[Trigger] language_change is a no-op (already ${targetLang}) and reason names ${candidates.length} other languages — skipping`);
+              console.warn(
+                `[Trigger] language_change is a no-op (already ${targetLang}) and reason names ${candidates.length} other languages — skipping`,
+              );
               continue;
             }
           }
@@ -1570,7 +2010,9 @@ export default defineAgent({
           if (direction === 'easier' && mixThrottleNotches < MAX_THROTTLE_NOTCHES) {
             mixThrottleNotches++;
             cleanRunsSinceThrottle = 0;
-            console.log(`[Trigger] Mix throttle: notch ${mixThrottleNotches} — reducing target-language share`);
+            console.log(
+              `[Trigger] Mix throttle: notch ${mixThrottleNotches} — reducing target-language share`,
+            );
             trace('mix.throttle', `notches=${mixThrottleNotches}`);
           } else if (direction === 'harder' && mixThrottleNotches > 0) {
             mixThrottleNotches--;
@@ -1581,10 +2023,14 @@ export default defineAgent({
             const currentLevel = user.proficiencyLevel || 'beginner';
             const levels = ['beginner', 'intermediate', 'advanced'];
             const idx = levels.indexOf(currentLevel);
-            const newIdx = direction === 'easier' ? Math.max(0, idx - 1) : Math.min(levels.length - 1, idx + 1);
+            const newIdx =
+              direction === 'easier' ? Math.max(0, idx - 1) : Math.min(levels.length - 1, idx + 1);
             const newLevel = levels[newIdx];
             if (newLevel !== currentLevel) {
-              await db.update(users).set({ proficiencyLevel: newLevel }).where(eq(users.id, userId));
+              await db
+                .update(users)
+                .set({ proficiencyLevel: newLevel })
+                .where(eq(users.id, userId));
               user.proficiencyLevel = newLevel;
               console.log(`[Trigger] Difficulty: ${currentLevel} → ${newLevel}`);
               setNudge(`Adjusted difficulty to ${newLevel}. Adapt your teaching accordingly.`);
@@ -1600,7 +2046,9 @@ export default defineAgent({
         }
 
         if (trigger.type === 'goal_change' && trigger.value) {
-          setNudge(`The user wants to focus on: ${trigger.value}. Adjust your teaching to cover this topic.`);
+          setNudge(
+            `The user wants to focus on: ${trigger.value}. Adjust your teaching to cover this topic.`,
+          );
           await refreshInstructions();
           pendingSignals.push('goal_changed');
         }
@@ -1641,11 +2089,12 @@ export default defineAgent({
           if (requested === 'review' || requested === 'new' || requested === 'mixed') {
             sessionMode = requested;
             trace('session.mode_change', requested);
-            const modeLine = requested === 'review'
-              ? `The user asked to focus on review — work only with due/known words for now, no new material, until they say otherwise.`
-              : requested === 'new'
-                ? `The user asked for new material — lead with new words for now, still weave in due words when they fit.`
-                : `The user asked to go back to normal pacing.`;
+            const modeLine =
+              requested === 'review'
+                ? `The user asked to focus on review — work only with due/known words for now, no new material, until they say otherwise.`
+                : requested === 'new'
+                  ? `The user asked for new material — lead with new words for now, still weave in due words when they fit.`
+                  : `The user asked to go back to normal pacing.`;
             setNudge(modeLine);
             await refreshInstructions();
           } else {
@@ -1663,7 +2112,9 @@ export default defineAgent({
           });
           if (advancedChunkId) {
             trace('curriculum.advanced', `chunkId=${advancedChunkId} reason=user_request`);
-            setNudge(`The user asked to move on from the current material — they said they know it or want to skip ahead. Honor it immediately, no pushback, and pick up the next topic naturally.`);
+            setNudge(
+              `The user asked to move on from the current material — they said they know it or want to skip ahead. Honor it immediately, no pushback, and pick up the next topic naturally.`,
+            );
             await refreshInstructions();
           }
         }
@@ -1672,10 +2123,13 @@ export default defineAgent({
         if (trigger.type === 'persona_update' && trigger.value) {
           const personaPatch = parsePersonaRequest(trigger.value);
           if (personaPatch) {
-            personaPatch.source = 'user_voice';
+            // Processor output is an inference, not an authenticated user setting.
+            personaPatch.source = 'supervisor';
             await writePersona(userId, targetLang, personaPatch);
             invalidateLearnerView(userId, targetLang);
-            setNudge(`The user asked to adjust the teaching style: "${trigger.value}". Acknowledge briefly and adapt.`);
+            setNudge(
+              `The user asked to adjust the teaching style: "${trigger.value}". Acknowledge briefly and adapt.`,
+            );
             await refreshInstructions();
             trace('trigger.persona_update', JSON.stringify(personaPatch));
           }
@@ -1685,271 +2139,306 @@ export default defineAgent({
 
     const updatePlanNow = async (reason: string) => {
       try {
-      const now = Date.now();
-      trace('planner.update.start', `reason=${reason}`);
-      const cooldownMs = Number(process.env.PLAN_COOLDOWN_MS || 30_000);
-      if (lastPlanAt && now - lastPlanAt < cooldownMs && reason !== 'user_request') {
-        trace('planner.update.skipped', `reason=${reason} cooldownMs=${cooldownMs}`);
-        return;
-      }
+        const now = Date.now();
+        trace('planner.update.start', `reason=${reason}`);
+        const cooldownMs = Number(process.env.PLAN_COOLDOWN_MS || 30_000);
+        if (lastPlanAt && now - lastPlanAt < cooldownMs && reason !== 'user_request') {
+          trace('planner.update.skipped', `reason=${reason} cooldownMs=${cooldownMs}`);
+          return;
+        }
 
-      // Refresh DB cache if stale (older than 60s) or on session start
-      if (!cachedDbContext || reason === 'session_start' || now - dbContextAt > 60_000) {
-        await refreshDbContext();
-      }
+        // Refresh DB cache if stale (older than 60s) or on session start
+        if (!cachedDbContext || reason === 'session_start' || now - dbContextAt > 60_000) {
+          await refreshDbContext();
+        }
 
-      const recentHistory = history.getContext();
-      const dbContext = cachedDbContext;
+        const recentHistory = history.getContext();
+        const dbContext = cachedDbContext;
 
-      // Skip LLM call on session_start if there's no vocab to plan from.
-      if (reason === 'session_start' && !dbContext.trim()) {
-        setNudge('Start simple. Find out what they know, then build from there.');
-        lastPlanAt = now;
-        trace('planner.update.skipped', 'reason=no_vocab');
-        await refreshInstructions();
-        return;
-      }
+        // Skip LLM call on session_start if there's no vocab to plan from.
+        if (reason === 'session_start' && !dbContext.trim()) {
+          setNudge('Start simple. Find out what they know, then build from there.');
+          lastPlanAt = now;
+          trace('planner.update.skipped', 'reason=no_vocab');
+          await refreshInstructions();
+          return;
+        }
 
-      const goalNote = await ContextManager.updateGoals(userId,
-        lastProcessorRun?.structuredErrors
-          ? { errors: lastProcessorRun.structuredErrors, grammarHints: lastProcessorRun.grammarHints || [] }
-          : undefined
-      );
+        const goalNote = await ContextManager.updateGoals(
+          userId,
+          lastProcessorRun?.structuredErrors
+            ? {
+                errors: lastProcessorRun.structuredErrors,
+                grammarHints: lastProcessorRun.grammarHints || [],
+              }
+            : undefined,
+        );
 
-      const notes = cachedNotes;
-      const recentSessions = cachedSessions;
+        const notes = cachedNotes;
+        const recentSessions = cachedSessions;
 
-      const plannerUrl = process.env.SUPERVISOR_PLANNER_LLM_URL || process.env.SUPERVISOR_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8082/v1';
-      const plannerModel = process.env.SUPERVISOR_PLANNER_LLM_MODEL || process.env.SUPERVISOR_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma4-26b';
-      const plannerKey = process.env.SUPERVISOR_PLANNER_LLM_KEY || process.env.SUPERVISOR_LLM_KEY || process.env.LOCAL_LLM_KEY || '';
+        const plannerUrl =
+          process.env.SUPERVISOR_PLANNER_LLM_URL ||
+          process.env.SUPERVISOR_LLM_URL ||
+          process.env.LOCAL_LLM_URL ||
+          'http://localhost:8082/v1';
+        const plannerModel =
+          process.env.SUPERVISOR_PLANNER_LLM_MODEL ||
+          process.env.SUPERVISOR_LLM_MODEL ||
+          process.env.LOCAL_LLM_MODEL ||
+          'gemma4-26b';
+        const plannerKey =
+          process.env.SUPERVISOR_PLANNER_LLM_KEY ||
+          process.env.SUPERVISOR_LLM_KEY ||
+          process.env.LOCAL_LLM_KEY ||
+          '';
 
-      const systemPrompt = PLANNER_SYSTEM_PROMPT;
+        const systemPrompt = PLANNER_SYSTEM_PROMPT;
 
-      // Planner is text-only by design (see role→model contract, spec §11) —
-      // it reads pre-aggregated text (DB state, engagement trends, history),
-      // it doesn't need audio itself.
-      const previousNudgeAgeTurns = nudgeIssuedAtTurn !== null ? totalUserTurns - nudgeIssuedAtTurn : null;
-      // Cheap: readLearnerView has its own 10s TTL cache, so this is not an
-      // extra DB round-trip on every planner cycle.
-      const plannerView = await readLearnerView(userId, targetLang);
-      const userPrompt = buildPlannerPrompt({
-        dbContext,
-        goalNote,
-        recentHistory,
-        previousNudge: supervisorNudge || null,
-        previousNudgeAgeTurns,
-        runningSummary,
-        reason,
-        signals: pendingSignals,
-        notes,
-        recentSessions,
-        engagement: {
-          turnLengthTrend: computeTurnLengthTrend(),
-          pacing: computeEngagement(),
-          errorTrend: computeErrorTrend(),
-        },
-        curriculum: plannerView.activeChunk ? {
-          sourceTitle: plannerView.activeChunk.sourceTitle,
-          chunkTitle: plannerView.activeChunk.chunkTitle,
-          ord: plannerView.activeChunk.ord,
-          totalChunks: plannerView.activeChunk.totalChunks,
-          coverage: plannerView.activeChunk.coverage,
-          // Interpolated directly into the planner prompt (supervisor.ts) —
-          // fall back rather than let a literal "null" show up in-prompt
-          // for the rare case distillation hasn't finished/failed yet.
-          summary: plannerView.activeChunk.summary ?? '(not yet analyzed)',
-          nextChunk: plannerView.activeChunk.nextChunk ? {
-            title: plannerView.activeChunk.nextChunk.title,
-            summary: plannerView.activeChunk.nextChunk.summary ?? '(not yet analyzed)',
-          } : null,
-        } : null,
-      });
-      const plannerMessages: any[] = [{ role: 'user', content: userPrompt }];
+        // Planner is text-only by design (see role→model contract, spec §11) —
+        // it reads pre-aggregated text (DB state, engagement trends, history),
+        // it doesn't need audio itself.
+        const previousNudgeAgeTurns =
+          nudgeIssuedAtTurn !== null ? totalUserTurns - nudgeIssuedAtTurn : null;
+        // Cheap: readLearnerView has its own 10s TTL cache, so this is not an
+        // extra DB round-trip on every planner cycle.
+        const plannerView = await readLearnerView(userId, targetLang);
+        const userPrompt = buildPlannerPrompt({
+          dbContext,
+          preferences: buildPersonaBlock(plannerView.persona),
+          goalNote,
+          recentHistory,
+          previousNudge: supervisorNudge || null,
+          previousNudgeAgeTurns,
+          runningSummary,
+          reason,
+          signals: pendingSignals,
+          notes,
+          recentSessions,
+          engagement: {
+            turnLengthTrend: computeTurnLengthTrend(),
+            pacing: computeEngagement(),
+            errorTrend: computeErrorTrend(),
+          },
+          curriculum: plannerView.activeChunk
+            ? {
+                sourceTitle: plannerView.activeChunk.sourceTitle,
+                chunkTitle: plannerView.activeChunk.chunkTitle,
+                ord: plannerView.activeChunk.ord,
+                totalChunks: plannerView.activeChunk.totalChunks,
+                coverage: plannerView.activeChunk.coverage,
+                // Interpolated directly into the planner prompt (supervisor.ts) —
+                // fall back rather than let a literal "null" show up in-prompt
+                // for the rare case distillation hasn't finished/failed yet.
+                summary: plannerView.activeChunk.summary ?? '(not yet analyzed)',
+                nextChunk: plannerView.activeChunk.nextChunk
+                  ? {
+                      title: plannerView.activeChunk.nextChunk.title,
+                      summary: plannerView.activeChunk.nextChunk.summary ?? '(not yet analyzed)',
+                    }
+                  : null,
+              }
+            : null,
+        });
+        const plannerMessages: any[] = [{ role: 'user', content: userPrompt }];
 
-      console.log(
-        `[Planner] mode=text model=${plannerModel} url=${plannerUrl}`,
-      );
+        console.log(`[Planner] mode=text model=${plannerModel} url=${plannerUrl}`);
 
-      // 2026-06-25: planner now text-only. 300 tokens is plenty for
-      // NUDGE + SUMMARY (2-3 short sentences).
-      const resp = await fetch(`${plannerUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(plannerKey ? { Authorization: `Bearer ${plannerKey}` } : {}),
-        },
-        body: JSON.stringify({
-          model: plannerModel,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            ...plannerMessages,
-          ],
-          temperature: 0.2,
-          max_tokens: 300,
-        }),
-      });
+        // 2026-06-25: planner now text-only. 300 tokens is plenty for
+        // NUDGE + SUMMARY (2-3 short sentences).
+        // 2026-09-04: all analysis jobs on K2 (:8889) now. K2 exposes thinking
+        // depth via chat_template_kwargs.reasoning_effort (high|medium|low);
+        // the planner is background (not on any turn budget) so it gets full
+        // 'high' thinking. The kwarg only rides K2/local requests — if the
+        // planner is ever pointed back at OpenRouter, it goes out bare.
+        const plannerEffort = process.env.SUPERVISOR_PLANNER_REASONING_EFFORT || 'high';
+        const plannerIsLocal = plannerUrl.includes('localhost') || plannerUrl.includes('127.0.0.1');
+        const resp = await fetch(`${plannerUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(plannerKey ? { Authorization: `Bearer ${plannerKey}` } : {}),
+          },
+          body: JSON.stringify({
+            model: plannerModel,
+            messages: [{ role: 'system', content: systemPrompt }, ...plannerMessages],
+            temperature: 0.2,
+            max_tokens: 2000,
+            // K2 thinking dial. High effort hides its <ifm|think> block as
+            // reasoning_content (or burns it as EOS) — content stays clean.
+            ...(plannerIsLocal
+              ? { chat_template_kwargs: { reasoning_effort: plannerEffort } }
+              : {}),
+          }),
+        });
 
-      const data = (await resp.json()) as any;
-      // 2026-06-25: log non-2xx so silent failures (400, 500) are visible.
-      if (!resp.ok) {
-        console.warn(`[Planner] HTTP ${resp.status}: ${JSON.stringify(data).slice(0, 300)}`);
-        return;
-      }
-      const msg = data.choices?.[0]?.message;
-      // Think models: content may be empty if reasoning consumed the budget.
-      // Fall back to reasoning_content, or extract JSON from it.
-      let content = msg?.content || '';
+        const data = (await resp.json()) as any;
+        // 2026-06-25: log non-2xx so silent failures (400, 500) are visible.
+        if (!resp.ok) {
+          console.warn(`[Planner] HTTP ${resp.status}: ${JSON.stringify(data).slice(0, 300)}`);
+          return;
+        }
+        const msg = data.choices?.[0]?.message;
+        // Think models: content may be empty if reasoning consumed the budget.
+        // Fall back to reasoning_content, or extract JSON from it.
+        let content = msg?.content || '';
 
-      if (!content && msg?.reasoning_content) {
-        content = String(msg.reasoning_content).trim();
-      }
+        if (!content && msg?.reasoning_content) {
+          content = String(msg.reasoning_content).trim();
+        }
 
-      if (!content) {
-        console.warn('[Planner] Empty response — skipping');
-        return;
-      }
+        if (!content) {
+          console.warn('[Planner] Empty response — skipping');
+          return;
+        }
 
-      // Parse structured output from the planner — strict line-by-line:
-      // NUDGE: <text>        — the teaching nudge (required)
-      // SUMMARY: <text>      — updated running summary (required)
-      // NOTE[category]: <text> — optional durable learner insight
-      //
-      // Multi-line values: if NUDGE or SUMMARY needs to span multiple lines,
-      // subsequent lines must be indented. Blank lines reset to new field.
-      // Only parse NOTE from the actual content, not reasoning_content.
-      const noteContent = msg?.content || '';
-      let parsedNudge = '';
-      let parsedSummary = '';
-      const noteRegex = /^NOTE\[([a-z]+)\]:\s*(.+)$/;
-      // PERSONA: <field>=<value>[, <field>=<value>...] — supervisor patches the adaptive shell
-      // Example: PERSONA: tone=warm, correctionStyle=gentle
-      // Example: PERSONA: personaOverride=You are a sharp Lisbon local who roasts with dry wit.
-      const personaRegex = /^PERSONA:\s*(.+)$/;
-      // CURRICULUM: skip|revisit — a suggestion, not a command (design doc
-      // §5): it goes through the same coverage-tracked advancement write
-      // path as everything else, never mutates position directly.
-      const curriculumRegex = /^CURRICULUM:\s*(skip|revisit)\s*$/i;
+        // Parse structured output from the planner — strict line-by-line:
+        // NUDGE: <text>        — the teaching nudge (required)
+        // SUMMARY: <text>      — updated running summary (required)
+        // NOTE[category]: <text> — optional durable learner insight
+        //
+        // Multi-line values: if NUDGE or SUMMARY needs to span multiple lines,
+        // subsequent lines must be indented. Blank lines reset to new field.
+        // Only parse NOTE from the actual content, not reasoning_content.
+        const noteContent = msg?.content || '';
+        let parsedNudge = '';
+        let parsedSummary = '';
+        const noteRegex = /^NOTE\[([a-z]+)\]:\s*(.+)$/;
+        // PERSONA: <field>=<value>[, <field>=<value>...] — supervisor patches the adaptive shell
+        // Example: PERSONA: tone=warm, correctionStyle=gentle
+        // Example: PERSONA: personaOverride=You are a sharp Lisbon local who roasts with dry wit.
+        const personaRegex = /^PERSONA:\s*(.+)$/;
+        // CURRICULUM: skip|revisit — a suggestion, not a command (design doc
+        // §5): it goes through the same coverage-tracked advancement write
+        // path as everything else, never mutates position directly.
+        const curriculumRegex = /^CURRICULUM:\s*(skip|revisit)\s*$/i;
 
-      if (noteContent) {
-        for (const line of noteContent.split('\n')) {
-          const m = line.match(noteRegex);
-          if (m) {
-            const [, category, noteText] = m;
-            await ContextManager.writeNote(userId, category, noteText, 'observed');
-            trace('planner.note.written', `${category}: ${noteText.substring(0, 60)}`);
+        if (noteContent) {
+          for (const line of noteContent.split('\n')) {
+            const m = line.match(noteRegex);
+            if (m) {
+              const [, category, noteText] = m;
+              await ContextManager.writeNote(userId, category, noteText, 'observed');
+              trace('planner.note.written', `${category}: ${noteText.substring(0, 60)}`);
 
-            // NOTE[preference] also feeds into persona — parse it as a natural-language request
-            if (category === 'preference') {
-              const personaPatch = parsePersonaRequest(noteText);
-              if (personaPatch) {
-                personaPatch.source = 'supervisor';
-                await writePersona(userId, targetLang, personaPatch);
-                invalidateLearnerView(userId, targetLang);
-                trace('planner.persona.updated', JSON.stringify(personaPatch));
+              // NOTE[preference] also feeds into persona — parse it as a natural-language request
+              if (category === 'preference') {
+                const personaPatch = parsePersonaRequest(noteText);
+                if (personaPatch) {
+                  personaPatch.source = 'supervisor';
+                  await writePersona(userId, targetLang, personaPatch);
+                  invalidateLearnerView(userId, targetLang);
+                  trace('planner.persona.updated', JSON.stringify(personaPatch));
+                }
               }
             }
-          }
 
-          // CURRICULUM: planner-suggested skip/revisit — only "skip" is
-          // wired (calls the same skipActiveChunk write path the
-          // curriculum_advance voice trigger uses). "revisit" would mean
-          // reactivating a DONE chunk, which no write path supports yet —
-          // logged, not silently dropped, so a real ask for it is visible.
-          const cm = line.match(curriculumRegex);
-          if (cm) {
-            const action = cm[1].toLowerCase();
-            if (action === 'skip') {
-              skipActiveChunk(userId, targetLang).then((chunkId) => {
-                if (chunkId) trace('curriculum.advanced', `chunkId=${chunkId} reason=planner_suggested`);
-              }).catch((err) => console.error('[Planner] curriculum skip failed:', err));
-            } else {
-              console.warn(`[Planner] CURRICULUM: revisit requested — not yet implemented (no write path to reactivate a done chunk).`);
+            // CURRICULUM: planner-suggested skip/revisit — only "skip" is
+            // wired (calls the same skipActiveChunk write path the
+            // curriculum_advance voice trigger uses). "revisit" would mean
+            // reactivating a DONE chunk, which no write path supports yet —
+            // logged, not silently dropped, so a real ask for it is visible.
+            const cm = line.match(curriculumRegex);
+            if (cm) {
+              const action = cm[1].toLowerCase();
+              if (action === 'skip') {
+                skipActiveChunk(userId, targetLang)
+                  .then((chunkId) => {
+                    if (chunkId)
+                      trace('curriculum.advanced', `chunkId=${chunkId} reason=planner_suggested`);
+                  })
+                  .catch((err) => console.error('[Planner] curriculum skip failed:', err));
+              } else {
+                console.warn(
+                  `[Planner] CURRICULUM: revisit requested — not yet implemented (no write path to reactivate a done chunk).`,
+                );
+              }
+            }
+
+            // PERSONA: direct structured patch from supervisor
+            const pm = line.match(personaRegex);
+            if (pm) {
+              try {
+                const patch = parseSupervisorPersona(pm[1]);
+                if (Object.keys(patch).length) {
+                  await writePersona(userId, targetLang, { ...patch, source: 'supervisor' });
+                  invalidateLearnerView(userId, targetLang);
+                  trace('planner.persona.patched', 'inferred layer only');
+                }
+              } catch { trace('planner.persona.invalid', 'invalid preference proposal ignored'); }
             }
           }
+        }
 
-          // PERSONA: direct structured patch from supervisor
-          const pm = line.match(personaRegex);
-          if (pm) {
-            const patch: Record<string, string> = {};
-            for (const part of pm[1].split(',')) {
-              const [k, ...rest] = part.trim().split('=');
-              if (k && rest.length) patch[k.trim()] = rest.join('=').trim();
-            }
-            if (Object.keys(patch).length > 0) {
-              const personaPatch = { ...patch, source: 'supervisor' } as any;
-              await writePersona(userId, targetLang, personaPatch);
-              invalidateLearnerView(userId, targetLang);
-              trace('planner.persona.patched', JSON.stringify(patch));
-            }
+        // Extract NUDGE and SUMMARY — collect lines until next structured header or blank line
+        const lines = content.split('\n');
+        let currentField: 'nudge' | 'summary' | 'other' | null = null;
+        const nudgeLines: string[] = [];
+        const summaryLines: string[] = [];
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith('NUDGE:')) {
+            currentField = 'nudge';
+            nudgeLines.push(trimmed.slice(6).trim());
+            continue;
+          }
+          if (trimmed.startsWith('SUMMARY:')) {
+            currentField = 'summary';
+            summaryLines.push(trimmed.slice(8).trim());
+            continue;
+          }
+          if (
+            noteRegex.test(trimmed) ||
+            personaRegex.test(trimmed) ||
+            curriculumRegex.test(trimmed)
+          ) {
+            currentField = 'other'; // NOTE/PERSONA/CURRICULUM lines are parsed above
+            continue;
+          }
+          // Continuation line (indented or mid-paragraph under current field)
+          if (currentField === 'nudge' && trimmed) {
+            nudgeLines.push(trimmed);
+          } else if (currentField === 'summary' && trimmed) {
+            summaryLines.push(trimmed);
+          } else if (!trimmed) {
+            currentField = null; // blank line resets
           }
         }
-      }
 
-      // Extract NUDGE and SUMMARY — collect lines until next structured header or blank line
-      const lines = content.split('\n');
-      let currentField: 'nudge' | 'summary' | 'other' | null = null;
-      const nudgeLines: string[] = [];
-      const summaryLines: string[] = [];
+        parsedNudge = nudgeLines.join(' ').trim();
+        parsedSummary = summaryLines.join(' ').trim();
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith('NUDGE:')) {
-          currentField = 'nudge';
-          nudgeLines.push(trimmed.slice(6).trim());
-          continue;
+        // Only bump the nudge's issue-turn when it actually changed — an
+        // unchanged nudge keeps aging toward its TTL (§5).
+        if (parsedNudge) {
+          setNudge(parsedNudge);
+        } else if (!supervisorNudge) {
+          setNudge('Continue the conversation naturally.');
         }
-        if (trimmed.startsWith('SUMMARY:')) {
-          currentField = 'summary';
-          summaryLines.push(trimmed.slice(8).trim());
-          continue;
-        }
-        if (noteRegex.test(trimmed) || personaRegex.test(trimmed) || curriculumRegex.test(trimmed)) {
-          currentField = 'other'; // NOTE/PERSONA/CURRICULUM lines are parsed above
-          continue;
-        }
-        // Continuation line (indented or mid-paragraph under current field)
-        if (currentField === 'nudge' && trimmed) {
-          nudgeLines.push(trimmed);
-        } else if (currentField === 'summary' && trimmed) {
-          summaryLines.push(trimmed);
-        } else if (!trimmed) {
-          currentField = null; // blank line resets
-        }
-      }
+        runningSummary = parsedSummary || runningSummary;
 
-      parsedNudge = nudgeLines.join(' ').trim();
-      parsedSummary = summaryLines.join(' ').trim();
+        lastPlannerRun = {
+          at: now,
+          reason,
+          rawPrompt: systemPrompt + '\n\n' + userPrompt,
+          rawResponse: content,
+        };
+        addSubagentChat('Planner (Supervisor)', systemPrompt + '\n\n' + userPrompt, content);
 
-      // Only bump the nudge's issue-turn when it actually changed — an
-      // unchanged nudge keeps aging toward its TTL (§5).
-      if (parsedNudge) {
-        setNudge(parsedNudge);
-      } else if (!supervisorNudge) {
-        setNudge('Continue the conversation naturally.');
-      }
-      runningSummary = parsedSummary || runningSummary;
+        lastPlanAt = now;
+        pendingSignals.length = 0;
+        writeRuntimeStateSoon();
 
-      lastPlannerRun = {
-        at: now,
-        reason,
-        rawPrompt: systemPrompt + '\n\n' + userPrompt,
-        rawResponse: content
-      };
-      addSubagentChat('Planner (Supervisor)', systemPrompt + '\n\n' + userPrompt, content);
+        // Emit structured planner events for dashboard
+        emitEvent('planner.nudge', { reason, nudge: supervisorNudge });
+        emitEvent('planner.raw', {
+          prompt: (systemPrompt + '\n\n' + userPrompt).substring(0, 4000),
+          response: content.substring(0, 4000),
+        });
 
-      lastPlanAt = now;
-      pendingSignals.length = 0;
-      writeRuntimeStateSoon();
-
-      // Emit structured planner events for dashboard
-      emitEvent('planner.nudge', { reason, nudge: supervisorNudge });
-      emitEvent('planner.raw', {
-        prompt: (systemPrompt + '\n\n' + userPrompt).substring(0, 4000),
-        response: content.substring(0, 4000),
-      });
-
-      await refreshInstructions();
-      trace('planner.update.done', `reason=${reason}`);
+        await refreshInstructions();
+        trace('planner.update.done', `reason=${reason}`);
       } catch (planErr) {
         console.warn(`[Planner] updatePlanNow failed: ${String(planErr).substring(0, 120)}`);
         trace('planner.update.error', String(planErr));
@@ -1980,9 +2469,72 @@ export default defineAgent({
     // Batch ingestion: run the processor every N user turns and feed it the last N turns.
     const PROCESSOR_TURN_INTERVAL = Number(process.env.PROCESSOR_TURN_INTERVAL || 1);
     const pendingUserTurns: string[] = [];
-    let lastProcessedTranscript = '';  // Deduplicate: STT may emit FINAL_TRANSCRIPT after VAD EOU
+    const transcriptDeduplicator = new TranscriptDeduplicator();
 
-    session.on(voice.AgentSessionEventTypes.UserInputTranscribed, async (ev: any) => {
+    // === REALTIME UTTERANCE SEGMENTATION (2026-09-09) ===
+    // A realtime (S2S) session has no STT node and no VAD end-of-utterance:
+    // the plugin streams cumulative input transcription per *generation*, and
+    // one generation can span several learner utterances (speak → model starts
+    // → barge in → speak again). Feeding that blob straight through merged
+    // unrelated turns into 200-word "user" bubbles. Segment it into real
+    // utterances from the session's own speaking/listening transitions and
+    // re-enter the handler once per span — see lib/realtime-utterances.ts.
+    // The audio tap restores the PCM the STT node used to provide (playback +
+    // duration context); kill switch: LINGLANG_REALTIME_AUDIO_TAP=0.
+    const rtAudioTap =
+      isGemini && process.env.LINGLANG_REALTIME_AUDIO_TAP !== '0'
+        ? new UserAudioTap(ctx.room)
+        : null;
+    let rtAudioEvidenceStart = Date.now();
+    const rtTracker = isGemini
+      ? new RealtimeUtteranceTracker({
+          audioTap: rtAudioTap,
+          registerAudio: registerUserAudioSpan,
+          onUtterance: (u) => {
+            trace(
+              'rt.utterance',
+              `reason=${u.reason} dur=${u.durationSec}s lat=${u.latencySec ?? '-'}s ` +
+                `audio=${u.audio?.audioId ?? '-'} text=${JSON.stringify(u.text.slice(0, 140))}`,
+            );
+            void userInputTranscribedHandler({
+              transcript: u.text,
+              isFinal: true,
+              itemId: u.itemId,
+              __rt: u,
+            });
+          },
+        })
+      : null;
+    if (rtTracker) {
+      session.on(voice.AgentSessionEventTypes.UserStateChanged, (ev: any) =>
+        rtTracker.onUserState(ev.newState),
+      );
+      session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev: any) =>
+        rtTracker.onAgentState(ev.newState),
+      );
+      ctx.room.once('disconnected', () => rtTracker.stop());
+      rtTracker.start();
+      trace('rt.tracker.ready', `audioTap=${rtAudioTap ? 'on' : 'off'}`);
+    }
+
+    // === STRAY-GENERATION GUARD (2026-09-09) ===
+    // gemini-3.1-flash-live-preview sometimes emits a second model turn for one
+    // input — greeting split in two, or an extra unprompted question ~1-6s
+    // after the previous turn. The SDK hands us the SpeechHandle before it is
+    // authorized, so interrupting it there drops the audio and the transcript
+    // bubble. See lib/stray-generation-guard.ts for the evidence and the
+    // discriminator. Realtime only — the cascaded path creates handles per
+    // pipeline step and must never be cancelled this way.
+    const strayGuard = isGemini
+      ? new StrayGenerationGuard({ forceCancel: process.env.LINGLANG_STRAY_GUARD_FORCE === '1' })
+      : null;
+    if (strayGuard && rtAudioTap) {
+      // Earliest possible "the learner is speaking" signal (beats Gemini's own
+      // transcription by hundreds of ms, and survives its transcription drops).
+      rtAudioTap.onSpeechEnergy = () => strayGuard.noteLearnerSpeech();
+    }
+
+    const userInputTranscribedHandler = async (ev: any) => {
       trace(
         'session.user_input_transcribed',
         `final=${!!ev.isFinal} transcript=${JSON.stringify((ev.transcript || ev.text || '').slice(0, 160))}`,
@@ -2002,32 +2554,60 @@ export default defineAgent({
       //    (pttHeld) is the one case that must NOT commit — that's just a
       //    pause while the button is down.
       if (pttCommitPending || (pttMode === 'ptt' && !pttHeld)) {
-        const reason = pttCommitPending ? 'final transcript arrived' : 'strand recovery — manual mode, no hold in progress';
+        const reason = pttCommitPending
+          ? 'final transcript arrived'
+          : 'strand recovery — manual mode, no hold in progress';
         pttCommitPending = false;
-        if (pttCommitTimer) { clearTimeout(pttCommitTimer); pttCommitTimer = null; }
+        if (pttCommitTimer) {
+          clearTimeout(pttCommitTimer);
+          pttCommitTimer = null;
+        }
         trace('ptt.commit', reason);
-        try { session.commitUserTurn(); } catch (err) {
+        try {
+          session.commitUserTurn();
+        } catch (err) {
           console.warn('[PTT] commitUserTurn failed:', String(err).slice(0, 100));
         }
       }
-
-      // Deduplicate: the VAD EOU and STT FINAL_TRANSCRIPT can both trigger this
-      // with the same text within ~500ms. Skip if we already processed this exact text.
-      if (transcription === lastProcessedTranscript) {
-        console.log(`[User] Duplicate transcript skipped: "${transcription.substring(0, 50)}"`);
-        trace('session.user_input_duplicate', transcription.substring(0, 80));
-        return;
-      }
-      lastProcessedTranscript = transcription;
 
       // Detect audio transcripts from GemmaAudioSTT. The STT emits
       // `[audio key=<id> dur=<n>s] <transcript>` (transcript may be absent
       // if the transcription call failed — placeholder-only fallback) and
       // stashes the real audio URI in audioPayloadRegistry. We pull the URI
       // here so the Processor and Planner can analyze pronunciation.
-      const audioKeyMatch = transcription.match(/^\[audio key=([A-Za-z0-9]+)(?: dur=([0-9.]+)s)?\](?:\s+([\s\S]+))?$/);
+      const audioKeyMatch = transcription.match(
+        /^\[audio key=([A-Za-z0-9]+)(?: dur=([0-9.]+)s)?\](?:\s+([\s\S]+))?$/,
+      );
       const inlineTranscript = audioKeyMatch?.[3]?.trim() || undefined;
       let audioAttachment: AudioAttachment | undefined;
+      // Realtime sessions have no STT node, so the placeholder path above
+      // never fires there. The segmenter's audio tap already registered the
+      // PCM for this span — attach it the same way the STT placeholder does,
+      // so playback and the duration-based guards keep working.
+      const rtSpan = (ev as any).__rt as
+        | {
+            itemId?: string;
+            latencySec?: number | null;
+            durationSec?: number;
+            startedAt?: number;
+            endedAt?: number;
+            audio?: { audioId: string; durationSec: number; rms?: number; peak?: number } | null;
+          }
+        | undefined;
+      if (rtSpan?.audio) {
+        const entry = audioPayloadRegistry.get(rtSpan.audio.audioId);
+        if (entry) {
+          audioAttachment = {
+            audioId: rtSpan.audio.audioId,
+            audioUri: entry.uri,
+            durationSec: entry.durationSec,
+          };
+          console.log(
+            `[User] Realtime span audio: key=${rtSpan.audio.audioId} ` +
+              `dur=${entry.durationSec.toFixed(2)}s (${(entry.uri.length / 1024).toFixed(1)} KB)`,
+          );
+        }
+      }
       if (audioKeyMatch) {
         const audioId = audioKeyMatch[1];
         const entry = audioPayloadRegistry.get(audioId);
@@ -2039,19 +2619,77 @@ export default defineAgent({
           };
           console.log(
             `[User] Audio turn: key=${audioId} dur=${entry.durationSec.toFixed(2)}s ` +
-            `(${(entry.uri.length / 1024).toFixed(1)} KB)` +
-            (inlineTranscript ? ` heard="${inlineTranscript.slice(0, 60)}"` : ' (no transcript)'),
+              `(${(entry.uri.length / 1024).toFixed(1)} KB)` +
+              (inlineTranscript ? ` heard="${inlineTranscript.slice(0, 60)}"` : ' (no transcript)'),
           );
         } else {
           console.warn(
             `[User] Audio key=${audioId} not in registry ` +
-            `(size=${audioPayloadRegistry.size}) — Processor will see placeholder only`,
+              `(size=${audioPayloadRegistry.size}) — Processor will see placeholder only`,
           );
         }
       } else {
         console.log(`[User] ${transcription}`);
       }
 
+      // Reject phantom learner turns. Gemini sometimes reports an
+      // `inputTranscription` that is its OWN text (see the header of
+      // lib/realtime-transcript-guard.ts for the live evidence: a 0.20s
+      // digital-silence clip transcribed as the tutor's greeting). Those turns
+      // used to reach the bubble, the session summary and the processor, which
+      // is how a beginner's session got summarised as "repeating the tutor
+      // verbatim" — a description of the bug. Now that grading actually runs,
+      // an invented turn would write FSRS grades for words never spoken, so it
+      // is dropped here, before history/planner/processor see it.
+      // Placeholder turns are exempt: GemmaAudioSTT transcribed real audio.
+      if (!audioKeyMatch && rtAudioTap) {
+        // Input transcription can arrive seconds after the actual speech.
+        // Inspect all audio since the preceding final, not a window around text.
+        const evidenceEnd = Date.now();
+        const nearbyPeak = rtAudioTap.peakIn(rtAudioEvidenceStart, evidenceEnd);
+        rtAudioEvidenceStart = evidenceEnd;
+        const verdict = assessRealtimeTranscript({
+          text: transcription,
+          tutorText: history.getRecentTutorText(),
+          nearbyPeak,
+          tapHealthy: rtAudioTap.hasSeenSpeech,
+          spanSec: rtSpan?.durationSec ?? null,
+        });
+        if (!verdict.accept) {
+          console.warn(
+            `[User] Dropped phantom transcript (${verdict.reason}): ` +
+              `"${transcription.slice(0, 80)}" — ${verdict.detail}`,
+          );
+          trace(
+            'session.user_input_rejected',
+            `${verdict.reason}: ${verdict.detail} :: ${transcription.slice(0, 80)}`,
+          );
+          await archiveTurn({ role: 'learner', turnId: String(rtSpan?.itemId ?? ev.itemId ?? crypto.randomUUID()), text: transcription, status: 'rejected', reason: verdict.reason ?? undefined, interrupted: null, source: 'realtime-guard' });
+          emitEvent('user.transcript.rejected', {
+            itemId: rtSpan?.itemId ?? ev.itemId ?? null,
+            reason: verdict.reason,
+          });
+          return;
+        }
+      }
+
+      // Identity, not phrase equality: repeating an answer is legitimate practice.
+      // Validate first so rejected provisional text cannot consume an utterance ID.
+      if (!transcriptDeduplicator.accept(transcription, rtSpan?.itemId ?? ev.itemId)) {
+        trace('session.user_input_duplicate', transcription.substring(0, 80));
+        return;
+      }
+      const sourceTurnId = String(rtSpan?.itemId ?? ev.itemId ?? audioAttachment?.audioId ?? crypto.randomUUID());
+      const archivedEventId = await archiveTurn({ role: 'learner', turnId: sourceTurnId, text: inlineTranscript ?? transcription,
+        status: audioKeyMatch && !inlineTranscript ? 'rejected' : 'final',
+        reason: audioKeyMatch && !inlineTranscript ? 'No independent STT transcript; audio placeholder is not learner evidence' : undefined,
+        interrupted: null, source: audioKeyMatch ? 'stt' : 'realtime' });
+      const explicitPreference = parsePersonaRequest(inlineTranscript ?? transcription);
+      if (explicitPreference) {
+        await writePersona(userId, targetLang, { ...explicitPreference, source: 'user_voice' });
+        invalidateLearnerView(userId, targetLang);
+        await refreshInstructions();
+      }
       history.addUserTurn(transcription, audioAttachment);
       totalUserTurns++;
       // turnSeq: monotonic per-user-turn id, threaded through the related
@@ -2071,10 +2709,23 @@ export default defineAgent({
         const combined = [...pttSegmentTexts, inlineTranscript ?? transcription].join(' ');
         // Audio dump keys ride along so the frontend can offer playback of
         // exactly what the model heard (served via /api/audio-dumps/:key).
-        const audioIds = [...pttSegmentAudioIds, ...(audioAttachment ? [audioAttachment.audioId] : [])];
+        const audioIds = [
+          ...pttSegmentAudioIds,
+          ...(audioAttachment ? [audioAttachment.audioId] : []),
+        ];
         pttSegmentTexts = [];
         pttSegmentAudioIds = [];
-        emitEvent('user.transcript', { text: combined, isFinal: true, turnSeq, audioIds });
+        emitEvent('user.transcript', {
+          text: combined,
+          isFinal: true,
+          turnSeq,
+          audioIds,
+          // Realtime spans carry a stable per-utterance id and the learner's
+          // response latency. The frontend keys the bubble on itemId when
+          // present, so a split generation can't collide on a stale turnSeq.
+          itemId: rtSpan?.itemId ?? null,
+          latencySec: rtSpan?.latencySec ?? null,
+        });
       }
 
       // The visitor's first real answer is the single most valuable thing
@@ -2086,10 +2737,12 @@ export default defineAgent({
       if (isDemoSession && !demoIntentCaptured && transcription.trim().split(/\s+/).length >= 3) {
         demoIntentCaptured = true;
         const intent = transcription.trim().slice(0, 200);
-        ContextManager.writeNote(userId, 'goal', `Said at the demo: "${intent}"`, 'demo')
-          .catch((err: any) => console.warn('[Demo] intent note failed:', err?.message));
-        saveOnboardingData(userId, targetLang, { goalDetails: intent })
-          .catch((err: any) => console.warn('[Demo] intent onboarding save failed:', err?.message));
+        ContextManager.writeNote(userId, 'goal', `Said at the demo: "${intent}"`, 'demo').catch(
+          (err: any) => console.warn('[Demo] intent note failed:', err?.message),
+        );
+        saveOnboardingData(userId, targetLang, { goalDetails: intent }).catch((err: any) =>
+          console.warn('[Demo] intent onboarding save failed:', err?.message),
+        );
         console.log(`[Demo] Captured stated intent: "${intent}"`);
       }
 
@@ -2103,10 +2756,10 @@ export default defineAgent({
       // placeholder-only audio turns; actual word count for text.
       const isAudioTurn = transcription.startsWith('[audio key=');
       const wordCount = isAudioTurn
-        ? (inlineTranscript
-            ? inlineTranscript.split(/\s+/).filter((w: string) => w.length > 0).length
-            : Math.round((audioAttachment?.durationSec ?? 0) * 2.5))
-        : transcription.split(/\s+/).filter(w => w.length > 0).length;
+        ? inlineTranscript
+          ? inlineTranscript.split(/\s+/).filter((w: string) => w.length > 0).length
+          : Math.round((audioAttachment?.durationSec ?? 0) * 2.5)
+        : transcription.split(/\s+/).filter((w: string) => w.length > 0).length;
       recentUserTurnWords.push(wordCount);
       if (recentUserTurnWords.length > MAX_RECENT) recentUserTurnWords.shift();
 
@@ -2121,13 +2774,50 @@ export default defineAgent({
       const historyMessages = history.getLatestTurnMessages();
       const lastExchange = history.getLastExchangeText();
 
+      // The learner's words, when we have them without an STT placeholder.
+      // Realtime sessions hand us Gemini's inputTranscription directly, and
+      // the analysis endpoints are text-only (2026-09-04), so this text — not
+      // the tap clip — is what grading must be anchored to.
+      const gradingTranscript =
+        inlineTranscript ?? (audioKeyMatch ? undefined : transcription.trim() || undefined);
+      // Freeze context now: endpoint resolution and analysis happen asynchronously.
+      // No audio-derived claims, no placeholders, and no shadow writes into legacy FSRS.
+      const evidencePacket =
+        evidenceMode() === 'shadow' && gradingTranscript && !languageUndecided
+          ? buildEvidencePacket({
+              userId,
+              sessionId: evidenceSessionId,
+              turnId: String(turnSeq),
+              language: targetLang,
+              text: gradingTranscript,
+              occurredAt: new Date().toISOString(),
+              turns: history.getEvidenceTurns(),
+              measurements: rtSpan
+                ? {
+                    source: 'realtime-event-span',
+                    responseLatencyMs: rtSpan.latencySec == null ? null : rtSpan.latencySec * 1000,
+                    speechDurationMs: rtSpan.durationSec == null ? null : rtSpan.durationSec * 1000,
+                  }
+                : undefined,
+            })
+          : null;
+      // Only STT placeholder turns carry a clip whose duration is real speech
+      // time. A realtime turn's clip span comes from text arrival (an 11-word
+      // turn logged dur=0.3s), so using it here capped every analysis at 2
+      // lexemes and the guard below threw the rest away.
+      const placeholderTurn = Boolean(audioKeyMatch);
+
       // Physical word ceiling for the hallucination guard: speech runs
       // ~2-3 words/sec, so an analysis with more lexemes than duration*3
       // transcribed sounds that weren't there. Text turns are bounded by
       // their own word count (+2 margin for lemma splits).
-      const maxLexemes = audioAttachment
-        ? Math.max(2, Math.round(audioAttachment.durationSec * 3))
-        : batchUtterance.split(/\s+/).filter(w => w.length > 0).length + 2;
+      const maxLexemes = gradingTranscript
+        ? gradingTranscript.split(/\s+/).filter((w: string) => w.length > 0).length + 2
+        : audioAttachment && placeholderTurn
+          ? Math.max(2, Math.round(audioAttachment.durationSec * 3))
+          : rtSpan?.durationSec && !gradingTranscript
+            ? Math.max(2, Math.round(rtSpan.durationSec * 3))
+            : batchUtterance.split(/\s+/).filter((w: string) => w.length > 0).length + 2;
 
       // Cloud-mode sessions never populate audio_url content in
       // historyMessages (Gemini Realtime hands back transcripts, not raw
@@ -2149,242 +2839,331 @@ export default defineAgent({
       // analysis-endpoint.ts. Resolved per batch, not once at startup: a
       // session outlives any given local model's residency, and a cold
       // local model would otherwise stall a live turn on a 15GB load.
-      resolveAnalysisEndpoint('PROCESSOR', { allowCloud: usesTextOnlyProcessor }).then((endpoint) => {
-        console.log(`[Processor] Analysis via ${endpoint.source}: ${endpoint.model}`);
-        return runProcessor(userId, batchUtterance, lastExchange, {
-        maxLexemes,
-        useGemini: false,
-        llmUrl: endpoint.url,
-        llmModel: endpoint.model,
-        llmKey: endpoint.key,
-        recentHistory: lastExchange,
-        historyMessages,
-        tutorRecentText: history.getRecentTutorText(),
-        provenance: inOnboarding ? 'probe' : 'conversation',
-        // STT already transcribed this turn (see configureTranscription
-        // above) — hand it over so the processor skips its own pass 1 and
-        // grading stays anchored to the SAME text the conversation saw.
-        knownTranscript: inlineTranscript,
-      }).then((result) => {
-        lastProcessorRun = {
-          at: Date.now(),
-          batch: pendingUserTurns.slice(),
-          analysisLexemeCount: result.analysis?.lexemes?.length || 0,
-          srsUpdateCount: result.srsUpdates?.length || 0,
-          errors: result.errors,
-          rawPrompt: result.rawPrompt,
-          rawResponse: result.rawResponse,
-          // These three feed buildDynamicInstructions's tail lines directly —
-          // they must be here for the error/hint/pronunciation lines to work.
-          structuredErrors: result.structuredErrors,
-          grammarHints: result.grammarHints,
-        };
-
-        // Give the text-only planner eyes on what the user said: swap the
-        // opaque audio placeholder for the words the processor extracted.
-        // (Only target-language words + substitutions are tagged now, so
-        // pure-native chatter keeps its placeholder — still better than
-        // nothing for the turns that matter.)
-        const heardForms = (result.analysis?.lexemes ?? [])
-          .map((l: any) => l.form || l.lemma)
-          .filter(Boolean);
-        // The STT-inline transcript already gives the planner/LLM real
-        // words in the turn text itself; the lexeme-forms annotation and
-        // the registry transcript are only worth writing when the inline
-        // transcription failed (placeholder-only turn).
-        if (audioAttachment && !inlineTranscript && heardForms.length > 0) {
-          history.annotateUserTurnByAudioKey(
-            audioAttachment.audioId,
-            `(heard: ${heardForms.join(' ')})`,
-          );
-        }
-        if (audioAttachment && !inlineTranscript && result.transcript) {
-          setAudioTranscript(audioAttachment.audioId, result.transcript);
-        }
-
-        // Adaptive: track error count for error density computation
-        const errorCount = (result.analysis?.lexemes ?? []).filter(
-          (l: any) => l.performance === 'wrong_use' || l.performance === 'recall_fail',
-        ).length;
-        recentErrorCounts.push(errorCount);
-        if (recentErrorCounts.length > MAX_RECENT) recentErrorCounts.shift();
-
-        // Mix-throttle decay: a distress notch releases only after a run
-        // of clean turns — the learner has to re-earn immersion, it never
-        // snaps back the moment they stop complaining.
-        if (mixThrottleNotches > 0) {
-          if (errorCount === 0) {
-            cleanRunsSinceThrottle++;
-            if (cleanRunsSinceThrottle >= THROTTLE_DECAY_RUNS) {
-              mixThrottleNotches--;
-              cleanRunsSinceThrottle = 0;
-              trace('mix.throttle', `notches=${mixThrottleNotches} (decayed after ${THROTTLE_DECAY_RUNS} clean runs)`);
+      // 2026-09-03: BYO sessions run analysis on the user's own LLM. The
+      // env-based local default (gemma4-31b-qat) can't co-reside with the
+      // voice stack on the 3090, and its failed load 502'd every batch —
+      // which silently stopped vocabulary mining (the whole implicit-SRS
+      // loop). BYO llm wins when configured; otherwise env resolution.
+      // 2026-09-09: realtime opt-in bypasses BYO cascaded components for
+      // STT/TTS/LLM (see the mode-resolution guards above) — analysis must
+      // follow the same rule. Without this, a BYO llm pointing at a local
+      // endpoint that is DOWN (GPU off) hijacked every processor batch even
+      // though the session itself ran fine on Gemini Live: each batch 502'd
+      // and vocabulary mining — the whole implicit-SRS loop — silently
+      // stopped. Real-time opt-in => analysis resolves via env (cloud
+      // CLOUD_PROCESSOR_LLM_*, i.e. gemma-4-31b-it).
+      const byoLlm =
+        !byoProviders?.realtimeEnabled && byoProviders?.llm?.baseUrl
+          ? {
+              url: byoProviders.llm.baseUrl,
+              model: byoProviders.llm.model || 'gpt-4o-mini',
+              key: byoProviders.llm.apiKey || '',
+              source: 'byo' as const,
             }
-          } else {
-            cleanRunsSinceThrottle = 0;
-          }
-        }
-
-        // Accumulate for session summary
-        sessionStats.totalSrsUpdates += result.srsUpdates?.length || 0;
-        if (result.structuredErrors) {
-          for (const e of result.structuredErrors) {
-            sessionStats.allErrors.push({ lemma: e.lemma, rule: e.grammarRule?.rule });
-          }
-        }
-        if (result.grammarHints) {
-          sessionStats.allHints.push(...result.grammarHints);
-        }
-        addSubagentChat('Processor', result.rawPrompt || 'No prompt', result.rawResponse || 'No response');
-        writeRuntimeStateSoon();
-
-        // Discourse memory (Phase M, record-only — see design doc §7).
-        // Fire-and-forget: a failure here must never affect the live loop.
-        // Prefer the cascade's clean transcript for audio turns; falls
-        // back to the raw batched text for text-only turns.
-        recordUtterance({
-          userId,
-          sessionId: getSessionId(),
-          turnSeq,
-          language: targetLang,
-          transcript: result.transcript || batchUtterance,
-          analysis: result.analysis,
-        }).then((utteranceId) => {
-          if (result.structuredErrors?.length) {
-            recordErrorObservations({
-              userId,
-              language: targetLang,
-              utteranceId,
-              errors: result.structuredErrors,
-            }).catch(() => {});
-          }
-        }).catch(() => {});
-
-        // Emit structured processor events for dashboard.
-        // Decorate each lexeme with its tracking status so the UI can color-code:
-        //   'tracked'  — DB row created or updated (color by performance: green/red/yellow/orange/blue)
-        //   'analyzed' — LLM classified but no DB row (function words, displayed as neutral grey)
-        //   'noop'     — looked up but no row modified (displayed but no change)
-        const trackingArr: ('tracked' | 'analyzed' | 'noop')[] =
-          (result.analysis as any)?.tracking || [];
-        const decoratedLexemes = (result.analysis?.lexemes || []).map((lex, i) => ({
-          ...lex,
-          tracking: trackingArr[i] || 'analyzed',
-        }));
-
-        emitEvent('processor.analysis', {
-          // turnSeq of the last (most recent) user turn in this batch —
-          // when PROCESSOR_TURN_INTERVAL > 1 this analysis covers multiple
-          // prior turns joined into `utterance`, but the frontend still
-          // needs a single anchor point to attach it to; the newest turn
-          // in the batch is the natural choice since the batch only fires
-          // once that turn lands.
-          turnSeq,
-          utterance: batchUtterance,
-          lexemes: decoratedLexemes,
-          srsUpdates: result.srsUpdates || [],
-          lexemeCount: result.analysis?.lexemes?.length || 0,
-          srsUpdateCount: result.srsUpdates?.length || 0,
-          errors: result.errors,
-          structuredErrors: result.structuredErrors || [],
-          grammarHints: result.grammarHints || [],
-          supervisorTriggers: result.supervisorTriggers || [],
-        });
-        emitEvent('processor.raw', {
-          prompt: (result.rawPrompt || '').substring(0, 4000),
-          response: (result.rawResponse || '').substring(0, 4000),
-        });
-
-        // === DEMO MODE: mirror the processor's tracked words onto the
-        // LiveKit data channel so the marketing site's live memory graph
-        // can render them in real time. Only active when
-        // DEMO_SESSION_TIME_LIMIT_MS is set (this worktree only — see
-        // ROADMAP.md in the marketing-site repo; production's own copy of
-        // this file is untouched). Deliberately reads the same
-        // decoratedLexemes the dashboard's SSE stream already gets, just
-        // delivered over the room's own (already-public) data channel
-        // instead of the admin dashboard's not-yet-exposed SSE endpoint.
-        if (process.env.DEMO_SESSION_TIME_LIMIT_MS && decoratedLexemes.length > 0) {
-          try {
-            // The graph is the only proof a visitor gets that anything
-            // was actually processed, so it needs the two distinctions the
-            // processor already makes and used to discard here:
-            //   - `exposed` — the tutor said it and they repeated it. New
-            //     to them, not yet evidence of knowing it (echo gate,
-            //     supervisor-functions.ts §3.3).
-            //   - `tracked` + isNew — they produced it unprompted, first
-            //     time. That's the good one, and it should look like it.
-            // Mastery comes from FSRS state (0 new / 1 learning / 2 review
-            // / 3 relearning) and the grade the word just earned, matched
-            // back through lexemeIndex.
-            const updateByIndex = new Map<number, any>(
-              (result.srsUpdates || []).map((u: any) => [u.lexemeIndex, u]),
+          : null;
+      Promise.resolve(
+        byoLlm ?? resolveAnalysisEndpoint('PROCESSOR', { allowCloud: usesTextOnlyProcessor }),
+      ).then((endpoint) => {
+        console.log(`[Processor] Analysis via ${endpoint.source}: ${endpoint.model}`);
+        if (evidencePacket) {
+          void runShadow(evidencePacket, endpoint)
+            .then((result) => trace('evidence.shadow', JSON.stringify(result)))
+            .catch(() =>
+              console.warn(
+                '[Evidence] Shadow observation could not be persisted; conversation unaffected',
+              ),
             );
-            const payload = JSON.stringify({
-              type: 'linglang.demo.words',
-              lexemes: decoratedLexemes.map((lex: any, i: number) => {
-                const upd = updateByIndex.get(i);
-                return {
-                  lemma: lex.lemma,
-                  translation: lex.translation,
-                  tracking: lex.tracking,
-                  // Tutor-introduced, or produced cold for the first time.
-                  isNew: lex.tracking === 'exposed' ? true : upd?.isNew ?? false,
-                  // Only meaningful for graded words; absent for exposures.
-                  grade: upd?.grade,
-                  state: upd?.newState,
-                };
-              }),
+        }
+        return runProcessor(userId, batchUtterance, lastExchange, {
+          maxLexemes,
+          useGemini: false,
+          llmUrl: endpoint.url,
+          llmModel: endpoint.model,
+          llmKey: endpoint.key,
+          recentHistory: lastExchange,
+          historyMessages,
+          tutorRecentText: history.getRecentTutorText(),
+          provenance: inOnboarding ? 'probe' : 'conversation',
+          targetLanguage: langConfig.name,
+          nativeLanguage: usersNativeLanguage,
+          targetIso: targetLang,
+          nativeIso: user.nativeLanguage || 'en',
+          // STT already transcribed this turn (see configureTranscription
+          // above) — hand it over so the processor skips its own pass 1 and
+          // grading stays anchored to the SAME text the conversation saw.
+          knownTranscript: gradingTranscript,
+        })
+          .then((result) => {
+            lastProcessorRun = {
+              at: Date.now(),
+              batch: pendingUserTurns.slice(),
+              analysisLexemeCount: result.analysis?.lexemes?.length || 0,
+              srsUpdateCount: result.srsUpdates?.length || 0,
+              errors: result.errors,
+              rawPrompt: result.rawPrompt,
+              rawResponse: result.rawResponse,
+              // These three feed buildDynamicInstructions's tail lines directly —
+              // they must be here for the error/hint/pronunciation lines to work.
+              structuredErrors: result.structuredErrors,
+              grammarHints: result.grammarHints,
+            };
+
+            // Give the text-only planner eyes on what the user said: swap the
+            // opaque audio placeholder for the words the processor extracted.
+            // (Only target-language words + substitutions are tagged now, so
+            // pure-native chatter keeps its placeholder — still better than
+            // nothing for the turns that matter.)
+            const heardForms = (result.analysis?.lexemes ?? [])
+              .map((l: any) => l.form || l.lemma)
+              .filter(Boolean);
+            // The STT-inline transcript already gives the planner/LLM real
+            // words in the turn text itself; the lexeme-forms annotation and
+            // the registry transcript are only worth writing when the inline
+            // transcription failed (placeholder-only turn).
+            // Placeholder turns only: a realtime turn already holds the learner's
+            // real words, and this would overwrite them with "(heard: ...)".
+            if (audioAttachment && placeholderTurn && !inlineTranscript && heardForms.length > 0) {
+              history.annotateUserTurnByAudioKey(
+                audioAttachment.audioId,
+                `(heard: ${heardForms.join(' ')})`,
+              );
+            }
+            if (audioAttachment && placeholderTurn && !inlineTranscript && result.transcript) {
+              setAudioTranscript(audioAttachment.audioId, result.transcript);
+              void archiveTurn({ role: 'learner', turnId: sourceTurnId, text: result.transcript, status: 'corrected',
+                revisionOf: typeof archivedEventId === 'string' ? archivedEventId : undefined,
+                source: 'processor-transcript', interrupted: null });
+            }
+
+            // Adaptive: track error count for error density computation
+            const errorCount = (result.analysis?.lexemes ?? []).filter(
+              (l: any) => l.performance === 'wrong_use' || l.performance === 'recall_fail',
+            ).length;
+            recentErrorCounts.push(errorCount);
+            if (recentErrorCounts.length > MAX_RECENT) recentErrorCounts.shift();
+
+            // Mix-throttle decay: a distress notch releases only after a run
+            // of clean turns — the learner has to re-earn immersion, it never
+            // snaps back the moment they stop complaining.
+            if (mixThrottleNotches > 0) {
+              if (errorCount === 0) {
+                cleanRunsSinceThrottle++;
+                if (cleanRunsSinceThrottle >= THROTTLE_DECAY_RUNS) {
+                  mixThrottleNotches--;
+                  cleanRunsSinceThrottle = 0;
+                  trace(
+                    'mix.throttle',
+                    `notches=${mixThrottleNotches} (decayed after ${THROTTLE_DECAY_RUNS} clean runs)`,
+                  );
+                }
+              } else {
+                cleanRunsSinceThrottle = 0;
+              }
+            }
+
+            // Accumulate for session summary
+            sessionStats.totalSrsUpdates += result.srsUpdates?.length || 0;
+            if (result.structuredErrors) {
+              for (const e of result.structuredErrors) {
+                sessionStats.allErrors.push({ lemma: e.lemma, rule: e.grammarRule?.rule });
+              }
+            }
+            if (result.grammarHints) {
+              sessionStats.allHints.push(...result.grammarHints);
+            }
+            addSubagentChat(
+              'Processor',
+              result.rawPrompt || 'No prompt',
+              result.rawResponse || 'No response',
+            );
+            writeRuntimeStateSoon();
+
+            // Discourse memory (Phase M, record-only — see design doc §7).
+            // Fire-and-forget: a failure here must never affect the live loop.
+            // Prefer the cascade's clean transcript for audio turns; falls
+            // back to the raw batched text for text-only turns.
+            recordUtterance({
+              userId,
+              sessionId: getSessionId(),
+              turnSeq,
+              language: targetLang,
+              transcript: result.transcript || batchUtterance,
+              analysis: result.analysis,
+            })
+              .then((utteranceId) => {
+                if (result.structuredErrors?.length) {
+                  recordErrorObservations({
+                    userId,
+                    language: targetLang,
+                    utteranceId,
+                    errors: result.structuredErrors,
+                  }).catch(() => {});
+                }
+              })
+              .catch(() => {});
+
+            // Emit structured processor events for dashboard.
+            // Decorate each lexeme with its tracking status so the UI can color-code:
+            //   'tracked'  — DB row created or updated (color by performance: green/red/yellow/orange/blue)
+            //   'analyzed' — LLM classified but no DB row (function words, displayed as neutral grey)
+            //   'noop'     — looked up but no row modified (displayed but no change)
+            const trackingArr: ('tracked' | 'analyzed' | 'noop')[] =
+              (result.analysis as any)?.tracking || [];
+            const decoratedLexemes = (result.analysis?.lexemes || []).map((lex, i) => ({
+              ...lex,
+              tracking: trackingArr[i] || 'analyzed',
+            }));
+
+            emitEvent('processor.analysis', {
+              // turnSeq of the last (most recent) user turn in this batch —
+              // when PROCESSOR_TURN_INTERVAL > 1 this analysis covers multiple
+              // prior turns joined into `utterance`, but the frontend still
+              // needs a single anchor point to attach it to; the newest turn
+              // in the batch is the natural choice since the batch only fires
+              // once that turn lands.
+              turnSeq,
+              // Realtime spans are keyed by itemId in the UI (turnSeq can repeat
+              // when a generation covers several utterances), so pass it through
+              // for analysis attachment.
+              itemId: rtSpan?.itemId ?? null,
+              utterance: batchUtterance,
+              lexemes: decoratedLexemes,
+              srsUpdates: result.srsUpdates || [],
+              lexemeCount: result.analysis?.lexemes?.length || 0,
+              srsUpdateCount: result.srsUpdates?.length || 0,
+              errors: result.errors,
+              structuredErrors: result.structuredErrors || [],
+              grammarHints: result.grammarHints || [],
+              supervisorTriggers: result.supervisorTriggers || [],
             });
-            ctx.room.localParticipant?.publishData(new TextEncoder().encode(payload), {
-              reliable: true,
-              topic: 'linglang-demo-events',
+            emitEvent('processor.raw', {
+              prompt: (result.rawPrompt || '').substring(0, 4000),
+              response: (result.rawResponse || '').substring(0, 4000),
             });
-          } catch (err: any) {
-            console.warn('[Tutor-ED] demo word-event publish failed:', err?.message);
+
+            // === DEMO MODE: mirror the processor's tracked words onto the
+            // LiveKit data channel so the marketing site's live memory graph
+            // can render them in real time. Only active when
+            // DEMO_SESSION_TIME_LIMIT_MS is set (this worktree only — see
+            // ROADMAP.md in the marketing-site repo; production's own copy of
+            // this file is untouched). Deliberately reads the same
+            // decoratedLexemes the dashboard's SSE stream already gets, just
+            // delivered over the room's own (already-public) data channel
+            // instead of the admin dashboard's not-yet-exposed SSE endpoint.
+            if (process.env.DEMO_SESSION_TIME_LIMIT_MS && decoratedLexemes.length > 0) {
+              try {
+                // The graph is the only proof a visitor gets that anything
+                // was actually processed, so it needs the two distinctions the
+                // processor already makes and used to discard here:
+                //   - `exposed` — the tutor said it and they repeated it. New
+                //     to them, not yet evidence of knowing it (echo gate,
+                //     supervisor-functions.ts §3.3).
+                //   - `tracked` + isNew — they produced it unprompted, first
+                //     time. That's the good one, and it should look like it.
+                // Mastery comes from FSRS state (0 new / 1 learning / 2 review
+                // / 3 relearning) and the grade the word just earned, matched
+                // back through lexemeIndex.
+                const updateByIndex = new Map<number, any>(
+                  (result.srsUpdates || []).map((u: any) => [u.lexemeIndex, u]),
+                );
+                const payload = JSON.stringify({
+                  type: 'linglang.demo.words',
+                  lexemes: decoratedLexemes.map((lex: any, i: number) => {
+                    const upd = updateByIndex.get(i);
+                    return {
+                      lemma: lex.lemma,
+                      translation: lex.translation,
+                      tracking: lex.tracking,
+                      // Tutor-introduced, or produced cold for the first time.
+                      isNew: lex.tracking === 'exposed' ? true : (upd?.isNew ?? false),
+                      // Only meaningful for graded words; absent for exposures.
+                      grade: upd?.grade,
+                      state: upd?.newState,
+                    };
+                  }),
+                });
+                ctx.room.localParticipant?.publishData(new TextEncoder().encode(payload), {
+                  reliable: true,
+                  topic: 'linglang-demo-events',
+                });
+              } catch (err: any) {
+                console.warn('[Tutor-ED] demo word-event publish failed:', err?.message);
+              }
+            }
+
+            if (result.errors.length) {
+              console.warn('[Processor] Errors:', result.errors);
+            }
+
+            // Any processor run is a potential supervisor trigger (signals accumulate for timer-based replanning).
+            if ((result.analysis?.lexemes?.length || 0) > 0) {
+              pendingSignals.push('processor_analysis');
+            }
+            if ((result.srsUpdates?.length || 0) > 0) {
+              pendingSignals.push('srs_updated');
+            }
+
+            // Handle immediate-action triggers from the processor
+            // (language change, difficulty adjustment, goal change, session feedback)
+            if (result.supervisorTriggers && result.supervisorTriggers.length > 0) {
+              handleSupervisorTriggers(result.supervisorTriggers).catch((err) => {
+                console.error('[Trigger] Handler failed:', err);
+              });
+            }
+
+            // Mark so supervisor considers a refresh on the next timer tick.
+            // Also refresh DB cache since SRS state has changed — and drop the
+            // learner-view cache so the frontier reflects it on the very next
+            // prompt build instead of waiting out the TTL (§2: "clearing the
+            // due queue mid-session changes tutor behavior within a turn").
+            if ((result.srsUpdates?.length || 0) > 0) {
+              refreshDbContext();
+              invalidateLearnerView(userId, targetLang);
+              // Curriculum coverage (no-op today — no content has been ingested
+              // yet, so no user_content_progress row is ever 'active'; wired
+              // now so it starts working the moment Phase 2 ingests a source).
+              recomputeActiveChunkCoverage(userId, targetLang).catch(() => {});
+            }
+            writeRuntimeStateSoon();
+            refreshInstructions().catch(() => {});
+          })
+          .catch((err) => {
+            console.error('[Processor] Failed:', err);
+            trace('processor.error', String(err));
+          });
+      });
+    };
+
+    // Realtime mode: deltas (isFinal=false) never reach the cascaded handler —
+    // they feed the segmenter, which re-enters it once per real utterance.
+    session.on(voice.AgentSessionEventTypes.UserInputTranscribed, async (ev: any) => {
+      // Any transcription at all — partial or final — proves the learner made
+      // a real turn, so a generation that follows must not be treated as stray.
+      if (strayGuard) strayGuard.noteLearnerSpeech();
+      if (rtTracker) {
+        // LIVE TRANSCRIPT (2026-09-09): the plugin streams partial input
+        // transcription as the learner speaks. Previously these were dropped
+        // (`if (!ev.isFinal) return` below), so the learner's words only
+        // appeared after Gemini closed the turn — the "transcript isn't live"
+        // complaint. Push the in-flight span to the UI; the finalized
+        // utterance replaces it on the same itemId.
+        if (!ev.isFinal) {
+          const liveText = rtTracker.currentText || (ev.transcript || ev.text || '').trim();
+          if (liveText) {
+            emitEvent('user.transcript.partial', {
+              text: liveText,
+              // Use the SDK event's base generation id first. The tracker may
+              // append `#segment` to its internal id for barge-ins, while the
+              // final transcript arrives with the base id; emitting the base
+              // here lets the frontend morph partial -> final in place.
+              itemId: ev.itemId || rtTracker.currentItemId || null,
+            });
           }
         }
-
-        if (result.errors.length) {
-          console.warn('[Processor] Errors:', result.errors);
-        }
-
-        // Any processor run is a potential supervisor trigger (signals accumulate for timer-based replanning).
-        if ((result.analysis?.lexemes?.length || 0) > 0) {
-          pendingSignals.push('processor_analysis');
-        }
-        if ((result.srsUpdates?.length || 0) > 0) {
-          pendingSignals.push('srs_updated');
-        }
-
-        // Handle immediate-action triggers from the processor
-        // (language change, difficulty adjustment, goal change, session feedback)
-        if (result.supervisorTriggers && result.supervisorTriggers.length > 0) {
-          handleSupervisorTriggers(result.supervisorTriggers).catch((err) => {
-            console.error('[Trigger] Handler failed:', err);
-          });
-        }
-
-        // Mark so supervisor considers a refresh on the next timer tick.
-        // Also refresh DB cache since SRS state has changed — and drop the
-        // learner-view cache so the frontier reflects it on the very next
-        // prompt build instead of waiting out the TTL (§2: "clearing the
-        // due queue mid-session changes tutor behavior within a turn").
-        if ((result.srsUpdates?.length || 0) > 0) {
-          refreshDbContext();
-          invalidateLearnerView(userId, targetLang);
-          // Curriculum coverage (no-op today — no content has been ingested
-          // yet, so no user_content_progress row is ever 'active'; wired
-          // now so it starts working the moment Phase 2 ingests a source).
-          recomputeActiveChunkCoverage(userId, targetLang).catch(() => {});
-        }
-        writeRuntimeStateSoon();
-        refreshInstructions().catch(() => {});
-      }).catch((err) => {
-        console.error('[Processor] Failed:', err);
-        trace('processor.error', String(err));
-      });
-      });
+        rtTracker.onTranscription(ev.itemId, ev.transcript || ev.text || '', !!ev.isFinal);
+        return;
+      }
+      await userInputTranscribedHandler(ev);
     });
 
     // Cleanup timer on disconnect
@@ -2429,72 +3208,86 @@ export default defineAgent({
     let pttSegmentTexts: string[] = [];
     // Parallel to pttSegmentTexts — audio dump keys for in-chat playback.
     let pttSegmentAudioIds: string[] = [];
-    ctx.room.on('dataReceived' as any, (payload: Uint8Array, _participant: any, _kind: any, topic?: string) => {
-      if (topic !== 'linglang.ptt') return;
-      try {
-        const msg = JSON.parse(new TextDecoder().decode(payload));
-        if (msg.type === 'mode') {
-          const manual = msg.mode === 'ptt';
-          pttMode = manual ? 'ptt' : 'handsFree';
-          if (!manual) pttHeld = false;
-          session.updateOptions({ turnHandling: { turnDetection: manual ? 'manual' : null } });
-          trace('ptt.mode', `${msg.mode} → turnDetection=${manual ? 'manual' : 'auto'}`);
-        } else if (msg.type === 'hold') {
-          pttHeld = true;
-          trace('ptt.hold', 'press started');
-        } else if (msg.type === 'release') {
-          pttHeld = false;
-          pttCommitPending = true;
-          if (pttCommitTimer) clearTimeout(pttCommitTimer);
-          // 12s, was 4s (2026-07-10, live failure): VAD end-of-speech can
-          // lag the mic mute by several seconds and a degenerate
-          // transcription decode ran 5.9s — the 4s timer fired first. And
-          // the old timeout action, clearUserTurn(), RESTARTS the STT node
-          // ("agent.sttNode.start" right after every timeout in the log),
-          // which killed the in-flight transcription and orphaned the turn
-          // entirely — the agent just went silent. Timeout now COMMITS
-          // whatever the turn holds instead: worst case the agent responds
-          // to a sparse turn, which beats responding to nothing. cancel
-          // (deliberate user gesture) remains the only clearUserTurn path.
-          pttCommitTimer = setTimeout(() => {
-            if (!pttCommitPending) return;
+    ctx.room.on(
+      'dataReceived' as any,
+      (payload: Uint8Array, _participant: any, _kind: any, topic?: string) => {
+        if (topic !== 'linglang.ptt') return;
+        try {
+          const msg = JSON.parse(new TextDecoder().decode(payload));
+          if (msg.type === 'mode') {
+            const manual = msg.mode === 'ptt';
+            pttMode = manual ? 'ptt' : 'handsFree';
+            if (!manual) pttHeld = false;
+            session.updateOptions({ turnHandling: { turnDetection: manual ? 'manual' : null } });
+            trace('ptt.mode', `${msg.mode} → turnDetection=${manual ? 'manual' : 'auto'}`);
+          } else if (msg.type === 'hold') {
+            pttHeld = true;
+            trace('ptt.hold', 'press started');
+          } else if (msg.type === 'release') {
+            pttHeld = false;
+            pttCommitPending = true;
+            if (pttCommitTimer) clearTimeout(pttCommitTimer);
+            // 12s, was 4s (2026-07-10, live failure): VAD end-of-speech can
+            // lag the mic mute by several seconds and a degenerate
+            // transcription decode ran 5.9s — the 4s timer fired first. And
+            // the old timeout action, clearUserTurn(), RESTARTS the STT node
+            // ("agent.sttNode.start" right after every timeout in the log),
+            // which killed the in-flight transcription and orphaned the turn
+            // entirely — the agent just went silent. Timeout now COMMITS
+            // whatever the turn holds instead: worst case the agent responds
+            // to a sparse turn, which beats responding to nothing. cancel
+            // (deliberate user gesture) remains the only clearUserTurn path.
+            pttCommitTimer = setTimeout(() => {
+              if (!pttCommitPending) return;
+              pttCommitPending = false;
+              trace('ptt.commit.timeout', 'no transcript within 12s of release — committing as-is');
+              try {
+                session.commitUserTurn();
+              } catch {
+                /* nothing to commit — fine */
+              }
+              // 2026-07-11: flush whatever was buffered from mid-hold segments
+              // — the ONLY other flush site is inside the UserInputTranscribed
+              // handler below, gated on a NEW transcript arriving. On a timeout
+              // (no new transcript came, that's WHY it timed out) that handler
+              // never runs, so buffered segments — and their audio-dump ids,
+              // meaning the in-chat playback feature — silently never reached
+              // the frontend. The conversation reply itself was never affected
+              // (that reads the SDK's own turn state, not this buffer); this
+              // only fixes the user's chat bubble + audio player going missing.
+              if (pttSegmentTexts.length > 0) {
+                emitEvent('user.transcript', {
+                  text: pttSegmentTexts.join(' '),
+                  isFinal: true,
+                  turnSeq: totalUserTurns,
+                  audioIds: pttSegmentAudioIds,
+                });
+                pttSegmentTexts = [];
+                pttSegmentAudioIds = [];
+              }
+            }, 12000);
+            trace('ptt.release', 'awaiting final transcript to commit');
+          } else if (msg.type === 'cancel') {
+            pttHeld = false;
             pttCommitPending = false;
-            trace('ptt.commit.timeout', 'no transcript within 12s of release — committing as-is');
-            try { session.commitUserTurn(); } catch { /* nothing to commit — fine */ }
-            // 2026-07-11: flush whatever was buffered from mid-hold segments
-            // — the ONLY other flush site is inside the UserInputTranscribed
-            // handler below, gated on a NEW transcript arriving. On a timeout
-            // (no new transcript came, that's WHY it timed out) that handler
-            // never runs, so buffered segments — and their audio-dump ids,
-            // meaning the in-chat playback feature — silently never reached
-            // the frontend. The conversation reply itself was never affected
-            // (that reads the SDK's own turn state, not this buffer); this
-            // only fixes the user's chat bubble + audio player going missing.
-            if (pttSegmentTexts.length > 0) {
-              emitEvent('user.transcript', {
-                text: pttSegmentTexts.join(' '),
-                isFinal: true,
-                turnSeq: totalUserTurns,
-                audioIds: pttSegmentAudioIds,
-              });
-              pttSegmentTexts = [];
-              pttSegmentAudioIds = [];
+            pttSegmentTexts = [];
+            pttSegmentAudioIds = [];
+            if (pttCommitTimer) {
+              clearTimeout(pttCommitTimer);
+              pttCommitTimer = null;
             }
-          }, 12000);
-          trace('ptt.release', 'awaiting final transcript to commit');
-        } else if (msg.type === 'cancel') {
-          pttHeld = false;
-          pttCommitPending = false;
-          pttSegmentTexts = [];
-          pttSegmentAudioIds = [];
-          if (pttCommitTimer) { clearTimeout(pttCommitTimer); pttCommitTimer = null; }
-          try { session.clearUserTurn(); } catch { /* no pending turn — fine */ }
-          trace('ptt.cancel', 'turn discarded');
+            try {
+              session.clearUserTurn();
+            } catch {
+              /* no pending turn — fine */
+            }
+            trace('ptt.cancel', 'turn discarded');
+          }
+        } catch (err) {
+          console.warn('[PTT] Bad data message:', String(err).slice(0, 80));
         }
-      } catch (err) {
-        console.warn('[PTT] Bad data message:', String(err).slice(0, 80));
-      }
-    });
+      },
+    );
 
     session.on(voice.AgentSessionEventTypes.Error, (ev: any) => {
       console.error('[Session] Error:', ev.error || ev);
@@ -2502,7 +3295,23 @@ export default defineAgent({
     });
 
     session.on(voice.AgentSessionEventTypes.SpeechCreated, (ev: any) => {
-      trace('session.speech_created', `source=${ev.source}`);
+      trace('session.speech_created', `source=${ev.source} userInitiated=${!!ev.userInitiated}`);
+      // Realtime generations all arrive with userInitiated=false (only an
+      // explicit generateReply() sets it), so the guard has to decide from
+      // session state whether this turn was earned. Interrupt before the
+      // handle is authorized and the generation never plays.
+      if (!strayGuard || ev.userInitiated) return;
+      if (strayGuard.onGenerationStart()) {
+        trace(
+          'session.stray_generation_cancelled',
+          `gen=${strayGuard.generationCount} source=${ev.source}`,
+        );
+        try {
+          ev.speechHandle?.interrupt?.(true);
+        } catch (err) {
+          trace('session.stray_generation_cancel_failed', String(err).slice(0, 120));
+        }
+      }
     });
 
     session.on(voice.AgentSessionEventTypes.AgentStateChanged, (ev: any) => {
@@ -2510,7 +3319,20 @@ export default defineAgent({
       emitEvent('agent.state_change', { from: ev.oldState || 'unknown', to: String(ev.newState) });
       // Watchdog liveness: 'thinking'/'speaking' start the stuck-timer;
       // any other state (listening/idle/initializing) clears it.
-      agentBusySince = (ev.newState === 'thinking' || ev.newState === 'speaking') ? Date.now() : null;
+      const wasBusy = agentBusySince !== null;
+      agentBusySince = ev.newState === 'thinking' || ev.newState === 'speaking' ? Date.now() : null;
+      // Stray-generation guard: the moment the tutor stops talking is the
+      // only reference point a phantom follow-up turn can be measured from.
+      if (strayGuard && wasBusy && agentBusySince === null) strayGuard.noteAgentTurnEnded();
+
+      // Flush adaptive context only after Gemini has stopped speaking. This
+      // keeps a coach packet from racing the active response or being treated
+      // as a fresh learner turn by the Live API.
+      if (pendingCoachNote && (ev.newState === 'listening' || ev.newState === 'idle')) {
+        const note = pendingCoachNote;
+        pendingCoachNote = null;
+        void deliverCoachNote(note);
+      }
     });
 
     // Capture agent replies (LLM responses) for live chat view.
@@ -2538,8 +3360,22 @@ export default defineAgent({
         // per completed reply), so reading the counter live is both safe and
         // correct on this path.
         const replyTurnSeq = isGemini ? totalUserTurns : currentExchangeTurnSeq;
-        emitEvent('agent.reply', { text: item.textContent, source: item.source || 'unknown', turnSeq: replyTurnSeq });
+        // item.id is the SDK's stable per-message id (responseId on the
+        // realtime path). The frontend keys the bubble on it so a generation
+        // that emits several assistant items no longer collapses them onto
+        // one `agent-<turnSeq>` key.
+        emitEvent('agent.reply', {
+          text: item.textContent,
+          source: item.source || 'unknown',
+          turnSeq: replyTurnSeq,
+          itemId: item.id ?? null,
+        });
+        void archiveTurn({ role: 'tutor', turnId: String(item.id ?? crypto.randomUUID()), text: item.textContent, status: 'final', interrupted: typeof item.interrupted === 'boolean' ? item.interrupted : null, source: item.source || 'conversation-item' });
         history.addAssistantTurn(item.textContent);
+
+        // Reply-length watchdog: measure the tutor's own verbosity so the
+        // length directive can escalate if the model keeps monologuing.
+        noteTutorReplyLength(item.textContent);
 
         // Comprehensible-input controller: measure how much of the reply
         // was actually in the target language. On a bad overshoot, refresh
@@ -2549,7 +3385,10 @@ export default defineAgent({
         lastTutorMixShare = measured;
         if (measured !== null) {
           const levelTarget = targetShareForLevel(userLevel);
-          trace('mix.measured', `share=${measured.toFixed(2)} levelTarget=${levelTarget.toFixed(2)} throttle=${mixThrottleNotches}`);
+          trace(
+            'mix.measured',
+            `share=${measured.toFixed(2)} levelTarget=${levelTarget.toFixed(2)} throttle=${mixThrottleNotches}`,
+          );
           if (measured > levelTarget + 0.25) {
             refreshInstructions().catch(() => {});
           }
@@ -2558,14 +3397,20 @@ export default defineAgent({
         // Passive OOV measurement (learner-field spec §5.2, measure-only —
         // no rewrite loop). Fire-and-forget: does its own DB read, never
         // blocks the reply/TTS pipeline that already dispatched this text.
-        readLearnerView(userId, targetLang).then((view) => {
-          const frontierLemmas = [...view.dueWords, ...view.newWords].map((w) => w.lemma);
-          return measureReplyOov(userId, targetLang, item.textContent, frontierLemmas);
-        }).then((oov) => {
-          if (oov) {
-            trace('lexicalLint.oov', `rate=${oov.oovRate.toFixed(2)} (${oov.oovWords.length}/${oov.totalWords}) words=${oov.oovWords.slice(0, 8).join(',')}`);
-          }
-        }).catch(() => {});
+        readLearnerView(userId, targetLang)
+          .then((view) => {
+            const frontierLemmas = [...view.dueWords, ...view.newWords].map((w) => w.lemma);
+            return measureReplyOov(userId, targetLang, item.textContent, frontierLemmas);
+          })
+          .then((oov) => {
+            if (oov) {
+              trace(
+                'lexicalLint.oov',
+                `rate=${oov.oovRate.toFixed(2)} (${oov.oovWords.length}/${oov.totalWords}) words=${oov.oovWords.slice(0, 8).join(',')}`,
+              );
+            }
+          })
+          .catch(() => {});
       }
     });
 
@@ -2575,6 +3420,10 @@ export default defineAgent({
 
     session.on(voice.AgentSessionEventTypes.FunctionToolsExecuted, (ev: any) => {
       trace('session.function_tools_executed');
+      // The generation that reports a tool result is never preceded by learner
+      // speech (the tool-call turn already consumed it), so without this the
+      // guard would eat every tool-driven reply.
+      strayGuard?.noteToolExecuted();
     });
 
     // Additional debug events for RealtimeModel
@@ -2602,7 +3451,7 @@ export default defineAgent({
         // dead until the whole job is killed. Keep the session alive across
         // reconnects instead.
         closeOnDisconnect: false,
-      }
+      },
     });
 
     trace('session.start.done');
@@ -2677,17 +3526,26 @@ export default defineAgent({
         ? Object.getPrototypeOf(activity._currentSpeech)
         : null;
       if (speechHandleProto) {
-        if (typeof speechHandleProto._waitForScheduled === 'function' && !speechHandleProto.__traceWaitForScheduledPatched) {
+        if (
+          typeof speechHandleProto._waitForScheduled === 'function' &&
+          !speechHandleProto.__traceWaitForScheduledPatched
+        ) {
           const origWaitForScheduled = speechHandleProto._waitForScheduled;
-          speechHandleProto._waitForScheduled = function(this: any, ...args: any[]) {
-            trace('speechHandle._waitForScheduled', `speechId=${this?.id || 'unknown'} scheduled=${!!this?.scheduled}`);
+          speechHandleProto._waitForScheduled = function (this: any, ...args: any[]) {
+            trace(
+              'speechHandle._waitForScheduled',
+              `speechId=${this?.id || 'unknown'} scheduled=${!!this?.scheduled}`,
+            );
             return origWaitForScheduled.apply(this, args);
           };
           speechHandleProto.__traceWaitForScheduledPatched = true;
         }
-        if (typeof speechHandleProto._waitForAuthorization === 'function' && !speechHandleProto.__traceWaitForAuthorizationPatched) {
+        if (
+          typeof speechHandleProto._waitForAuthorization === 'function' &&
+          !speechHandleProto.__traceWaitForAuthorizationPatched
+        ) {
           const origWaitForAuthorization = speechHandleProto._waitForAuthorization;
-          speechHandleProto._waitForAuthorization = function(this: any, ...args: any[]) {
+          speechHandleProto._waitForAuthorization = function (this: any, ...args: any[]) {
             trace(
               'speechHandle._waitForAuthorization',
               `speechId=${this?.id || 'unknown'} interrupted=${!!this?.interrupted} authorized=${!!this?._authorized}`,
@@ -2696,9 +3554,12 @@ export default defineAgent({
           };
           speechHandleProto.__traceWaitForAuthorizationPatched = true;
         }
-        if (typeof speechHandleProto._authorizeGeneration === 'function' && !speechHandleProto.__traceAuthorizeGenerationPatched) {
+        if (
+          typeof speechHandleProto._authorizeGeneration === 'function' &&
+          !speechHandleProto.__traceAuthorizeGenerationPatched
+        ) {
           const origAuthorizeGeneration = speechHandleProto._authorizeGeneration;
-          speechHandleProto._authorizeGeneration = function(this: any, ...args: any[]) {
+          speechHandleProto._authorizeGeneration = function (this: any, ...args: any[]) {
             trace(
               'speechHandle._authorizeGeneration',
               `speechId=${this?.id || 'unknown'} interrupted=${!!this?.interrupted} scheduled=${!!this?.scheduled}`,
@@ -2724,12 +3585,15 @@ export default defineAgent({
     // We trigger the LLM by sending a system-style user message that
     // the LLM reads as "the user has just connected." Plain "..." was
     // too vague and the LLM defaulted to a generic "Olá, tudo bem?"
+    const returningOpeningContext = greetingContext?.trim()
+      ? `This is a returning learner; resume the actual work from the prior-session context: ${greetingContext.trim()}.`
+      : 'There is no useful prior-session hint; ask what they want to work on rather than teaching a basic greeting.';
     const openingInput = isDemoSession
-      // A demo visitor has no history to pick up from and has chosen
-      // nothing — the opening turn's whole job is to find out what
-      // they want to learn so the real conversation can start.
-      ? '[system: a brand-new visitor just connected, having chosen nothing — run your opening line now: say hello, ask what language they want to speak, and name the options. Keep it under 10 seconds, then stop and listen.]'
-      : '[system: the user has just connected — greet them and pick up where you left off]';
+      ? // A demo visitor has no history to pick up from and has chosen
+        // nothing — the opening turn's whole job is to find out what
+        // they want to learn so the real conversation can start.
+        '[system: a brand-new visitor just connected, having chosen nothing — run your opening line now: say hello, ask what language they want to speak, and name the options. Keep it under 10 seconds, then stop and listen.]'
+      : `[system: the user has just connected. Say hello naturally in ${usersNativeLanguage}, but do not teach or test a basic greeting and do not ask the learner to repeat one. ${returningOpeningContext} Make at most one simple move about that context, then stop and listen. No target-language greeting drill, topic list, explanation, choices, or activity.]`;
 
     console.log('[Tutor-ED] Sending initial greeting (LLM-generated)...');
     trace('session.generateReply.opening');
@@ -2751,15 +3615,13 @@ export default defineAgent({
     // after the fact. `midSessionChatCtxUpdate` is the same flag the plugin
     // derives from the model id, and it is already surfaced on the LLM
     // service (see the services.llm.capabilities trace above).
-    const canGenerateReply =
-      (llmService as any)?.capabilities?.midSessionChatCtxUpdate !== false;
+    const canGenerateReply = (llmService as any)?.capabilities?.midSessionChatCtxUpdate !== false;
 
-    // Only generateReply is blocked, not the Live API underneath it. Handing
-    // the model a user turn with turnComplete:true still produces a normal
-    // reply, and the plugin's isNewGeneration() treats the resulting
-    // modelTurn as a fresh generation, so the audio routes through the usual
-    // path. Verified directly against gemini-3.1-flash-live-preview: 170KB
-    // of audio plus a real greeting came back.
+    // The plugin configures Gemini 3.1 clientContent as initial history.
+    // Sending the opening there incurs a ~50s history-phase delay. Use the
+    // realtime input lane for a NEW spoken turn, like the plugin's own
+    // post-history question path. A production-config probe measured
+    // 50.7s for clientContent versus 0.73s for realtimeInput (same text/model).
     const seedOpeningTurn = (): boolean => {
       const realtimeSession = (agent as any)._agentActivity?.realtimeSession;
       const sendClientEvent = realtimeSession?.sendClientEvent?.bind(realtimeSession);
@@ -2768,13 +3630,13 @@ export default defineAgent({
         return false;
       }
       sendClientEvent({
-        type: 'content',
-        value: {
-          turns: [{ parts: [{ text: openingInput }], role: 'user' }],
-          turnComplete: true,
-        },
+        type: 'realtime_input',
+        value: { text: openingInput },
       });
-      trace('session.opening.seeded', 'model refuses generateReply — seeded a user turn instead');
+      trace(
+        'session.opening.seeded',
+        'model refuses generateReply — queued opening as realtime text input',
+      );
       return true;
     };
 
@@ -2888,7 +3750,13 @@ export default defineAgent({
     // actually completes here.
     ctx.addShutdownCallback(async () => {
       try {
-        await persistSessionSummaryAsync(userId, targetLang, sessionStartedAt, runningSummary, sessionStats);
+        await persistSessionSummaryAsync(
+          userId,
+          targetLang,
+          sessionStartedAt,
+          runningSummary,
+          sessionStats,
+        );
       } catch (err) {
         console.warn('[Tutor-ED] Session summary failed in shutdown:', String(err).slice(0, 120));
       }
@@ -2905,7 +3773,10 @@ export default defineAgent({
       ctx.addShutdownCallback(async () => {
         try {
           const seconds = (Date.now() - geminiSessionStartedAt) / 1000;
-          const ratePerSecond = parseInt(process.env.GOOGLE_REALTIME_MICROS_PER_SECOND || '350', 10);
+          const ratePerSecond = parseInt(
+            process.env.GOOGLE_REALTIME_MICROS_PER_SECOND || '350',
+            10,
+          );
           const micros = Math.round(seconds * ratePerSecond);
           if (isDemoSession) {
             const { recordDemoUsage } = await import('./lib/demo-budget.js');
@@ -2915,7 +3786,10 @@ export default defineAgent({
             await recordGoogleUsage(userId, micros);
           }
         } catch (err) {
-          console.warn('[Tutor-ED] Google usage accrual failed in shutdown:', String(err).slice(0, 120));
+          console.warn(
+            '[Tutor-ED] Google usage accrual failed in shutdown:',
+            String(err).slice(0, 120),
+          );
         }
       });
     }
@@ -2924,8 +3798,10 @@ export default defineAgent({
 
 // CLI entry point
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  cli.runApp(new WorkerOptions({
-    agent: fileURLToPath(import.meta.url),
-    agentName: process.env.LINGLANG_AGENT_NAME ?? 'linglang-tutor',
-  }));
+  cli.runApp(
+    new WorkerOptions({
+      agent: fileURLToPath(import.meta.url),
+      agentName: process.env.LINGLANG_AGENT_NAME ?? 'linglang-tutor',
+    }),
+  );
 }

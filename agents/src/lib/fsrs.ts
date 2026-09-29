@@ -77,6 +77,8 @@ export interface FSRSResult {
   difficulty: number;
   stability: number;
   scheduledDays: number;
+  /** Days actually elapsed since the previous review (0 for a new card). */
+  elapsedDays: number;
   due: Date;
   reps: number;
   lapses: number;
@@ -112,7 +114,17 @@ export function fsrsReview(card: FSRSCard, grade: FSRSGrade, params: FSRSParams 
     return initNewCard(grade, now, params);
   }
 
-  const elapsedDays = card.elapsedDays || 0;
+  // 2026-09-10: derive elapsed time from lastReview rather than trusting
+  // card.elapsedDays. No caller ever wrote elapsed_days back (all 1929 rows in
+  // the DB are 0), so retrievability() was asked about 0 days, returned r=1.0,
+  // and the growth term below -- (exp((1-r)*w13) - 1) -- evaluated to exactly
+  // 0. Stability therefore never grew, nextInterval() returned the same ~1 day
+  // forever (1157 rows at scheduled_days=1, max ever 3), and 97% of the queue
+  // was permanently overdue. Deriving it here makes the schedule self-healing
+  // for existing rows and independent of caller bookkeeping.
+  const elapsedDays = card.lastReview
+    ? Math.max(0, (now.getTime() - card.lastReview.getTime()) / 86_400_000)
+    : (card.elapsedDays || 0);
   const r = retrievability(elapsedDays, card.stability || 0.01, params);
 
   let newDifficulty = constrainDifficulty(
@@ -142,6 +154,7 @@ export function fsrsReview(card: FSRSCard, grade: FSRSGrade, params: FSRSParams 
       due: new Date(now.getTime() + step * 86400000),
       reps: card.reps + 1,
       lapses: newLapses,
+      elapsedDays,
     };
   }
 
@@ -175,6 +188,7 @@ export function fsrsReview(card: FSRSCard, grade: FSRSGrade, params: FSRSParams 
     due: new Date(now.getTime() + scheduledDays * 86400000),
     reps: card.reps + 1,
     lapses: card.lapses,
+    elapsedDays,
   };
 }
 
@@ -193,6 +207,7 @@ function initNewCard(grade: FSRSGrade, now: Date, params: FSRSParams): FSRSResul
       due: new Date(now.getTime() + params.w15 * 86400000),
       reps: 1,
       lapses: 0,
+      elapsedDays: 0,
     };
   }
 
@@ -206,6 +221,7 @@ function initNewCard(grade: FSRSGrade, now: Date, params: FSRSParams): FSRSResul
     due: new Date(now.getTime() + Math.round(interval) * 86400000),
     reps: 1,
     lapses: 0,
+    elapsedDays: 0,
   };
 }
 

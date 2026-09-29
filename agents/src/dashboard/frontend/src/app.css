@@ -1,18 +1,5 @@
-/* LingLang app shell styles.
- *
- * 2026-07-03: Rewritten as a skeleton pass for the mobile-first 3-tab
- * rebuild (Voice / Library / Profile). The previous version targeted a
- * dead Material-ish token scheme (--surface-low, --on-surface, --primary,
- * --secondary, --tertiary, --error, --error-container, .app-layout,
- * .panel grid rules) that no longer exists in design-tokens.css — every
- * `var(--...)` reference in the old file resolved to nothing.
- *
- * This file is intentionally minimal: reset, base typography, the
- * `.app-shell` container, and empty placeholder blocks for the tab bar /
- * top bar / bottom sheet. Later tasks own filling in `.tab-bar`,
- * `.top-bar`, `.sheet-scrim`, `.sheet-panel`, and everything inside the
- * three tabs — do not add tab/sheet content styling here.
- */
+/* Shared typography, conversation and profile surfaces. Responsive
+ * navigation lives in shell.css; library controls live in library.css. */
 
 /* ── Reset ──────────────────────────────────────────────────────────── */
 *,
@@ -48,7 +35,12 @@ textarea {
 
 /* ── Base typography ────────────────────────────────────────────────── */
 body {
-  font-family: 'Golos Text', 'Onest', system-ui, -apple-system, sans-serif;
+  font-family:
+    'Hauora',
+    'Golos Text',
+    system-ui,
+    -apple-system,
+    sans-serif;
   font-size: 15px;
   line-height: 1.5;
   background: var(--bg);
@@ -59,7 +51,7 @@ body {
 h1,
 h2,
 h3 {
-  font-family: 'Onest', 'Golos Text', system-ui, sans-serif;
+  font-family: 'Hauora', 'Golos Text', system-ui, sans-serif;
   margin: 0;
 }
 
@@ -169,6 +161,50 @@ pre,
   font-size: 17px;
   font-weight: 700;
   margin: 0 0 14px;
+}
+
+.sheet-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sheet-status {
+  color: var(--text-dim);
+  margin: 0;
+}
+
+.word-detail-sheet h2 {
+  margin: 0;
+  font-size: 24px;
+}
+
+.word-detail-translation {
+  color: var(--text-dim);
+  margin: 4px 0 0;
+}
+
+.word-detail-grid {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 9px 16px;
+  padding: 14px;
+  border: 1px solid var(--ll-border);
+  border-radius: 12px;
+  background: var(--surface3);
+}
+
+.word-detail-grid span {
+  color: var(--text-dim);
+}
+
+.word-detail-grid strong {
+  text-align: right;
+}
+
+.conversation-stream-status {
+  margin: 8px 0;
+  text-align: center;
 }
 
 .language-sheet-list {
@@ -405,6 +441,41 @@ pre,
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* Keep the last card clear of the bottom tab bar — without this the
+   * final content scrolls under the nav and can never be fully seen. */
+  padding-bottom: 24px;
+}
+
+/* 0% progress tracks are invisible against the card surface (same
+ * lightness) — brighter outline + "not started" cue so an empty bar
+ * still reads as a bar. */
+.library-tab .progress-bar__track {
+  border: 1px solid var(--muted, #888);
+}
+
+/* Desktop-style scrollbars (with arrow buttons) look alien in a
+ * phone-shaped app — slim overlay-style thumb instead. */
+.library-tab,
+.profile-tab,
+.voice-transcript {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.library-tab::-webkit-scrollbar,
+.profile-tab::-webkit-scrollbar,
+.voice-transcript::-webkit-scrollbar {
+  width: 6px;
+}
+.library-tab::-webkit-scrollbar-thumb,
+.profile-tab::-webkit-scrollbar-thumb,
+.voice-transcript::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+.library-tab::-webkit-scrollbar-track,
+.profile-tab::-webkit-scrollbar-track,
+.voice-transcript::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .voice-pill-dot {
@@ -413,6 +484,302 @@ pre,
   border-radius: 50%;
   background: var(--accent);
   display: inline-block;
+}
+
+.conversation-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 38px 42px 24px;
+}
+.conversation-heading h1 {
+  font-size: 30px;
+  margin-top: 5px;
+  font-weight: 600;
+}
+.conversation-connection {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.conversation-connection > span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.conversation-connection.connected {
+  color: var(--good);
+}
+.conversation-connection.connected > span {
+  background: var(--good);
+}
+.voice-tab .top-bar {
+  margin-inline: 42px;
+  padding: 16px 0;
+  border-top: 1px solid var(--ll-border);
+}
+.voice-tab .voice-transcript {
+  padding-inline: max(24px, calc((100% - 820px) / 2));
+}
+.voice-tab .voice-transcript-empty {
+  max-width: 440px;
+  padding: 24px 10px;
+  color: var(--text);
+}
+.conversation-empty-mark {
+  display: grid;
+  place-items: center;
+  width: 72px;
+  height: 72px;
+  border-radius: 8px;
+  margin: 0 auto 24px;
+  color: var(--good);
+  background: var(--good-soft);
+}
+.voice-transcript-empty h2 {
+  font-size: 26px;
+  line-height: 1.4;
+  font-weight: 600;
+}
+.voice-tab .voice-transcript-empty p {
+  font-size: 14px;
+  margin-top: 14px;
+  color: var(--muted);
+}
+.voice-tab .voice-controls {
+  padding: 20px 28px 32px;
+  border-top: 1px solid var(--ll-border);
+  background: var(--ll-surface);
+}
+.voice-tab .voice-controls > button {
+  min-height: 48px;
+  padding-inline: 28px;
+  border-radius: 7px;
+}
+.profile-tab {
+  padding: 38px 42px;
+  width: 100%;
+  max-width: 940px;
+  align-self: center;
+}
+.profile-tab > h2 {
+  font-size: 30px;
+  margin-bottom: 14px;
+}
+.profile-tab > .card {
+  border-radius: 0;
+  background: none;
+  border-bottom: 1px solid var(--ll-border);
+  padding: 24px 0;
+  box-shadow: none;
+}
+.profile-tab .profile-advanced {
+  margin-top: 12px;
+}
+.profile-tab .profile-advanced > .card {
+  border-radius: 0;
+  box-shadow: none;
+  padding: 20px 0;
+  background: none;
+  border-bottom: 1px solid var(--ll-border);
+}
+button,
+input,
+select,
+textarea,
+h1,
+h2,
+h3 {
+  letter-spacing: 0;
+}
+.button--primary {
+  color: var(--accent-foreground);
+}
+.button {
+  border-radius: 7px;
+}
+.button--primary svg {
+  color: inherit;
+}
+.modal__close-trigger {
+  width: 44px;
+  height: 44px;
+}
+.modal__header {
+  padding-right: 48px;
+}
+.voice-curriculum-pill {
+  max-width: 100%;
+  min-width: 0;
+}
+.voice-curriculum-pill > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.voice-goal {
+  margin-inline: 20px;
+}
+.voice-goal .chip {
+  max-width: 100%;
+  height: auto;
+  white-space: normal;
+  text-align: center;
+  padding: 6px 12px;
+  font-size: 11px;
+}
+
+/* ── Mobile in-session context strip ──────────────────────────────────
+   Rendered by VoiceTab's SessionBar; hidden by default so desktop and the
+   pre-connect screen keep the full chrome (eyebrow/title + pills + goal
+   chip). app.css's @media (max-width: 700px) block switches it on for
+   `.voice-tab.in-session`. Every control is >=44px tall. */
+.voice-session-bar {
+  display: none;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 16px 6px;
+  border-bottom: 1px solid var(--ll-border);
+}
+.voice-session-bar .voice-session-language {
+  flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 44px;
+}
+.voice-session-bar .voice-session-curriculum {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 44px;
+  justify-content: flex-start;
+}
+.voice-session-bar .voice-session-curriculum > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.voice-session-bar .voice-session-info {
+  flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 44px;
+  color: var(--text-dim);
+}
+.voice-session-context {
+  max-width: min(320px, calc(100vw - 32px));
+}
+.voice-session-context-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 10px 0 0;
+}
+.voice-session-context-list div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.voice-session-context-list dt {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.voice-session-context-list dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+}
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+@media (max-width: 700px) {
+  .conversation-heading {
+    padding: 22px 20px 20px;
+  }
+  .conversation-heading h1 {
+    font-size: 24px;
+  }
+  .conversation-connection {
+    font-size: 10px;
+    max-width: 115px;
+  }
+  .voice-tab .top-bar {
+    margin-inline: 20px;
+    gap: 8px;
+  }
+  .voice-transcript-empty h2 {
+    font-size: 22px;
+  }
+  .voice-tab .voice-transcript {
+    padding-inline: 16px;
+  }
+  .voice-tab .voice-controls {
+    padding: 16px 20px 18px;
+  }
+  .voice-tab .voice-controls > button {
+    width: 100%;
+  }
+
+  /* ── Mobile in-session chrome collapse ────────────────────────────────
+   * 2026-09-26: the previous pass only SHRANK these bands (10px chips, a
+   * 15px title) and left every row's padding in place, so on a 360x640
+   * phone the eyebrow+title, the pills row and the goal chip still cost
+   * ~113px above the transcript — the user's "it still looks the same".
+   * Measured baseline (scripts/probe-voice-mobile.mjs): transcript = 285px
+   * of 640 (44.5%) in-session.
+   *
+   * Now the three bands are removed from the layout entirely while
+   * connected, and replaced by ONE 44px `.voice-session-bar` (rendered by
+   * VoiceTab) that keeps the language, the active curriculum and a
+   * "Session details" popover (goal / streak / review count) reachable.
+   * Everything restores on disconnect because `in-session` is driven by
+   * `connected` state, not by unmounting. Desktop (>700px) is untouched —
+   * it has the room for the full chrome. */
+  .voice-tab.in-session .conversation-heading,
+  .voice-tab.in-session .top-bar,
+  .voice-tab.in-session .voice-goal {
+    display: none;
+  }
+  .voice-tab.in-session .voice-session-bar {
+    display: flex;
+  }
+  .voice-tab.in-session .voice-transcript {
+    flex: 1 1 auto;
+  }
+  /* Compact control bar while talking: the stage only has to fit the 72px
+   * PTT button plus its 8px-offset status line (96px), not 100px + 20px of
+   * padding. Touch targets are unaffected — the button, the mode buttons,
+   * End and the session bar are all still >=44px. */
+  .voice-tab.in-session .voicectl {
+    padding: 6px 12px;
+  }
+  .voice-tab.in-session .voicectl-stage {
+    min-height: 104px;
+  }
+  /* The call already identifies its language/context. Keep branding out of
+     the transcript's way; the bottom navigation remains available. */
+  .app-shell[data-active-tab='voice']:has(.voice-tab.in-session) .mobile-app-header {
+    display: none;
+  }
+  .voice-tab.in-session {
+    padding-top: env(safe-area-inset-top);
+  }
+
+  .profile-tab {
+    padding: 22px 20px;
+  }
+  .profile-tab > h2 {
+    font-size: 26px;
+  }
+  .profile-tab input,
+  .profile-tab select {
+    font-size: 16px;
+  }
 }
 
 .voice-transcript {
@@ -428,8 +795,93 @@ pre,
 .voice-transcript-empty {
   color: var(--text-faint);
   text-align: center;
-  margin-top: 30%;
+  margin: auto;
+  padding: 24px;
+  max-width: 34ch;
   font-size: 14px;
+  line-height: 1.6;
+}
+
+.voice-transcript-empty p {
+  margin: 0 0 10px;
+}
+
+.voice-transcript-empty p:last-child {
+  margin-bottom: 0;
+}
+
+/* Second paragraph of the first-run copy: the reassurance, one notch quieter
+   than the instruction above it. */
+.voice-transcript-empty-hint {
+  font-size: 13px;
+  opacity: 0.75;
+}
+
+/* Signup card: what LingLang is, for someone who has never seen it. */
+.auth-how {
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  text-align: left;
+}
+
+.auth-how li {
+  position: relative;
+  padding-left: 18px;
+  line-height: 1.5;
+}
+
+.auth-how li::before {
+  content: '→';
+  position: absolute;
+  left: 0;
+  color: var(--accent);
+}
+
+/* Profile tab: backend selection, API keys and BYO providers sit behind a
+   native <details> disclosure, so a new learner opening Profile lands on
+   their own progress instead of on endpoint URLs. */
+.profile-advanced > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--border, #444);
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.profile-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.profile-advanced > summary::after {
+  content: '▾';
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.profile-advanced[open] > summary {
+  margin-bottom: 16px;
+}
+
+.profile-advanced[open] > summary::after {
+  content: '▴';
+}
+
+.profile-advanced-hint {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
 }
 
 .voice-bubble-row {
@@ -540,6 +992,30 @@ pre,
   gap: 8px;
 }
 
+/* Live partial transcript (realtime/Gemini): the learner's words land as they
+   speak, so show them — dimmed, with a blinking caret — instead of the
+   waveform placeholder. Replaced in place by the final bubble. */
+.voice-bubble-interim {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.voice-interim-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 4px;
+  vertical-align: text-bottom;
+  background: currentColor;
+  animation: llCaretBlink 1s steps(2, start) infinite;
+}
+
+@keyframes llCaretBlink {
+  to {
+    visibility: hidden;
+  }
+}
+
 .voice-waveform {
   display: flex;
   align-items: center;
@@ -592,9 +1068,13 @@ pre,
 /* ── VoiceControl: PTT / hands-free (Task 5) ───────────────────────── */
 
 /* 2026-07-04 (user feedback): was a 3-row column (mode switch / PTT stage /
-   disconnect), which made the whole bar too tall. Now a single row —
-   mode switch and disconnect flank the PTT stage left/right instead of
-   stacking above/below it. */
+   disconnect), which made the whole bar too tall. Now a single row — the
+   labelled mode buttons and disconnect flank the PTT stage left/right.
+
+   2026-09-26: the bar no longer adds env(safe-area-inset-bottom) itself.
+   AppShell renders the bottom TabBar BELOW this bar, and the tab bar already
+   pads for the home indicator — so this bar's own inset double-counted it
+   (~34px of dead space inside every live session on an iOS device). */
 .voicectl {
   flex: 0 0 auto;
   display: flex;
@@ -602,18 +1082,18 @@ pre,
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+  padding: 10px 16px;
   background: var(--scrim);
 }
 
 .voicectl-side {
   flex: 0 0 auto;
-  min-width: 76px;
   display: flex;
   align-items: center;
 }
 
 .voicectl-side-left {
+  min-width: 116px;
   justify-content: flex-start;
 }
 
@@ -621,68 +1101,54 @@ pre,
   justify-content: flex-end;
 }
 
-.voicectl-modeswitch {
+/* ── Mode selection: two always-visible, LABELLED options ───────────────
+   Replaces the old single-label switch. That control only ever showed the
+   mode you were already in (the alternative was invisible until you
+   toggled it), and its accessible name was "Toggle push-to-talk /
+   hands-free mode" rather than the choice itself. Each button below is a
+   44px touch target with a stable label and aria-pressed state. */
+.voicectl-modes {
   display: flex;
   flex-direction: column;
+  gap: 4px;
+  width: 116px;
+}
+
+.voicectl-mode-btn {
+  display: flex;
   align-items: center;
-  gap: 5px;
-}
-
-.voicectl-modelabel {
-  font-size: 11px;
-  color: var(--text-faint);
-  transition: color .15s ease;
-  white-space: nowrap;
-}
-
-.voicectl-modelabel.active {
-  color: var(--text);
-  font-weight: 600;
-}
-
-.voicectl-switch {
-  background: none;
-  border: none;
-  padding: 0;
-  cursor: pointer;
-  line-height: 0;
-}
-
-.voicectl-switch-track {
-  display: inline-block;
-  position: relative;
-  width: 42px;
-  height: 24px;
-  border-radius: 999px;
+  justify-content: flex-start;
+  gap: 7px;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid var(--ll-border);
+  border-radius: 10px;
   background: var(--surface2);
-  transition: background .18s ease;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease;
 }
 
-.voicectl-switch-track[data-on="true"] {
-  background: var(--ll-accent);
-}
-
-.voicectl-switch-knob {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: var(--text);
-  transition: left .18s ease;
-}
-
-.voicectl-switch-knob[data-on="true"] {
-  left: 21px;
+.voicectl-mode-btn[data-selected='true'],
+.voicectl-mode-btn[aria-pressed='true'] {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .voicectl-stage {
   position: relative;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  min-height: 100px;
+  min-height: 104px;
+  padding-bottom: 32px;
 }
 
 /* PTT button — 72px (was 84px, 2026-07-04 height-reduction pass): still
@@ -729,7 +1195,9 @@ pre,
   touch-action: none;
   user-select: none;
   box-shadow: var(--shadow-field, none);
-  transition: background .12s ease, transform .12s ease;
+  transition:
+    background 0.12s ease,
+    transform 0.12s ease;
 }
 
 .voicectl-ptt-btn.held {
@@ -752,76 +1220,113 @@ pre,
   height: 28px;
 }
 
+/* Bars are the learner's REAL input level (inline transform from
+   `useTrackVolume()`), so a silent/muted mic leaves them at their resting
+   height. The old `llBar` looping animation is gone: it animated the same
+   way whether or not the mic heard anything, which read as "listening"
+   while the mic was muted. */
 .voicectl-ptt-bar {
   display: inline-block;
   width: 4px;
   height: 100%;
   border-radius: 2px;
   background: currentColor;
-  transform: scaleY(.4);
+  transform: scaleY(0.4);
   transform-origin: center;
-}
-
-.voicectl-ptt-btn.held .voicectl-ptt-bar {
-  animation: llBar .6s ease-in-out infinite;
+  transition: transform 0.08s linear;
 }
 
 .voicectl-ptt-btn.held.cancelling .voicectl-ptt-bar {
-  animation: none;
-  transform: scaleY(.4);
+  transform: scaleY(0.4);
 }
 
-.voicectl-hint {
+/* The mic is on while nothing is being held — PTT's "starts muted" contract
+   is broken, so the button says so instead of looking normal. */
+.voicectl-ptt-btn.unexpected-live {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: color-mix(in oklch, var(--danger) 14%, transparent);
+}
+
+/* Single status line for both modes: real mic state + agent state (see
+   lib/mic-status.ts). Absolutely positioned so its length can never shove
+   the stage contents around mid-hold (2026-07-14 bug). */
+.voicectl-status {
   position: absolute;
   top: calc(100% + 8px);
   left: 50%;
   transform: translateX(-50%);
   width: max-content;
-  max-width: 260px;
+  max-width: 250px;
   text-align: center;
   font-size: 12px;
+  line-height: 16px;
   color: var(--text-dim);
 }
 
-.voicectl-hint.cancelling {
+.voicectl-status[data-tone='live'] {
+  color: var(--good);
+}
+
+.voicectl-status[data-tone='warn'] {
   color: var(--danger);
   font-weight: 600;
 }
 
-/* Hands-free orb */
-
-.voicectl-handsfree-wrap {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
+.voicectl-status-clock {
+  font-variant-numeric: tabular-nums;
 }
 
-.voicectl-orb {
+/* ── Hands-free: real input-level ring ──────────────────────────────────
+   Replaces the 72px decorative breathing orb. The conic fill is driven by
+   the actual mic level (`--ll-mic-level`), and the icon inside shows the
+   true mic state (mic / mic-off) rather than always looking "live". */
+.voicectl-handsfree-wrap {
+  position: relative;
+  display: grid;
+  place-items: center;
   width: 72px;
   height: 72px;
-  border-radius: 50%;
-  background: radial-gradient(circle at 38% 32%, var(--accent-soft), rgba(0, 0, 0, 0) 70%);
+}
+
+.voicectl-ring {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
   border: 1px solid var(--accent-border);
-  animation: llBreathe 2.6s ease-in-out infinite;
+  border-radius: 50%;
+  color: var(--accent);
+  background: conic-gradient(var(--accent) var(--ll-mic-level, 0%), var(--surface2) 0);
 }
 
-.voicectl-orb-listening {
-  animation-duration: 2.2s;
+.voicectl-ring::after {
+  content: '';
+  position: absolute;
+  inset: 6px;
+  border-radius: 50%;
+  background: var(--surface-secondary);
 }
 
-.voicectl-orb-thinking {
-  animation-duration: 1.4s;
-  border-color: var(--teal-border);
-  background: radial-gradient(circle at 38% 32%, var(--teal-soft), rgba(0, 0, 0, 0) 70%);
+.voicectl-ring > svg {
+  position: relative;
+  z-index: 1;
 }
 
-.voicectl-orb-speaking {
-  animation-duration: 0.9s;
+.voicectl-ring[data-on='false'] {
+  border-color: var(--ll-border);
+  border-style: dashed;
+  color: var(--text-faint);
+  background: var(--surface2);
 }
 
-.voicectl-disconnect {
-  padding: 8px 14px;
+/* End is a destructive action next to a mic control — give it a real 44px
+   target (HeroUI's size="sm" button is 36px, measured). */
+.voicectl-end {
+  min-width: 68px;
+  min-height: 44px;
+  gap: 6px;
   font-size: 13px;
 }
 
@@ -878,7 +1383,7 @@ pre,
   font-size: 1rem;
   margin-bottom: 0.75rem;
   outline: none;
-  transition: border-color .15s ease;
+  transition: border-color 0.15s ease;
 }
 
 .login-card input:focus {
@@ -899,7 +1404,7 @@ pre,
 }
 
 .login-card .btn-primary:hover {
-  opacity: .9;
+  opacity: 0.9;
 }
 
 .login-err {
@@ -908,12 +1413,100 @@ pre,
   margin-top: 0.75rem;
 }
 
-/* ── Debug tab (admin-only trace view) ─────────────────────────────────
-   2026-08-04: AgentFlow was written against a stylesheet that no longer
-   exists (it lived in the pre-tab VoiceRoom UI). These rules cover both
-   the new DebugTab chrome (.dbg-*) and the AgentFlow classes that lost
-   their definitions (.panel, .flow-scroll, .log-count, .empty-state),
-   scoped under .debug-tab so nothing else in the app is affected. */
+.debug-tab .dbg-benchmark-current {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.debug-tab .dbg-benchmark-match {
+  color: var(--ll-success, #5ba87a);
+  font-size: 0.75rem;
+}
+
+.debug-tab .dbg-benchmark-unmatched {
+  color: var(--text-faint);
+  font-size: 0.75rem;
+}
+
+.debug-tab .dbg-benchmark-note {
+  color: var(--text-dim);
+  font-size: 0.74rem;
+  line-height: 1.45;
+}
+
+.debug-tab .dbg-benchmark-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 0.55rem;
+}
+
+.debug-tab .dbg-benchmark-card {
+  position: relative;
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+  padding: 0.65rem;
+  background: var(--bg);
+}
+
+.debug-tab .dbg-benchmark-card.is-active {
+  border-color: var(--ll-accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ll-accent) 35%, transparent);
+}
+
+.debug-tab .dbg-benchmark-model {
+  font-weight: 650;
+  font-size: 0.82rem;
+}
+
+.debug-tab .dbg-benchmark-id {
+  margin-top: 0.12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.debug-tab .dbg-benchmark-stat {
+  margin-top: 0.6rem;
+  color: var(--text-dim);
+  font-size: 0.76rem;
+}
+
+.debug-tab .dbg-benchmark-stat strong {
+  color: var(--text);
+  font-size: 1.15rem;
+}
+
+.debug-tab .dbg-benchmark-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.2rem 0.45rem;
+  margin-top: 0.45rem;
+  color: var(--text-faint);
+  font-size: 0.69rem;
+}
+
+.debug-tab .dbg-benchmark-stats b {
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.debug-tab .dbg-benchmark-badge {
+  display: inline-block;
+  margin-top: 0.55rem;
+  padding: 0.16rem 0.35rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ll-accent) 16%, transparent);
+  color: var(--ll-accent);
+  font-size: 0.64rem;
+}
+
+.debug-tab .dbg-benchmark-badge.is-muted {
+  background: var(--border-soft);
+  color: var(--text-dim);
+}
 
 .debug-tab {
   overflow-y: auto;
@@ -963,9 +1556,16 @@ pre,
 }
 
 .debug-tab .dbg-btn:hover,
-.debug-tab .btn-text:hover { color: var(--text); }
+.debug-tab .btn-text:hover {
+  color: var(--text);
+}
 
-.debug-tab .dbg-body { padding: 0.75rem; display: flex; flex-direction: column; gap: 0.9rem; }
+.debug-tab .dbg-body {
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
 
 .debug-tab .dbg-kv {
   display: grid;
@@ -973,10 +1573,21 @@ pre,
   gap: 0.35rem 0.75rem;
 }
 
-.debug-tab .dbg-kv > div { display: flex; gap: 0.4rem; align-items: baseline; }
-.debug-tab .dbg-k { color: var(--text-faint); min-width: 4.5rem; }
+.debug-tab .dbg-kv > div {
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+}
+.debug-tab .dbg-k {
+  color: var(--text-faint);
+  min-width: 4.5rem;
+}
 
-.debug-tab .dbg-section { display: flex; flex-direction: column; gap: 0.4rem; }
+.debug-tab .dbg-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
 
 .debug-tab .dbg-section-title {
   font-weight: 600;
@@ -986,7 +1597,12 @@ pre,
   letter-spacing: 0.04em;
 }
 
-.debug-tab .dbg-meta { color: var(--text-faint); font-weight: 400; text-transform: none; letter-spacing: 0; }
+.debug-tab .dbg-meta {
+  color: var(--text-faint);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
 
 .debug-tab .dbg-quote {
   border-left: 2px solid var(--ll-accent);
@@ -995,7 +1611,11 @@ pre,
   line-height: 1.45;
 }
 
-.debug-tab .dbg-raw { border: 1px solid var(--border-soft); border-radius: 8px; overflow: hidden; }
+.debug-tab .dbg-raw {
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  overflow: hidden;
+}
 
 .debug-tab .dbg-raw-toggle {
   width: 100%;
@@ -1012,7 +1632,9 @@ pre,
   text-align: left;
 }
 
-.debug-tab .dbg-raw-toggle:hover { color: var(--text); }
+.debug-tab .dbg-raw-toggle:hover {
+  color: var(--text);
+}
 
 .debug-tab .dbg-pre,
 .debug-tab pre {
@@ -1030,10 +1652,25 @@ pre,
   overflow: auto;
 }
 
-.debug-tab .dbg-sub { border-top: 1px solid var(--border-soft); padding-top: 0.5rem; display: flex; flex-direction: column; gap: 0.35rem; }
-.debug-tab .dbg-sub-role { font-weight: 600; font-size: 0.76rem; }
+.debug-tab .dbg-sub {
+  border-top: 1px solid var(--border-soft);
+  padding-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.debug-tab .dbg-sub-role {
+  font-weight: 600;
+  font-size: 0.76rem;
+}
 
-.debug-tab .dbg-trace { max-height: 18rem; overflow: auto; display: flex; flex-direction: column; gap: 0.15rem; }
+.debug-tab .dbg-trace {
+  max-height: 18rem;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
 
 .debug-tab .dbg-trace-row {
   display: flex;
@@ -1043,11 +1680,23 @@ pre,
   line-height: 1.5;
 }
 
-.debug-tab .dbg-trace-ev { color: var(--teal); flex-shrink: 0; }
-.debug-tab .dbg-trace-detail { color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.debug-tab .dbg-trace-ev {
+  color: var(--teal);
+  flex-shrink: 0;
+}
+.debug-tab .dbg-trace-detail {
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .debug-tab .dbg-empty,
-.debug-tab .empty-state { color: var(--text-faint); font-size: 0.78rem; padding: 0.4rem 0; }
+.debug-tab .empty-state {
+  color: var(--text-faint);
+  font-size: 0.78rem;
+  padding: 0.4rem 0;
+}
 
 .debug-tab .log-count {
   color: var(--text-faint);
@@ -1056,4 +1705,11 @@ pre,
   margin-left: 0.35rem;
 }
 
-.debug-tab .flow-scroll { max-height: 32rem; overflow: auto; padding: 0.6rem; display: flex; flex-direction: column; gap: 0.6rem; }
+.debug-tab .flow-scroll {
+  max-height: 32rem;
+  overflow: auto;
+  padding: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}

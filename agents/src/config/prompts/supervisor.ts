@@ -36,7 +36,7 @@ If a Curriculum line is present below, the learner is working through chosen mat
 
 NOTE[category]: one sentence — only when you learn something durable and NEW about this learner worth remembering tomorrow. Categories: preference, level, frustration, goal, engagement. Never restate a note already shown to you. Most cycles produce no note.
 
-PERSONA: field=value[, field=value...] — only on clear evidence the current teaching style is wrong for this learner, or to record how they like to be taught (you are the sole writer of that style read). Fields: tone (roast|warm|neutral|formal|drill-sergeant), correctionStyle (immediate|gentle|ignore|end-of-turn), teachingMode (conversational|drill|roleplay|storytelling), personaOverride (free text), extraInstructions (free text — the usual home of a 1-2 sentence style read, e.g. "Terse, likes being teased back, skip pleasantries"). Most cycles produce no persona line.
+PERSONA: {"tone":"warm","extraInstructions":"Brief, patient, no speeches."} — optional JSON object with tentative observed style, never an override of explicit preferences. Allowed fields: tone (roast|warm|neutral|formal|drill-sergeant), correctionStyle (immediate|gentle|ignore|end-of-turn), teachingMode (conversational|drill|roleplay|storytelling), personaOverride and extraInstructions (free text). Most cycles produce no persona line.
 
 CURRICULUM: skip|revisit — only when a Curriculum line is present AND you judge from engagement or the learner's own words that the current material should move on early or be revisited. This is a suggestion, not a command — it goes through the same coverage-tracked advancement the rest of the system uses. Most cycles produce no curriculum line.` as const;
 
@@ -44,6 +44,7 @@ CURRICULUM: skip|revisit — only when a Curriculum line is present AND you judg
 export interface PlannerContext {
   /** DB snapshot text (SRS due items, new vocab candidates, etc.) */
   dbContext: string;
+  preferences?: string;
   /** Active goal note from the goal-seeking cycle, or null */
   goalNote: string | null;
   /** Recent conversation history (formatted string) */
@@ -108,6 +109,8 @@ export function buildPlannerPrompt(ctx: PlannerContext): string {
   return `Reason: ${ctx.reason}
 Signals: ${signals}
 ${engagementLine}
+Effective learner preferences (authoritative; do not contradict or replace):
+${ctx.preferences || 'No additional preferences'}
 ${curriculumSection}
 ${nudgeLine}
 

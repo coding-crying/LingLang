@@ -12,6 +12,11 @@
  * escalates with the measured number when the tutor overshoots.
  */
 
+/** CEFR independent/proficient users need no beginner default. */
+export function isIndependentLevel(level: string): boolean {
+  return /^(b1|b2|c1|c2)$/i.test(level);
+}
+
 /** Target-language share of tutor speech by CEFR level. */
 export function targetShareForLevel(level: string): number {
   switch ((level || '').toLowerCase()) {
@@ -26,7 +31,8 @@ export function targetShareForLevel(level: string): number {
 
 /**
  * Cap for learners we have almost no grading evidence on (fewer than 5
- * review logs → recentSuccess is null). Even a self-reported A2 starts
+ * review logs → recentSuccess is null). Applies below B1 only: a selected
+ * independent level must not be erased by missing review history. A2 starts
  * mostly-native and earns immersion — knowing vocabulary and following
  * spoken sentences are different skills, and the cost of starting too
  * easy is one slightly slow session; the cost of starting too hard is
@@ -49,7 +55,9 @@ export interface MixTargetInputs {
 
 export function computeTargetShare(inputs: MixTargetInputs): number {
   let share = targetShareForLevel(inputs.userLevel);
-  if (inputs.recentSuccess === null) share = Math.min(share, NEW_LEARNER_SHARE_CAP);
+  if (inputs.recentSuccess === null && !isIndependentLevel(inputs.userLevel)) {
+    share = Math.min(share, NEW_LEARNER_SHARE_CAP);
+  }
   share -= inputs.throttleNotches * THROTTLE_STEP;
   return Math.max(MIN_SHARE, share);
 }
@@ -156,10 +164,10 @@ export function buildMixLine(inputs: MixLineInputs): string {
   }
 
   if (targetShare < 0.35) {
-    return `Speak ${nativeLanguage}, not ${targetLanguage}. Bring in ${targetLanguage} only for the words and phrases you are teaching — one at a time, each followed immediately by its ${nativeLanguage} meaning. Never say a full ${targetLanguage} sentence they haven't already understood piece by piece.`;
+    return `Speak ${nativeLanguage} by default. Use at most one short ${targetLanguage} word or phrase this turn, and give its ${nativeLanguage} meaning immediately. Never answer with a paragraph in ${targetLanguage}. If they look confused, stay in ${nativeLanguage} and make the next move easy.`;
   }
-  if (targetShare < 0.65) {
-    return `Mix languages: frame and explain in ${nativeLanguage}, and carry the exchanges you know they can follow in ${targetLanguage}. Never stack two ${targetLanguage} sentences in a row without checking they followed the first.`;
+  if (targetShare < 0.6) {
+    return `Keep the conversation in ${nativeLanguage} unless a small ${targetLanguage} moment earns its place. Use at most one short ${targetLanguage} sentence or phrase per turn, followed immediately by ${nativeLanguage} meaning. Never stack two unexplained ${targetLanguage} sentences. The learner should understand the point and get an easy reply opportunity.`;
   }
   if (targetShare < 0.85) {
     return `Speak mostly ${targetLanguage}, in simple short sentences. Switch to ${nativeLanguage} the moment they show signs of not following.`;

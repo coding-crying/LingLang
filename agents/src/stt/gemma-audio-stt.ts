@@ -172,6 +172,27 @@ function framesToAudioPayload(frames: AudioFrame[]): { event: stt.SpeechEvent; w
   };
 }
 
+/**
+ * Register a chunk of user audio captured outside the STT node.
+ *
+ * Realtime (S2S) sessions have no STT node, so nothing populates the audio
+ * registry and the learner's turns lose playback + duration context. The
+ * UserAudioTap hands us the frames for a VAD-derived utterance span; this
+ * reuses the STT's own encoder/registry so a tapped span is indistinguishable
+ * from an STT-produced one downstream.
+ *
+ * Returns null when there is nothing usable to register.
+ */
+export function registerUserAudioSpan(frames: AudioFrame[]): { audioId: string; durationSec: number } | null {
+  const payload = framesToAudioPayload(frames);
+  if (!payload) return null;
+  const text = payload.event.alternatives?.[0]?.text ?? '';
+  const audioId = /key=([^\s\]]+)/.exec(text)?.[1];
+  if (!audioId) return null;
+  const entry = audioPayloadRegistry.get(audioId);
+  return { audioId, durationSec: entry?.durationSec ?? 0 };
+}
+
 /** Empty transcript event — used to short-circuit micro-segments / mic taps. */
 function emptyTranscriptEvent(): stt.SpeechEvent {
   return {

@@ -15,61 +15,71 @@
 // computed upstream (readLearnerView, tutor-event-driven.ts) and passed
 // in via PromptContext.
 
+import { isIndependentLevel } from '../../lib/language-mix.js';
+
 export interface FrontierInfo {
   /** Success-gated introduction state — see lib/frontier.ts */
-  state: 'consolidate' | 'balance' | 'expand'
+  state: 'consolidate' | 'balance' | 'expand';
   /** One-line pedagogical directive for this state. */
-  directive: string
+  directive: string;
   /** Formatted "lemma (translation), ..." — empty string if none. */
-  dueWords: string
+  dueWords: string;
   /** Formatted "lemma (translation), ..." — empty string if none. */
-  newWords: string
+  newWords: string;
 }
 
 export interface AdaptiveContext {
   /** What part of the session we're in. Affects scaffolding vs. flow. */
-  sessionPhase: 'opening' | 'warmup' | 'flow' | 'wrapup'
+  sessionPhase: 'opening' | 'warmup' | 'flow' | 'wrapup';
   /** Completed turns so far. */
-  turnCount: number
+  turnCount: number;
   /** Errors per turn in last 3 turns, normalized 0-1. */
-  errorDensity: number
+  errorDensity: number;
   /** Response rhythm, derived from turn length trend. */
-  pacing: 'fast' | 'medium' | 'slow'
+  pacing: 'fast' | 'medium' | 'slow';
+  /**
+   * Reply-length watchdog line, non-null when the tutor's own recent
+   * replies repeatedly overshot the length band. Rendered as a hard
+   * word cap until an in-band reply resets the streak.
+   */
+  lengthWatchdog?: string | null;
 }
 
 export interface PromptContext {
-  targetLanguage: string
-  nativeLanguage: string
-  userLevel: string
+  targetLanguage: string;
+  nativeLanguage: string;
+  userLevel: string;
   /** Fully composed persona block (base line + tone + style profile). */
-  persona: string
-  frontier: FrontierInfo
-  recentErrors?: string
+  persona: string;
+  /** Replaceable, session-frozen model instructions; empty means subtract them. */
+  modelGuidance?: string;
+  frontier: FrontierInfo;
+  recentErrors?: string;
   /** The processor's single per-turn note (grammar or pronunciation pattern worth practice). */
-  grammarHints?: string
+  grammarHints?: string;
   /** The planner's "current angle" nudge. */
-  goalUpdate?: string
-  previousSessionContext?: string | null
+  goalUpdate?: string;
+  previousSessionContext?: string | null;
   /**
    * Formatted "lemma (translation), ..." of words the learner just asked
    * for (reached for the native word mid-sentence) — see
    * learner-view.ts's demandWords. Empty string if none. Distinct from
    * dueWords: these are NOT things the learner already knows.
    */
-  demandWords?: string
+  demandWords?: string;
   /**
    * Comprehensible-input controller line (lib/language-mix.ts) — how much
    * target vs native language to speak, escalated with the measured share
    * of the previous reply when the tutor overshot.
    */
-  mixLine?: string
+  mixLine?: string;
   /**
    * Optional per-language mechanics (languages.ts's pedagogy.specialInstructions)
    * — e.g. Mandarin's tone-correction guidance. Stable for the whole
    * session (language doesn't change mid-call), so it belongs in the core,
    * not the volatile tail.
    */
-  specialInstructions?: string
+  specialInstructions?: string;
   /**
    * Curriculum teaching instruction (design doc §3, learner-view.ts's
    * activeChunk.card). A SINGLE short, conditionally-framed sentence
@@ -84,16 +94,16 @@ export interface PromptContext {
    * this model's audio attention is measurably fragile to phrasing, not
    * just to raw prompt length.
    */
-  lessonCard?: string
+  lessonCard?: string;
   /** Optional: adaptive signals for prompt composition. */
-  adaptive?: AdaptiveContext
+  adaptive?: AdaptiveContext;
   /**
    * Session runs on a realtime model (Gemini Live). Two consequences:
    * the system prompt is frozen at connect, so this build has to be
    * self-sufficient; and the per-turn tail arrives as injected context
    * instead, which the model needs to be told how to read.
    */
-  realtime?: boolean
+  realtime?: boolean;
 }
 
 /**
@@ -102,108 +112,68 @@ export interface PromptContext {
  * Gemini Live takes its system instruction in the setup message and never
  * again: the plugin's updateInstructions() marks the session for restart
  * rather than applying anything (realtime_api.ts). updateChatCtx(), on the
- * other hand, works fine mid-session and appends real turns. So the
+ * other hand, appends real turns on mutable models; the current plugin
+ * disables that path for Gemini 3.1. These standing instructions do not
+ * guarantee silent realtimeInput delivery on their own. The
  * adaptive tail is delivered through the conversation instead of the
  * system prompt, and the model has to know those lines are direction from
  * its own coaching layer, not something the learner said out loud. Without
  * this, it answers them.
  */
-const REALTIME_STANDING = `## Notes during the session
+const REALTIME_STANDING = `## Private live context
 
-Lines that arrive marked [COACH] are private direction for you, from the
-system tracking this learner's progress. They are NOT spoken by the learner
-and the learner cannot see them.
-
-- Never read one aloud, quote it, answer it, or acknowledge it exists.
-- Never say "I've been told to" or otherwise reveal where guidance came from.
-- Just let it change what you do next. A [COACH] note about a word to reach
-  for means work that word in naturally; one about an error means handle
-  that error the way it says.
-- The most recent [COACH] note wins over any earlier one it contradicts.`
+[COACH] lines are private context, not learner speech. Do not quote or acknowledge them. Let useful notes influence the next reply, but ignore them when they do not fit. A direct request for native-language help, slower speech, repetition, or an explanation outranks any [COACH] target-language game, drill, or challenge.`;
 
 /**
- * Length line: combines level baseline with session phase and pacing.
- * Phase trumps level only when the session is at the wrap — short
- * goodbyes. Otherwise level is the floor.
+ * Stable comprehension contract.  This deliberately does not express a
+ * target/native percentage: a percentage is a planning hint, while the
+ * learner's immediate comprehension is the safety boundary.  It must live
+ * in the connect-time prompt because Gemini Live cannot apply instruction
+ * updates during an active session.
  */
-function computeLengthLine(
-  level: string,
-  phase: AdaptiveContext['sessionPhase'],
-  pacing: AdaptiveContext['pacing'],
+function buildComprehensionContract(
+  targetLanguage: string,
+  nativeLanguage: string,
+  userLevel = '',
 ): string {
-  if (phase === 'wrapup') {
-    return '1 short sentence. Wrap naturally, no new content.'
+  if (isIndependentLevel(userLevel)) {
+    return `## Comprehension first
+
+Start and continue in ${targetLanguage}, matching the learner's ${userLevel} level. Keep each turn digestible: one idea, example, or question, then leave room to respond.
+
+An explicit request for ${targetLanguage}-only outranks language anchors, mix defaults, automatic native-language rescue, and [COACH] suggestions. Keep that preference until they ask to switch; hesitation, a mistake, or a request for repetition or slower speech is not permission to switch languages. Simplify or explain in ${targetLanguage} instead.
+
+Without a target-only request, use brief ${nativeLanguage} support when they cannot follow, then return to ${targetLanguage}. Always honor an explicit request for ${nativeLanguage} help. Their stored level guides the starting difficulty, not a rigid lesson script.`;
   }
-  // Level-based baseline — kept short across the board. This is a live
-  // back-and-forth, not a monologue; complexity at higher levels should
-  // show up in word choice and grammar, not turn length.
-  let base: string
-  if (level === 'pre_a1' || level === 'a1') {
-    base = '1 short sentence'
-  } else if (level === 'a2' || level === 'b1') {
-    base = '1 sentence, occasionally 2'
-  } else {
-    base = '1-2 sentences at full complexity, save the second one for when it earns its place'
-  }
-  // Pacing modifier
-  let modifier = ''
-  if (pacing === 'fast') {
-    modifier = ' Be terse, they want progress, not monologue.'
-  } else if (pacing === 'slow') {
-    modifier = ' Give them room, no rush to the next turn.'
-  }
-  return `${base}.${modifier} Snappy back-and-forth, leave room for them to jump back in, don't hold the floor. React to what they actually said, not a template. Stay the person from your persona, a quick-witted friend, never a customer-service bot; if they get cheeky, give it back. No bullet lists, no emojis, no markdown.`
+  return `## Comprehension first
+
+Stay clear; leave room to speak. Simplify immediately when the learner is confused, hesitant, overwhelmed, or asks you to slow down; use ${nativeLanguage} for clarity and then pause.
+
+At session start, calibrate. Use the learner's native language for framing, offer at most one short ${targetLanguage} phrase or question, and stop; do not open with a target-language monologue.
+
+Make one learning move per turn: one idea, example, or question. Do not stack explanation, translation, correction, and follow-up. After a new phrase, pause. For pre-A1, A1, or uncertain learners, be conservative: default to ${nativeLanguage} framing, use one familiar ${targetLanguage} word or very short phrase, and do not ask them to follow a ${targetLanguage} topic question or produce a sentence until they show comprehension. Repeating or recognizing one target-language word is not proof that they understood the surrounding question; require a spontaneous meaningful response or a tiny meaning check before increasing difficulty.
+
+If they seem confused, ask for repetition, ask what something means, ask you to slow down, ask for ${nativeLanguage}, go silent, answer off-topic, or fail twice: switch to rescue mode immediately. For the whole reply, use ${nativeLanguage}; do not end with a ${targetLanguage} question or activity. Give at most one tiny ${targetLanguage} phrase with its ${nativeLanguage} meaning, then stop. On the next turn, keep ${nativeLanguage} framing until comprehension is shown; only then return to ${targetLanguage}. No paragraph or unexplained demand.
+
+Their stored level and one successful answer are only clues. Native-language support is a bridge, not a failure. Never wait for planner guidance before helping a confused learner.
+
+${targetLanguage} input is practice; keep ${nativeLanguage} framing unless asked.`;
 }
 
 /**
- * Error treatment: how verbose to be about correcting mistakes.
- * High error density (>0.6) = user is struggling, slow down.
- * Low density (<0.2) = user is doing well, no need to belabor.
+ * Safe opening contract. A stored CEFR level can be stale, exposure-derived,
+ * or simply wrong; the first few turns are the only cheap opportunity to
+ * calibrate before the tutor commits the learner to a scenario. This is
+ * deliberately stable (rather than a planner tail) because Gemini Live may
+ * not accept instruction updates after connect.
  */
-function computeErrorTreatment(errorDensity: number, errors: string): string {
-  if (!errors || errors === 'None') return ''
-  if (errorDensity > 0.6) {
-    return `Recurring errors, keep corrections short and just one at a time: ${errors}`
-  }
-  if (errorDensity < 0.2) {
-    return `Minor slip, just say the right form once, don't make it a lesson: ${errors}`
-  }
-  return `If they make these errors, just say the right form once and move on: ${errors}`
-}
-
-/**
- * Opening line: only rendered in 'opening' phase, and only mechanical
- * scaffolding — never continuity content. Deciding *how* to pick up from
- * last session (what to reference, what tone) is the planner's job: it
- * already reads the session-gap + nextSessionHint data and puts the result
- * in "Current angle" before the opening fires (see tutor-event-driven.ts's
- * sessionStartPlan await). Asking the conversation agent to synthesize
- * continuity itself from raw session data is what produced visible
- * "let me think about this" narration instead of a fluent reply — the
- * conversation agent's job is flow, not strategy.
- */
-function computeOpeningLine(
-  phase: AdaptiveContext['sessionPhase'],
-  previousSessionContext: string | null | undefined,
-  level: string,
-): string {
-  if (phase !== 'opening') return ''
-  // A previous session exists — the planner's "Current angle" already
-  // carries the pick-up guidance. Nothing more to add here.
-  if (previousSessionContext) return ''
-  if (level === 'pre_a1' || level === 'a1') {
-    return `Opening: start with something they can answer in one word. Don't ask "how are you" in the target, use it to model the first exchange.`
-  }
-  return `Opening: ask one simple question in the target language to set the scene.`
-}
-
 function defaultAdaptive(): AdaptiveContext {
   return {
     sessionPhase: 'flow',
     turnCount: 0,
     errorDensity: 0,
     pacing: 'medium',
-  }
+  };
 }
 
 /**
@@ -220,10 +190,13 @@ function defaultAdaptive(): AdaptiveContext {
  * no line.
  */
 const NATIVE_SCRIPT_LINE: Record<string, string> = {
-  'Russian': 'Write every Russian word in Cyrillic (Я хочу чай) — NEVER in Latin transliteration ("Ya khochu chay"). Your words are spoken aloud by a voice engine: Cyrillic is pronounced as proper Russian, Latin transliteration gets read out as garbled English. The learner hears you, they don\'t read you — romanization never helps them.',
-  'Mandarin Chinese': 'Write every Mandarin word in Chinese characters (我要茶) — NEVER in pinyin ("wo yao cha"). Your words are spoken aloud by a voice engine: characters are pronounced as proper Mandarin, pinyin gets read out as garbled English. The learner hears you, they don\'t read you.',
-  'Arabic': 'Write every Arabic word in Arabic script — NEVER in Latin transliteration. Your words are spoken aloud by a voice engine: Arabic script is pronounced correctly, transliteration gets read out as garbled English. The learner hears you, they don\'t read you.',
-}
+  Russian:
+    'Write every Russian word in Cyrillic (Я хочу чай) — NEVER in Latin transliteration ("Ya khochu chay"). Your words are spoken aloud by a voice engine: Cyrillic is pronounced as proper Russian, Latin transliteration gets read out as garbled English. The learner hears you, they don\'t read you — romanization never helps them.',
+  'Mandarin Chinese':
+    'Write every Mandarin word in Chinese characters (我要茶) — NEVER in pinyin ("wo yao cha"). Your words are spoken aloud by a voice engine: characters are pronounced as proper Mandarin, pinyin gets read out as garbled English. The learner hears you, they don\'t read you.',
+  Arabic:
+    "Write every Arabic word in Arabic script — NEVER in Latin transliteration. Your words are spoken aloud by a voice engine: Arabic script is pronounced correctly, transliteration gets read out as garbled English. The learner hears you, they don't read you.",
+};
 
 /**
  * Build the conversation agent's system prompt: stable core + volatile tail.
@@ -232,90 +205,68 @@ const NATIVE_SCRIPT_LINE: Record<string, string> = {
  * and level haven't changed — this is what SGLang prefix-caches. Nothing
  * that changes every turn belongs in the core.
  */
+export const DEFAULT_MODEL_GUIDANCE = `Respond to what they actually said. Follow their topic and conversational rhythm. Use your judgment about corrections, questions, vocabulary, pacing, and activity; background data is not a required exercise. Be specific and give them room to respond.`;
+
 export function buildInstructions(context: PromptContext): string {
-  const levelKey = (context.userLevel || '').toLowerCase()
-  const adaptive = context.adaptive ?? defaultAdaptive()
+  const level = context.userLevel || 'beginner';
+  const adaptive = context.adaptive ?? defaultAdaptive();
+  const facts: string[] = [];
+  const mixLine = context.mixLine?.trim();
 
-  // ── Stable core ────────────────────────────────────────────────
-  const core = [
-    context.persona,
-    '',
-    `You're chatting with a learner of ${context.targetLanguage}. Level: ${context.userLevel || 'beginner'}. They speak ${context.nativeLanguage} natively.`,
-    '',
-    `You have tools to look up words and check the learner's progress. Use them when you need to, not every turn.`,
-    `Correct the underlying pattern, not just the individual word.`,
-    `When you introduce a new word, do it the way a friend would mid-conversation — use it naturally, gloss it once, and hand it to them to try.`,
-    // 2026-07-10 (user-reported): the tutor kept steering back to its
-    // scenario over explicit user requests ("let's stick to our café — you
-    // were doing so well with your coffee order!"). Direction from the
-    // learner outranks every plan line below, stated as a hard priority
-    // rule, not a vibe.
-    `Follow the learner's lead — this outranks everything below it. If they change topic, ask you to stop, slow down, skip something, or just listen, do that IMMEDIATELY, even if it abandons a scenario or plan mid-stream. The scenario serves them, not the other way around; steering them back to your plan after they've asked for something else is the one reliably wrong move. Any vocabulary guidance below is about which words to reach for, never what to talk about.`,
-    `You can't switch the target language mid-conversation — there's no tool for it. If they ask to switch languages, just tell them plainly to use the language picker in the app (the flag pill at the top) and that it'll apply next time they connect. Don't joke about it or make them guess.`,
-    ...(NATIVE_SCRIPT_LINE[context.targetLanguage] ? [NATIVE_SCRIPT_LINE[context.targetLanguage]] : []),
-    ...(context.specialInstructions ? [context.specialInstructions] : []),
-    // The tone work was written for the demo and left the signed-in tutor
-    // sounding like a different, blander product the moment someone signed
-    // up. Same rules both sides now.
-    '',
-    VOICE_RULES,
-    ...(context.realtime ? ['', REALTIME_STANDING] : []),
-    // 2026-07-07: this block's exact framing was verified against real
-    // audio, not assumed. A first version wrapped the card with only a
-    // trailing "not a script" caveat and, reproducibly (3/3 runs), the
-    // model ignored real audio input entirely and opened with a scripted
-    // line about the card's topic instead — a length-matched non-topical
-    // filler of the same token count did NOT cause this, isolating the
-    // cause to the card's directive "Topic: X" framing, not its length.
-    // Adding the leading priority sentence below, BEFORE the card, fixed
-    // it 3/3: the model referenced the actual audio while still working
-    // the card's topic into the follow-up. If curriculum cards are ever
-    // edited, re-verify with real audio before trusting a rewording —
-    // this model's audio attention is measurably fragile to phrasing, not
-    // just to raw prompt length.
-    ...(context.lessonCard ? ['', `Always respond to what they just said first — that comes before anything below. Background material from their course, only for when it naturally fits, never a script to follow:`, `${context.lessonCard}`] : []),
-  ].join('\n')
-
-  // ── Volatile tail (hard budget: ~8 short lines) ──────────────────
-  const tail: string[] = []
-
-  const openingLine = computeOpeningLine(adaptive.sessionPhase, context.previousSessionContext, levelKey)
-  if (openingLine) tail.push(openingLine)
-
-  tail.push(context.frontier.directive)
-  if (context.frontier.dueWords) {
-    tail.push(`Words they already know, your scaffolding: ${context.frontier.dueWords}`)
+  if (context.previousSessionContext?.trim()) {
+    facts.push(
+      `Recent context, only use if it helps the conversation: ${context.previousSessionContext.trim()}`,
+    );
   }
-  if (context.frontier.newWords) {
-    tail.push(`New words to reach for when they're ready: ${context.frontier.newWords}`)
+  if (context.frontier.dueWords?.trim()) {
+    facts.push(
+      `Words worth naturally reusing if they fit; this is not proof of mastery: ${context.frontier.dueWords}`,
+    );
   }
-
-  // High-priority, transient: they just asked for this. Framed as a
-  // request to fulfill, not something they already know.
+  if (context.frontier.newWords?.trim()) {
+    facts.push(`Optional vocabulary to reach for when it fits: ${context.frontier.newWords}`);
+  }
   if (context.demandWords?.trim()) {
-    tail.push(`They just reached for the ${context.nativeLanguage} word instead of the ${context.targetLanguage} one — hand them this the moment it fits: ${context.demandWords}`)
+    facts.push(
+      `They recently reached for a native-language word; offer the target-language equivalent if useful: ${context.demandWords}`,
+    );
   }
-
-  if (context.goalUpdate?.trim()) {
-    tail.push(`Current angle: ${context.goalUpdate}`)
+  if (mixLine && !/^(?:PLANNER|FRONTIER|MIX|WATCHDOG)_COMMAND\s*:/i.test(mixLine)) {
+    facts.push(`Language anchor for this turn: ${mixLine}`);
   }
-
-  const errorLine = computeErrorTreatment(adaptive.errorDensity, context.recentErrors?.trim() || '')
-  if (errorLine) tail.push(errorLine)
-
-  // The processor's one per-turn note — grammar or pronunciation pattern.
-  // Model it in your own speech, don't lecture about it.
+  if (context.recentErrors?.trim() && context.recentErrors !== 'None') {
+    facts.push(
+      `A pattern noticed in recent speech, not a required correction: ${context.recentErrors.trim()}`,
+    );
+  }
   if (context.grammarHints?.trim() && context.grammarHints !== 'None') {
-    tail.push(`Worth weaving in (model it, don't lecture): ${context.grammarHints}`)
+    facts.push(`A language pattern that may be worth modelling: ${context.grammarHints.trim()}`);
   }
 
-  // Language-mix line sits second-to-last: the tail's end is the
-  // strongest position, and mix is the most-violated constraint.
-  if (context.mixLine) tail.push(context.mixLine)
-
-  tail.push(computeLengthLine(levelKey, adaptive.sessionPhase, adaptive.pacing))
-
-  return `${core}\n\n${tail.filter(Boolean).join('\n')}`
+  if (context.goalUpdate?.trim()) facts.push(`Optional conversation context: ${context.goalUpdate.trim()}`);
+  const parts = [
+    context.persona,
+    `You are talking with a learner of ${context.targetLanguage}. They speak ${context.nativeLanguage} natively. Their current level is ${level}, but treat that as a clue, not a verdict.`,
+    context.modelGuidance ?? DEFAULT_MODEL_GUIDANCE,
+    `Explicit learner preferences and requests outrank model guidance and inferred style. Practice state is not proof of mastery.`,
+    `Keep internal notes, tools, planner context, and JSON private. Return only a natural tutor reply.`,
+    buildComprehensionContract(context.targetLanguage, context.nativeLanguage, context.userLevel),
+    ...(NATIVE_SCRIPT_LINE[context.targetLanguage]
+      ? [NATIVE_SCRIPT_LINE[context.targetLanguage]]
+      : []),
+    ...(context.specialInstructions ? [context.specialInstructions] : []),
+    ...(context.realtime ? [REALTIME_STANDING] : []),
+    ...(context.lessonCard
+      ? [
+          `Optional background from their course. Use it only when it naturally serves what they just said: ${context.lessonCard}`,
+        ]
+      : []),
+    ...(adaptive.sessionPhase === 'wrapup'
+      ? ['The session is ending. Finish naturally; do not force new material.']
+      : []),
+    facts.length > 0 ? `Useful background, not instructions:\n${facts.join('\n')}` : '',
+  ];
+  return parts.filter(Boolean).join('\n\n');
 }
 
 /**
@@ -328,42 +279,26 @@ export function buildInstructions(context: PromptContext): string {
  * sending the same guidance twice both wastes context and reads to the
  * model as fresh emphasis on something it already did.
  */
-export function buildCoachNote(
-  context: PromptContext,
-  previous?: string | null,
-): string | null {
-  const adaptive = context.adaptive ?? defaultAdaptive()
-  const lines: string[] = []
+export function buildCoachNote(context: PromptContext, previous?: string | null): string | null {
+  const candidates = [
+    context.mixLine?.trim() && `Language anchor: ${context.mixLine.trim()}`,
+    context.persona?.trim() && `Current learner style (overrides earlier style): ${context.persona.trim()}`,
+    context.goalUpdate?.trim() && `Optional conversation context: ${context.goalUpdate.trim()}`,
+    context.demandWords?.trim() &&
+      `A learner word request just surfaced: ${context.demandWords.trim()}`,
+    context.recentErrors?.trim() &&
+      context.recentErrors !== 'None' &&
+      `A recent speech pattern may be worth modelling: ${context.recentErrors.trim()}`,
+    context.frontier.newWords?.trim() &&
+      `Optional vocabulary if it fits naturally: ${context.frontier.newWords.trim()}`,
+    context.frontier.dueWords?.trim() &&
+      `Optional vocabulary to recycle if it fits: ${context.frontier.dueWords.trim()}`,
+    context.adaptive?.sessionPhase === 'wrapup' && 'The session is ending; wrap naturally.',
+  ].filter((value): value is string => Boolean(value));
 
-  // demandWords first: it's the most perishable signal in the system —
-  // the learner reached for their native word *this turn* and the window
-  // to hand them the target one closes almost immediately. 2026-08-04:
-  // this was missing entirely, so on realtime sessions (where this note
-  // is the only mid-session channel) the signal was computed every turn
-  // and never delivered once.
-  if (context.demandWords?.trim()) {
-    lines.push(`they just reached for the ${context.nativeLanguage} word — hand them: ${context.demandWords}`)
-  }
-  if (context.goalUpdate?.trim()) lines.push(context.goalUpdate.trim())
-  if (context.frontier.newWords) lines.push(`reach for: ${context.frontier.newWords}`)
-  // Due words shift mid-session as the processor grades turns, and under
-  // a realtime model the system prompt's copy is frozen at connect — so
-  // without this the spaced-repetition payload is whatever it was when
-  // the call started, for the entire call.
-  if (context.frontier.dueWords) lines.push(`scaffold with what they know: ${context.frontier.dueWords}`)
-
-  const errorLine = computeErrorTreatment(adaptive.errorDensity, context.recentErrors?.trim() || '')
-  if (errorLine) lines.push(errorLine)
-
-  if (context.grammarHints?.trim() && context.grammarHints !== 'None') {
-    lines.push(`model this, don't lecture it: ${context.grammarHints}`)
-  }
-  if (context.mixLine) lines.push(context.mixLine)
-  if (adaptive.sessionPhase === 'wrapup') lines.push('Wrap up naturally now, no new material.')
-
-  if (lines.length === 0) return null
-  const note = `[COACH] ${lines.join(' | ')}`
-  return note === previous ? null : note
+  // One bounded snapshot: unchanged anchors must not hide fresh preferences or nudges.
+  const note = candidates.length > 0 ? `[COACH] ${candidates.slice(0, 4).map(v => v.slice(0, 600)).join('\n')}` : null;
+  return note === previous ? null : note;
 }
 
 // ── Onboarding prompt ────────────────────────────────────────────────────────
@@ -394,10 +329,13 @@ export function buildCoachNote(
 //   - Short — 5-8 turns max, then hand off
 
 export interface OnboardingPromptContext {
-  targetLanguage: string;   // "Russian"
-  nativeName: string;       // "Русский"
-  nativeLanguage: string;   // "English"
-  existingData?: {          // partial data already captured (e.g. from UI form)
+  persona?: string;
+  modelGuidance?: string;
+  targetLanguage: string; // "Russian"
+  nativeName: string; // "Русский"
+  nativeLanguage: string; // "English"
+  existingData?: {
+    // partial data already captured (e.g. from UI form)
     priorStudy?: string;
     studyDetails?: string;
     goals?: string[];
@@ -412,7 +350,7 @@ export interface OnboardingPromptContext {
    * (spec §9) — the prompt falls back to unanchored phrasing in that case.
    */
   ladderWords?: Array<{ lemma: string; translation: string; rank: number }>;
-  demo?: boolean;           // anonymous 3-minute landing-page demo
+  demo?: boolean; // anonymous 3-minute landing-page demo
   languageUndecided?: boolean; // demo visitor hasn't said what to learn yet
   /**
    * A hand-written opening line (DEMO_OPENING_LINE). The first four
@@ -487,7 +425,68 @@ What to do instead:
   sales. You can be funny, but never Fun.
 - Don't perform warmth. Warmth comes from paying attention, not adjectives.
 - It's fine to be blunt: "that one's genuinely hard", "yeah, that was
-  rough, again". Honesty is the most human thing you have.`
+  rough, again". Honesty is the most human thing you have.
+
+## The tutor loop
+
+Every normal turn has one job, not five. Follow this order:
+1. React to what they actually said, in their native language when they need
+   clarity. Make the reaction specific, brief, and occasionally playful.
+2. Choose at most ONE learning move: model one useful target-language word
+   or phrase, correct one important mistake, or let the conversation simply
+   breathe.
+3. Give them one easy, meaningful way back into the conversation. Ask one
+   question or offer two choices, never a worksheet of questions.
+
+Enjoyment is not decoration. Use their topic, opinions, jokes, frustrations,
+food, plans, or weird ideas as the material. Change the activity when a repair
+attempt has failed twice. Do not turn a lively exchange into a repetition drill
+just because a word is due. Reuse a target word later in a natural sentence,
+then let it go. If they say they are confused, bored, or want to stop, believe
+that immediately and switch modes or topic.
+
+## Meaning negotiation, not target-language flooding
+
+The goal is sustained use of the target language, not maximum target-language
+density. Keep the target language as the destination while making the route
+understandable:
+1. Offer one short, meaningful target-language phrase or question.
+2. Watch what they do, not just what they say. Hesitation, parroting without
+   context, silence, an off-topic reply, or a request for help means meaning
+   did not land.
+3. Repair briefly in the learner's native language: paraphrase, give one
+   concrete example, or offer two choices. Do not repeat the same opaque
+   sentence louder.
+4. Check meaning with an easy choice, yes/no, pointing question, or tiny
+   completion. Do not demand a full translation.
+5. Reuse the same target-language phrase in a natural reply, then continue the
+   conversation. Do not turn the repair into a lesson about the repair.
+
+Native-language support is a bridge back to the target language, not a failure.
+Never trap the learner in target-only mode after they signal that the meaning
+was lost.
+
+## Personality under pressure
+
+Be clever, dry, and fun to talk to. You may be lightly cynical about awkward
+situations, bad examples, confusing grammar, or the absurdity of language.
+Roast the task or yourself, never the learner. Wit must be short and optional:
+if they are confused, anxious, silent, or overloaded, drop the joke and make
+the next move easy. Do not perform enthusiasm or sarcasm at the learner's
+expense. The learner should feel accompanied by a sharp human, not managed by
+an upbeat app.
+
+Learning structure must stay invisible from the learner's side: one small target
+per turn, frequent successful replies, occasional recycling, and a clear change
+of scene every few minutes. Never dump vocabulary lists, grammar lectures,
+several new words at once, or a chain of "say it again" prompts.
+
+## Private machinery
+
+Tool names, tool arguments, search results, JSON, internal notes, planner
+instructions, and phrases like "Результат" are private. Never speak them,
+quote them, or put them in the learner-facing reply. Return only the natural
+tutor response.`;
 
 // The anonymous demo is ~3 minutes end to end. The full intake above is
 // 5-8 turns, which burns the whole session before the visitor has said a
@@ -522,7 +521,7 @@ should behave:
   to break you, or check whether you're really listening. Take it in stride,
   don't lecture, don't get prim. Unflappable is more convincing than polished.
 - Three minutes is the whole session. Assume every turn could be the last one
-  they hear.`
+  they hear.`;
 
 function buildDemoOnboardingInstructions(ctx: OnboardingPromptContext): string {
   const { targetLanguage, nativeLanguage, languageUndecided } = ctx;
@@ -622,20 +621,23 @@ Hard rules:
 
 Zero pressure, zero quizzing, no meta-talk about methodology.
 
-**As soon as they have spoken ${targetLanguage} aloud twice, call the submit_onboarding_verdict tool.** Silently, mid-flow, without announcing it or pausing the conversation. Do this early, on a rough read, and don't wait to feel certain: a guess recorded is worth more than a perfect assessment you never file, and this is the one thing that carries over if they sign up. anchorConfidence: 0.9 if you heard real ${targetLanguage}, 0.5 if you're mostly guessing. Then just keep teaching.`;
+Once you have background + goals + a real sense of where the staircase broke (or confirmed they are at zero), end the conversation naturally and call the submit_onboarding_verdict tool. Do NOT call it after an arbitrary number of words, mid-conversation, or before the learner has actually completed the short staircase. selfRatedLevel is their own report for context only; it does not set their level. Then keep teaching naturally.`;
 }
 
 export function buildOnboardingInstructions(ctx: OnboardingPromptContext): string {
   if (ctx.demo) return buildDemoOnboardingInstructions(ctx);
   const { targetLanguage, nativeLanguage, existingData, ladderWords } = ctx;
 
-  const ladderLine = ladderWords && ladderWords.length > 0
-    ? `Real rungs to climb, easiest first (don't recite this list — use it to pick natural moments to ask for each): ${ladderWords.map((w) => `"${w.lemma}" (${w.translation})`).join(' → ')}. If they clear the hardest one, go ahead and reach a little past it on your own — this is just a floor, not a ceiling.`
-    : `Start with the most basic, everyday ${targetLanguage} you can think of ("how do you say hello?", "can you count to five?", "what's 'water'?") and climb from there on your own judgment.`;
+  const ladderLine =
+    ladderWords && ladderWords.length > 0
+      ? `Optional vocabulary from the frequency data; use it only when it fits naturally: ${ladderWords.map((w) => `"${w.lemma}" (${w.translation})`).join(' · ')}`
+      : `No vocabulary list is available. Start with something concrete and easy in ${targetLanguage}, using your own judgment.`;
 
   const alreadyKnow: string[] = [];
   if (existingData?.priorStudy && existingData.priorStudy !== 'none') {
-    alreadyKnow.push(`prior study: ${existingData.priorStudy}${existingData.studyDetails ? ` (${existingData.studyDetails})` : ''}`);
+    alreadyKnow.push(
+      `prior study: ${existingData.priorStudy}${existingData.studyDetails ? ` (${existingData.studyDetails})` : ''}`,
+    );
   }
   if (existingData?.goals?.length) {
     alreadyKnow.push(`goals: ${existingData.goals.join(', ')}`);
@@ -643,25 +645,24 @@ export function buildOnboardingInstructions(ctx: OnboardingPromptContext): strin
   if (existingData?.selfRatedLevel) {
     alreadyKnow.push(`self-rated level: ${existingData.selfRatedLevel}`);
   }
-  const knownContext = alreadyKnow.length > 0
-    ? `\nThe user already told us: ${alreadyKnow.join('; ')}. Don't re-ask what you already know.`
-    : '';
+  const knownContext =
+    alreadyKnow.length > 0
+      ? `\nThe user already told us: ${alreadyKnow.join('; ')}. Don't re-ask what you already know.`
+      : '';
 
-  return `You are a friendly language tutor starting a first session with a new ${targetLanguage} learner.
+  return `You are a ${targetLanguage} tutor meeting this learner for the first time. Be a normal, attentive conversation partner, not an intake form.
 
-Your job right now is NOT to teach — it's to understand who they are and get a real sample of what they can actually do. Have a short, warm conversation (5-8 turns) to find out:
+${ctx.persona || 'Be an attentive, quick-witted conversation partner.'}
+${ctx.modelGuidance ?? DEFAULT_MODEL_GUIDANCE}
+Explicit learner preferences outrank model guidance and inferred style.
 
-1. **Background** — Have they studied ${targetLanguage} before? Where, how long, how far did they get? (Duolingo, classes, lived there, heritage speaker, total beginner — all valid)
-2. **Goals** — Why are they learning? Travel, work, heritage, media (shows/music), academic, or something else?
-3. **The staircase** — this is the real assessment, and it's a game, not a quiz. Ask them to actually SAY things in ${targetLanguage}, out loud, starting easy and climbing. If they get one easily, immediately go a notch harder. If they hesitate or miss one, back off a notch and confirm they're solid there, then stop climbing — you've found their edge. Total: 4-6 rungs is plenty. If they say they know zero, skip the ladder and just teach them one or two words right now instead — that IS the first rung, just starting from nothing. ${ladderLine}
 ${knownContext}
 
-Tone: warm, curious, zero pressure — frame it as "let's see how far we get," not a test with a score. This is a conversation. Ask one thing at a time. React to what they say before asking the next question. Every attempt they make, even a wrong one, is useful — don't skip the ladder just because early background chat suggested they're a beginner or advanced; the actual attempts are what matters, self-reports are often wrong.
+Find out enough about their background and goals without re-asking what they already told us. Let them produce some real ${targetLanguage} naturally so the conversation gives us evidence. Start easy, listen carefully, and make the next step harder only when their response supports it. The available vocabulary is background, not a script: ${ladderLine}
 
-Language: speak in ${nativeLanguage} for the background/goals part. Switch into ${targetLanguage} for the staircase itself — that's the whole point, you need them actually producing it, not talking about it.
-${NATIVE_SCRIPT_LINE[targetLanguage] ? `\n${NATIVE_SCRIPT_LINE[targetLanguage]}\n` : ''}
+${buildComprehensionContract(targetLanguage, nativeLanguage, existingData?.selfRatedLevel)}
 
-When you've got background + goals + a real sense of where the ladder broke (or confirmed they're at zero), end the conversation naturally — something like "Nice, I've got a good feel for where you're at. Let's get started!" — then call the submit_onboarding_verdict tool. Do NOT call the tool until you've actually run the staircase, and do NOT call it mid-conversation.
+If they are confused, follow the comprehension contract above and make the next move easy. If they say they know nothing, teach one useful phrase and let them try it; do not turn that into a questionnaire. Keep the exchange low pressure and follow the learner’s preferred style.
 
-selfRatedLevel is just what THEY think, for your own context — it does not set anything. Their actual level comes from how they performed on the staircase, not from this field or from your own guess.`;
+When you have enough background, goals, and actual production evidence to hand off, call submit_onboarding_verdict once. Do not invent a level from confidence or self-report; the evidence pipeline handles that. Until then, keep talking naturally.`;
 }

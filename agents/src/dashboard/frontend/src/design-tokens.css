@@ -1,43 +1,104 @@
-/* Design tokens for the LingLang mobile UI.
-   2026-07-17: swapped the old cream-plus-burnt-orange brand palette for
-   aliases onto the HeroUI theme (neutral gray plus blue) so the legacy
-   app.css rules that still read the ll- names match HeroUI components
-   instead of clashing with them. good/bad/new/teal kept as-is. */
+/* SPDX-FileCopyrightText: 2025 LiveKit, Inc.
+ * SPDX-License-Identifier: Apache-2.0 */
+@import 'tailwindcss';
+@import '@heroui/styles';
 
-@import "tailwindcss";
-@import "@heroui/styles";
-
-:root,
-[data-theme="dark"] {
-  --bg: var(--background);
-  --bg-radial: var(--background-secondary);
-  --ll-surface: var(--surface);
-  --surface2: var(--surface-secondary);
-  --surface3: var(--surface-tertiary);
-  --ll-border: var(--border);
-  --border-soft: var(--separator);
-  --text: var(--foreground);
-  --text-dim: var(--muted);
-  --text-faint: color-mix(in oklab, var(--muted) 65%, transparent);
-  --ll-accent: var(--accent);
-  --accent-border: color-mix(in oklab, var(--accent) 32%, transparent);
-  --good: #79b878;
-  --good-soft: rgba(121, 184, 120, .1);
-  --good-border: rgba(121, 184, 120, .24);
-  --bad: #e2695c;
-  --bad-soft: rgba(226, 105, 92, .1);
-  --new: #e0b23f;
-  --teal: #5fb8ad;
-  --teal-soft: rgba(95, 184, 173, .1);
-  --teal-border: rgba(95, 184, 173, .24);
-  --ll-overlay: var(--backdrop);
-  --shadow: 0 8px 26px rgba(0, 0, 0, .4);
-  --scrim: linear-gradient(to top, var(--bg) 65%, transparent);
+@font-face {
+  font-family: 'Hauora';
+  src: url('/fonts/Hauora-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Hauora';
+  src: url('/fonts/Hauora-SemiBold.ttf') format('truetype');
+  font-weight: 500 800;
+  font-display: swap;
 }
 
-[data-theme="light"] {
+:root,
+[data-theme='light'] {
+  --background: #f7f8f9;
+  --background-secondary: #f0f2f3;
+  --foreground: #292a37;
+  --surface: #ffffff;
+  --surface-foreground: #292a37;
+  --surface-secondary: #f1f3f4;
+  --surface-secondary-foreground: #292a37;
+  --surface-tertiary: #e9ecee;
+  --surface-tertiary-foreground: #292a37;
+  --overlay: #ffffff;
+  --overlay-foreground: #292a37;
+  --field-background: #ffffff;
+  --field-foreground: #292a37;
+  --field-placeholder: #737781;
+  --muted: #626774;
+  --border: #dfe3e7;
+  --separator: #e8ebee;
+  --accent: #c5533d;
+  --accent-foreground: #ffffff;
+  --accent-soft: #fbede9;
+  --accent-soft-foreground: #a23e2d;
+  --focus: #c5533d;
+  --success: #397963;
+  --danger: #bf3e4b;
+  --good: #397963;
+  --good-soft: #eaf4ef;
+  --good-border: #c7dfd1;
+  --bad: #bf3e4b;
+  --bad-soft: #fbecef;
+  --new: #9b7223;
+  --teal: #337d82;
+  --teal-soft: #eaf3f4;
+  --teal-border: #c1dde0;
+  --backdrop: #181b2780;
+  --shadow: 0 12px 40px #292a3714;
+  color-scheme: light;
+}
+
+[data-theme='dark'] {
+  --background: #191b20;
+  --background-secondary: #202228;
+  --foreground: #eceef1;
+  --surface: #22252c;
+  --surface-foreground: #eceef1;
+  --surface-secondary: #2b2e36;
+  --surface-secondary-foreground: #eceef1;
+  --surface-tertiary: #343841;
+  --surface-tertiary-foreground: #eceef1;
+  --overlay: #22252c;
+  --overlay-foreground: #eceef1;
+  --field-background: #22252c;
+  --field-foreground: #eceef1;
+  --field-placeholder: #9298a4;
+  --muted: #a3a9b4;
+  --border: #383c46;
+  --separator: #30343c;
+  --accent: #ed957f;
+  --accent-foreground: #292a37;
+  --accent-soft: #3a2b29;
+  --accent-soft-foreground: #edaa98;
+  --focus: #ed957f;
+  --success: #92c7af;
+  --danger: #f096a0;
+  --good: #92c7af;
+  --good-soft: #253830;
+  --good-border: #3c5c4e;
+  --bad: #f096a0;
+  --bad-soft: #3c2930;
+  --new: #dfbd70;
+  --teal: #80c0c7;
+  --teal-soft: #26383c;
+  --teal-border: #35565b;
+  --backdrop: #090b10b3;
+  --shadow: 0 12px 40px #00000033;
+  color-scheme: dark;
+}
+
+:root,
+[data-theme] {
   --bg: var(--background);
-  --bg-radial: var(--background-secondary);
+  --bg-radial: var(--background);
   --ll-surface: var(--surface);
   --surface2: var(--surface-secondary);
   --surface3: var(--surface-tertiary);
@@ -45,19 +106,11 @@
   --border-soft: var(--separator);
   --text: var(--foreground);
   --text-dim: var(--muted);
-  --text-faint: color-mix(in oklab, var(--muted) 55%, transparent);
+  --text-faint: var(--muted);
   --ll-accent: var(--accent);
-  --accent-border: color-mix(in oklab, var(--accent) 30%, transparent);
-  --good: #3d8a44;
-  --good-soft: rgba(61, 138, 68, .08);
-  --good-border: rgba(61, 138, 68, .22);
-  --bad: #c14b3d;
-  --bad-soft: rgba(193, 75, 61, .08);
-  --new: #a6790f;
-  --teal: #2c887d;
-  --teal-soft: rgba(44, 136, 125, .08);
-  --teal-border: rgba(44, 136, 125, .22);
+  --accent-border: color-mix(in srgb, var(--accent) 32%, transparent);
   --ll-overlay: var(--backdrop);
-  --shadow: 0 8px 22px rgba(40, 30, 20, .14);
   --scrim: linear-gradient(to top, var(--bg) 65%, transparent);
+  --radius: 0.5rem;
+  --field-radius: 0.5rem;
 }

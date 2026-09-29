@@ -1,0 +1,42 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import postgres from 'postgres';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import { PipecatSessionStore } from './pipecat-session-store.js';
+import { PipecatEventInbox } from './pipecat-event-inbox.js';
+import {readFile} from 'node:fs/promises';
+const url=process.env.PIPECAT_TEST_DATABASE_URL;
+test('durable claim is single-use, survives reconstruction, and closed sessions reject workers', {skip:!url}, async()=>{
+ const client=postgres(url!,{max:4});const db=drizzle(client);
+ try {
+  await client.unsafe(`CREATE TABLE users (id text PRIMARY KEY); INSERT INTO users VALUES ('fixture-user');`);
+  await client.unsafe(await readFile(new URL('./pipecat-session-schema.sql',import.meta.url),'utf8'));
+  const execute=(query:any)=>db.execute(query);
+  const secret='fixture-session-secret-at-least-32-bytes';
+  const store=new PipecatSessionStore(execute,secret,()=>1000);
+  const created=await store.create('fixture-user','ar','smallwebrtc');
+  const claims=await Promise.allSettled([store.claim(created.ticket),store.claim(created.ticket)]);
+  assert.equal(claims.filter(r=>r.status==='fulfilled').length,1);
+  const winner=claims.find(r=>r.status==='fulfilled') as PromiseFulfilledResult<any>;
+  const {workerToken}=winner.value;
+  assert.equal(winner.value.userId,'fixture-user');
+  const restarted=new PipecatSessionStore(execute,secret,()=>1001);
+  assert.equal((await restarted.authorizeWorker(created.sessionId,workerToken)).language,'ar');
+  await assert.rejects(restarted.authorizeWorker(created.sessionId,'wrong'));
+  await assert.rejects(restarted.close(created.sessionId,'different-user'));
+  const inbox=new PipecatEventInbox(execute,()=>1001);
+  const turn={eventId:'e1',turnId:'t1',role:'learner' as const,text:'مرحبا',occurredAt:new Date().toISOString(),interrupted:null};
+  const acks=await Promise.all([inbox.accept(created.sessionId,workerToken,turn),inbox.accept(created.sessionId,workerToken,turn)]);
+  assert.equal(acks[0].processingStatus,'pending');
+  const stored=await client`SELECT * FROM pipecat_events`;
+  assert.equal(stored.length,1);assert.equal(stored[0]!.user_id,'fixture-user');assert.equal(stored[0]!.language,'ar');
+  await assert.rejects(inbox.accept(created.sessionId,workerToken,{...turn,text:'changed'}));
+  await assert.rejects(inbox.accept(created.sessionId,'a'.repeat(64),{...turn,eventId:'e2'}));
+  await restarted.close(created.sessionId,'fixture-user');
+  await assert.rejects(inbox.accept(created.sessionId,workerToken,{...turn,eventId:'e2'}));
+  await assert.rejects(restarted.authorizeWorker(created.sessionId,workerToken));
+  await assert.rejects(restarted.claim(created.ticket));
+  const expired=await store.create('fixture-user','pt','smallwebrtc');
+  await assert.rejects(new PipecatSessionStore(execute,secret,()=>1060).claim(expired.ticket));
+ } finally { await client.end(); }
+});

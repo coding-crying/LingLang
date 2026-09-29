@@ -40,7 +40,11 @@ import { GemmaAudioLLM } from '../llm/gemma-audio-llm.js';
 import { ElevenLabsRealtimeSTT } from '../stt/elevenlabs-realtime.js';
 import { AudexSTT } from '../stt/audex-stt.js';
 import { AudexLLM } from '../llm/audex-llm.js';
+import { ByoTokenLLM } from '../llm/byo-token-llm.js';
 import { AudexTTS } from '../tts/audex-tts.js';
+import { OmniVoiceTTS } from '../tts/omnivoice.js';
+import * as elevenlabs from '@livekit/agents-plugin-elevenlabs';
+import type { ResolvedProviders } from '../lib/provider-config.js';
 
 // Lazy import for Google RealtimeModel — heavy, only needed in gemini mode
 let _googleRealtime: { RealtimeModel: any } | null = null;
@@ -106,6 +110,13 @@ export interface ServiceFactoryOptions {
    * Options: Puck, Charon, Kore, Fenrir, Aoede, Leda, Orus, Zephyr.
    */
   voice?: string;
+  /**
+   * 2026-09-02: per-user BYO provider config, resolved from the DB at
+   * dispatch time (see lib/provider-config.ts). When a component is
+   * present it overrides that component's env-var default; absent
+   * components keep today's behavior exactly.
+   */
+  providers?: ResolvedProviders;
 }
 
 export class ServiceFactory {
@@ -114,6 +125,7 @@ export class ServiceFactory {
   private googleApiKey?: string;
   private speechLanguage?: string;
   private voiceOverride?: string;
+  private providers?: ResolvedProviders;
 
   constructor(opts: ServiceFactoryOptions = {}) {
     this.mode = opts.mode || (process.env.SERVICE_MODE as ServiceMode) || 'local';
@@ -121,8 +133,31 @@ export class ServiceFactory {
     this.googleApiKey = opts.googleApiKey;
     this.speechLanguage = opts.speechLanguage;
     this.voiceOverride = opts.voice;
+    this.providers = opts.providers;
 
-    console.log(`[ServiceFactory] Mode: ${this.mode}, Language: ${this.targetLanguage}`);
+    // 2026-09-02: a user who opted into realtime (Gemini Live) and has a
+    // working Google key gets the session upgraded to the S2S monolith.
+    // BYO'd cascaded components are simply bypassed in that case — opting
+    // into realtime IS the choice to stop using them for this session.
+    if (this.providers?.realtimeEnabled && (opts.googleApiKey || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY)) {
+      console.log('[ServiceFactory] realtime.enabled -> upgrading to gemini RealtimeModel');
+      this.mode = 'gemini';
+    } else if (
+      this.mode === 'gemini' &&
+      this.providers && (this.providers.stt || this.providers.llm || this.providers.tts)
+    ) {
+      // Mirror case: dispatched as cloud (which maps to gemini realtime)
+      // but the user BYO'd at least one cascaded component and did NOT
+      // opt into realtime. The BYO branch in createLLM() would return a
+      // plain LLM while the worker (isGemini from getMode()) skips
+      // STT/TTS construction — silent-room material. Downgrade to the
+      // cascaded 'cloud' stack; BYO overrides win per component, env
+      // defaults fill the rest.
+      console.log('[ServiceFactory] BYO providers present without realtime opt-in -> staying cascaded (cloud)');
+      this.mode = 'cloud';
+    }
+
+    console.log(`[ServiceFactory] Mode: ${this.mode}, Language: ${this.targetLanguage}${this.providers ? ', BYO providers: ' + ['stt', 'llm', 'tts'].filter((c) => (this.providers as any)[c]).join('/') : ''}`);
   }
 
   /**
@@ -130,6 +165,35 @@ export class ServiceFactory {
    * Not needed in gemini mode — RealtimeModel handles it.
    */
   createSTT(): stt.STT {
+    // BYO first (2026-09-02): an explicit user endpoint beats any mode.
+    if (this.providers?.stt?.baseUrl || this.providers?.stt?.vendor === 'elevenlabs') {
+      const p = this.providers!.stt!;
+      const langConfig = getLanguageConfig(this.targetLanguage);
+      if (p.vendor === 'elevenlabs') {
+        // Streaming path: Scribe realtime WebSocket, model-overridable.
+        console.log(`[ServiceFactory] STT: BYO ElevenLabs realtime (${p.model || 'scribe_v2_realtime'})`);
+        return new ElevenLabsRealtimeSTT({
+          apiKey: p.apiKey,
+          model: p.model,
+          language: langConfig.stt.language,
+        });
+      }
+      console.log(`[ServiceFactory] STT: BYO ${p.model || 'whisper-1'} @ ${p.baseUrl}`);
+      return new openai.STT({
+        baseURL: p.baseUrl,
+        apiKey: p.apiKey || 'unused',
+        model: p.model || 'whisper-1',
+        language: langConfig.stt.language,
+        // 2026-09-02: useRealtime defaults to TRUE in the plugin, which
+        // dials ws://<baseUrl>/realtime on first listen. Local ASR servers
+        // (Qwen3-ASR et al.) speak HTTP /v1/audio/transcriptions only —
+        // the WS upgrade 403s and kills the whole session as an
+        // unrecoverable stt_error. Generic BYO endpoints get the buffered
+        // HTTP adapter; realtime stays an explicit opt-in.
+        useRealtime: false,
+      });
+    }
+
     if (this.mode === 'local-gemma-audio') {
       console.log(`[ServiceFactory] STT: Gemma 4 12B (Native Audio Pass-Through)`);
       return new GemmaAudioSTT();
@@ -185,6 +249,31 @@ export class ServiceFactory {
    * Otherwise returns a standard LLM.
    */
   async createLLM(): Promise<llm.LLM | llm.RealtimeModel> {
+    // BYO first (2026-09-02): any OpenAI-compatible chat endpoint. The
+    // openai plugin streams by default (stream: true in completion opts),
+    // so a BYO endpoint gets token streaming automatically where the
+    // server supports it; non-streaming servers just deliver one chunk.
+    //
+    // 2026-09-09: NOT in gemini mode. The realtime opt-in replaces
+    // STT+LLM+TTS with one RealtimeModel, so a BYO chat endpoint is
+    // meaningless there — but this branch used to run first, so a user with
+    // BYO llm + realtime.enabled got ByoTokenLLM back and the session ran
+    // cascaded against their (often local, often dead) endpoint. Live proof:
+    // `turnDetection is set to "realtime_llm", but the LLM is not a
+    // RealtimeModel` then `APIConnectionError` on the first turn, with the
+    // Gemini key sitting unused. Realtime wins; BYO llm is for cascaded
+    // modes only.
+    if (this.mode !== 'gemini' && this.providers?.llm?.baseUrl) {
+      const p = this.providers.llm;
+      console.log(`[ServiceFactory] LLM: BYO ${p.model || 'gpt-4o-mini'} @ ${p.baseUrl}`);
+      // ByoTokenLLM = openai.LLM + token-bus tap (fixes turnSeq=0 doubling bug)
+      return new ByoTokenLLM({
+        baseURL: p.baseUrl,
+        apiKey: p.apiKey || 'unused',
+        model: p.model || 'gpt-4o-mini',
+      });
+    }
+
     if (this.mode === 'local-gemma-audio') {
       const url = process.env.GEMMA_AUDIO_LLM_URL || process.env.LOCAL_LLM_URL || 'http://localhost:8093/v1';
       const model = process.env.GEMMA_AUDIO_LLM_MODEL || process.env.LOCAL_LLM_MODEL || 'gemma4-12b-it';
@@ -255,8 +344,10 @@ export class ServiceFactory {
         voice,
         language,
         modalities: [Modality.AUDIO],
-        inputAudioTranscription: { model: 'latest' },
-        outputAudioTranscription: { model: 'latest' },
+        // Gemini Live enables transcription with empty configuration objects.
+        // A `model` selector is not in its wire schema and closes setup with 1007.
+        inputAudioTranscription: {},
+        outputAudioTranscription: {},
       });
     }
 
@@ -280,6 +371,44 @@ export class ServiceFactory {
    * Not needed in gemini mode — RealtimeModel handles it.
    */
   async createTTS(): Promise<tts.TTS> {
+    // BYO first (2026-09-02). Vendor picks the adapter — and with it,
+    // whether audio streams: elevenlabs (WebSocket streaming, always) >
+    // omnivoice (our sentence-chunked /stream endpoint) > openai
+    // (request/response; fine for local servers that don't stream).
+    if (this.providers?.tts) {
+      const p = this.providers.tts;
+      const langConfig = getLanguageConfig(this.targetLanguage);
+      const voice = p.voice || resolveVoice(langConfig.tts.geminiVoice);
+      if (p.vendor === 'elevenlabs') {
+        console.log(`[ServiceFactory] TTS: BYO ElevenLabs (${p.model || 'default'}, voice ${voice})`);
+        return new elevenlabs.TTS({
+          apiKey: p.apiKey || process.env.ELEVENLABS_API_KEY || '',
+          voice: { id: voice, name: 'byo', category: 'premade' },
+          modelID: p.model,
+          language: this.targetLanguage,
+        });
+      }
+      if (p.vendor === 'omnivoice' || p.baseUrl) {
+        const baseURL = p.baseUrl || 'http://localhost:8882';
+        console.log(`[ServiceFactory] TTS: BYO OmniVoice-compatible @ ${baseURL} (voice ${p.voice || 'auto'})`);
+        return new OmniVoiceTTS({
+          baseURL,
+          voice: p.voice || langConfig.tts.omnivoiceVoice || 'auto',
+          speed: langConfig.tts.speed || 1.0,
+          language: langConfig.tts.omnivoiceLanguage || this.targetLanguage,
+        });
+      }
+      if (p.vendor === 'openai') {
+        console.log(`[ServiceFactory] TTS: BYO OpenAI-compatible (${p.model || 'tts-1'}) @ ${p.baseUrl}`);
+        return new openai.TTS({
+          baseURL: p.baseUrl,
+          apiKey: p.apiKey || 'unused',
+          model: p.model || 'tts-1',
+          voice: (p.voice || 'alloy') as any,
+        });
+      }
+    }
+
     if (this.mode === 'audex') {
       const baseURL = process.env.AUDEX_URL || 'http://127.0.0.1:7860';
       let sampleRate = 16000;

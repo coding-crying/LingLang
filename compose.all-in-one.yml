@@ -1,0 +1,30 @@
+# Experimental: build locally. No registry release exists yet.
+services:
+  linglang:
+    image: linglang:all-in-one-dev
+    build:
+      context: .
+      dockerfile: Dockerfile.all-in-one
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${LINGLANG_PORT:-3000}:3000"
+    volumes:
+      - linglang-data:/data
+    environment:
+      LINGLANG_PROVIDER_POLICY: ${LINGLANG_PROVIDER_POLICY:-user}
+      SERVICE_MODE: ${SERVICE_MODE:-gemini}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      DATABASE_URL: ${DATABASE_URL:-}
+      LINGLANG_LLM_URL: ${LINGLANG_LLM_URL:-}
+      LINGLANG_LLM_MODEL: ${LINGLANG_LLM_MODEL:-}
+      LINGLANG_LLM_API_KEY: ${LINGLANG_LLM_API_KEY:-}
+      LINGLANG_STT_URL: ${LINGLANG_STT_URL:-}
+      LINGLANG_STT_MODEL: ${LINGLANG_STT_MODEL:-}
+      LINGLANG_STT_API_KEY: ${LINGLANG_STT_API_KEY:-}
+      LINGLANG_TTS_URL: ${LINGLANG_TTS_URL:-}
+      LINGLANG_TTS_MODEL: ${LINGLANG_TTS_MODEL:-}
+      LINGLANG_TTS_API_KEY: ${LINGLANG_TTS_API_KEY:-}
+      LINGLANG_TTS_VOICE: ${LINGLANG_TTS_VOICE:-alloy}
+volumes:
+  linglang-data:

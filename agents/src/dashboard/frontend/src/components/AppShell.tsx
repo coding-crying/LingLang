@@ -10,29 +10,45 @@
  *
  * Every tab renders its own header content (VoiceTab: language/curriculum/
  * streak pills; LibraryTab/ProfileTab: their own `<h2>`), so AppShell
- * itself no longer mounts a generic `TopBar`. Sheet content beyond
- * `language` is still a placeholder.
+ * itself no longer mounts a generic `TopBar`.
  */
-
-import type { ReactElement } from 'react';
 import { Button, Typography } from '@heroui/react';
-import { AppStateProvider, useAppState } from '../state/AppState';
-import { useOnboarding } from '../hooks/useOnboarding';
-import TabBar from './TabBar';
-import Sheet from './Sheet';
+import { ChevronDown, Languages } from 'lucide-react';
+import { type ReactElement, useEffect } from 'react';
 import OnboardingGate from '../OnboardingGate';
-import VoiceTab from '../tabs/VoiceTab';
-import ProfileTab from '../tabs/ProfileTab';
-import LibraryTab from '../tabs/LibraryTab';
-import DebugTab from '../tabs/DebugTab';
-import LanguageSheet from '../sheets/LanguageSheet';
-import CurriculumSheet from '../sheets/CurriculumSheet';
-import ChunkBrowserSheet from '../sheets/ChunkBrowserSheet';
 import '../app.css';
+import '../shell.css';
+import { useOnboarding } from '../hooks/useOnboarding';
+import ChunkBrowserSheet from '../sheets/ChunkBrowserSheet';
+import CurriculumSheet from '../sheets/CurriculumSheet';
+import LanguageSheet from '../sheets/LanguageSheet';
+import WordDetailSheet from '../sheets/WordDetailSheet';
+import { AppStateProvider, useAppState } from '../state/AppState';
+import DebugTab from '../tabs/DebugTab';
+import LibraryTab from '../tabs/LibraryTab';
+import ProfileTab from '../tabs/ProfileTab';
+import VoiceTab from '../tabs/VoiceTab';
+import Sheet from './Sheet';
+import TabBar from './TabBar';
+import { LingLangBrand, ThemeToggle } from './TopBar';
 
 function AppShellInner({ onLogout }: { onLogout: () => void }) {
-  const { activeTab, activeSheet, closeSheet, setTab, openSheet, bumpContentVersion } = useAppState();
+  const {
+    activeTab,
+    activeSheet,
+    closeSheet,
+    setTab,
+    openSheet,
+    bumpContentVersion,
+    debugEnabled,
+  } = useAppState();
   const onboarding = useOnboarding();
+  const isAdmin = onboarding.userId === 'will';
+  const canShowDebug = isAdmin && debugEnabled;
+
+  useEffect(() => {
+    if (activeTab === 'debug' && !canShowDebug) setTab('voice');
+  }, [activeTab, canShowDebug, setTab]);
 
   if (!onboarding.checked) {
     return <div className="loading-wrap">Loading…</div>;
@@ -94,32 +110,64 @@ function AppShellInner({ onLogout }: { onLogout: () => void }) {
 
   // Admin-only debug surface. This is cosmetic gating — GET /api/runtime
   // enforces the same check server-side, so a forced tab shows nothing.
-  const isAdmin = onboarding.userId === 'will';
-
   let otherTabContent: ReactElement | null = null;
   switch (activeTab) {
     case 'library':
-      otherTabContent = <LibraryTab />;
+      otherTabContent = (
+        <LibraryTab userId={onboarding.userId} targetLang={onboarding.targetLang} />
+      );
       break;
     case 'profile':
       otherTabContent = <ProfileTab onLogout={onLogout} />;
       break;
     case 'debug':
-      otherTabContent = isAdmin ? <DebugTab /> : null;
+      otherTabContent = canShowDebug ? <DebugTab /> : null;
       break;
   }
 
   return (
-    <div className="app-shell">
-      {/* VoiceTab stays mounted across tab switches so its LiveKitRoom
-          connection (and useConversationStream transcript state) survives
-          navigating to Library/Profile and back — it used to unmount
-          entirely here, silently dropping any live voice session. */}
-      <div style={{ display: activeTab === 'voice' ? 'contents' : 'none' }}>
-        <VoiceTab userId={onboarding.userId} targetLang={onboarding.targetLang} />
-      </div>
-      {otherTabContent}
-      <TabBar showDebug={isAdmin} />
+    <div className="app-shell" data-active-tab={activeTab}>
+      <a className="shell-skip-link" href="#app-content">
+        Skip to content
+      </a>
+      <aside className="app-sidebar" aria-label="LingLang">
+        <LingLangBrand />
+        <TabBar showDebug={canShowDebug} layout="sidebar" />
+        <div className="sidebar-footer">
+          <Button
+            variant="ghost"
+            className="sidebar-language"
+            aria-label={`Change language, currently ${onboarding.languageName}`}
+            onPress={() => openSheet({ kind: 'language' })}
+          >
+            <Languages size={20} aria-hidden="true" />
+            <span className="sidebar-language-copy">
+              <span className="sidebar-caption">Learning</span>
+              <span className="sidebar-language-name">{onboarding.languageName}</span>
+            </span>
+            <ChevronDown size={16} aria-hidden="true" />
+          </Button>
+          <div className="sidebar-account">
+            <span className="sidebar-avatar" aria-hidden="true">
+              {onboarding.userId.slice(0, 1).toUpperCase()}
+            </span>
+            <span className="sidebar-user-name">{onboarding.userId}</span>
+            <ThemeToggle />
+          </div>
+        </div>
+      </aside>
+      <header className="mobile-app-header">
+        <LingLangBrand />
+        <ThemeToggle />
+      </header>
+      <main id="app-content" className="app-workspace" tabIndex={-1}>
+        {/* Keep the room and transcript alive when another tab is visible. */}
+        <div style={{ display: activeTab === 'voice' ? 'contents' : 'none' }}>
+          <VoiceTab userId={onboarding.userId} targetLang={onboarding.targetLang} />
+        </div>
+        {otherTabContent}
+      </main>
+      <TabBar showDebug={canShowDebug} />
       <Sheet>
         {activeSheet?.kind === 'language' ? (
           <LanguageSheet
@@ -136,7 +184,9 @@ function AppShellInner({ onLogout }: { onLogout: () => void }) {
               closeSheet();
               setTab('library');
             }}
-            onBrowseParts={(sourceId, sourceTitle) => openSheet({ kind: 'chunkBrowser', sourceId, sourceTitle })}
+            onBrowseParts={(sourceId, sourceTitle) =>
+              openSheet({ kind: 'chunkBrowser', sourceId, sourceTitle })
+            }
           />
         ) : activeSheet?.kind === 'chunkBrowser' ? (
           <ChunkBrowserSheet
@@ -146,6 +196,12 @@ function AppShellInner({ onLogout }: { onLogout: () => void }) {
               bumpContentVersion();
               closeSheet();
             }}
+          />
+        ) : activeSheet?.kind === 'wordDetail' ? (
+          <WordDetailSheet
+            wordId={activeSheet.wordId}
+            targetLang={onboarding.targetLang}
+            onClose={closeSheet}
           />
         ) : (
           activeSheet && <div>Sheet: {activeSheet.kind}</div>
